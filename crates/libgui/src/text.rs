@@ -138,8 +138,10 @@ impl Fonts {
     /// crisp instead of being a scaled-up 1x bitmap.
     ///
     /// Quantised to quarter steps: a continuous zoom would otherwise rasterise
-    /// a new size every frame and thrash the atlas. It does not change what
-    /// [`Fonts::measure`] reports, so layout is identical at any zoom.
+    /// a new size every frame and thrash the atlas. Glyphs are rasterised at the
+    /// rounded pixel size but *spaced* at the exact requested size (see
+    /// [`Fonts::fit`]), so [`Fonts::measure`] and the drawn width are the same at
+    /// any zoom or fractional DPI, and layout does not change with zoom.
     pub(crate) fn set_zoom(&mut self, zoom: f32) {
         let q = if zoom >= 1.0 { (zoom * 4.0).round() / 4.0 } else { (zoom * 16.0).round() / 16.0 };
         self.zoom = q.clamp(0.05, 16.0);
@@ -153,6 +155,14 @@ impl Fonts {
     /// Physical pixels per logical pixel for the text being drawn now.
     fn text_scale(&self) -> f32 {
         self.scale * self.zoom
+    }
+
+    /// Wanted physical size over the rasterised (rounded) size, ≈1. Advances and
+    /// vertical metrics of the `px` raster are multiplied by this so text lays
+    /// out at exactly `size`, whatever the rounding. Bitmaps stay unscaled, so
+    /// glyphs remain pixel-crisp.
+    fn fit(&self, size: f32, px: f32) -> f32 {
+        size * self.text_scale() / px
     }
 
     fn line(&self, font: FontId, px: f32) -> (f32, f32) {
@@ -199,8 +209,9 @@ impl Fonts {
         let px = self.px(size);
         let w = self.width_px(font, px, text);
         let (asc, desc) = self.line(font, px);
-        let s = self.text_scale();
-        Vec2::new((w / s).ceil(), ((asc - desc) / s).ceil())
+        // Logical px per raster px: exact `size`, independent of rounding and zoom.
+        let k = size / px;
+        Vec2::new((w * k).ceil(), ((asc - desc) * k).ceil())
     }
 
     /// Caret x positions (logical px from the text start) before each char and
@@ -213,6 +224,7 @@ impl Fonts {
     /// sits on the advance boundary.)
     pub fn carets(&self, font: FontId, size: f32, text: &str) -> Vec<f32> {
         let px = self.px(size);
+        let r = self.fit(size, px);
         let f = &self.fonts[font.0 as usize];
         let mut out = Vec::with_capacity(text.chars().count() + 1);
         let mut x = 0.0;
@@ -223,7 +235,7 @@ impl Fonts {
                 x += f.horizontal_kern(p, ch, px).unwrap_or(0.0);
             }
             x += f.metrics(ch, px).advance_width;
-            out.push(x.round() / self.text_scale());
+            out.push((x * r).round() / self.text_scale());
             prev = Some(ch);
         }
         out
@@ -231,8 +243,9 @@ impl Fonts {
 
     /// Height of one line of text in logical px.
     pub fn line_height(&self, font: FontId, size: f32) -> f32 {
-        let (asc, desc) = self.line(font, self.px(size));
-        ((asc - desc) / self.text_scale()).ceil()
+        let px = self.px(size);
+        let (asc, desc) = self.line(font, px);
+        ((asc - desc) * size / px).ceil()
     }
 
     fn glyph(&mut self, font: FontId, ch: char, px: f32) -> Glyph {
@@ -301,9 +314,13 @@ impl Fonts {
     pub fn draw(&mut self, dl: &mut DrawList, font: FontId, size: f32, pos: Vec2, color: Color, text: &str) {
         let s = self.text_scale();
         let px = self.px(size);
+        let r = self.fit(size, px);
         let (asc, _) = self.line(font, px);
-        let mut x = (pos.x * s).round();
-        let baseline = (pos.y * s + asc).round();
+        let x0 = (pos.x * s).round();
+        // Pen advances in raster px, placed at the exact size (`r`); glyphs are
+        // drawn at their native raster size and snapped, so they stay crisp.
+        let mut x = 0.0;
+        let baseline = (pos.y * s + asc * r).round();
         let mut prev = None;
         for ch in text.chars() {
             if let Some(p) = prev {
@@ -311,7 +328,7 @@ impl Fonts {
             }
             let g = self.glyph(font, ch, px);
             if g.w > 0.0 {
-                let gx = x.round() + g.xmin;
+                let gx = (x0 + x * r).round() + g.xmin;
                 let gy = baseline - (g.ymin + g.h);
                 dl.glyph(Rect::new(gx / s, gy / s, g.w / s, g.h / s), g.uv, color);
             }
@@ -324,5 +341,53 @@ impl Fonts {
 impl Default for Fonts {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fonts(scale: f32) -> Fonts {
+        let mut f = Fonts::new();
+        f.add_font(include_bytes!("../../../assets/Inter.ttf")).unwrap();
+        f.set_scale(scale);
+        f
+    }
+
+    /// Text is laid out at zoom 1 but drawn inside a zoomed canvas at a rounded
+    /// raster size. Width must not depend on that rounding, or zoomed text
+    /// overflows (or falls short of) the box it was laid out in.
+    #[test]
+    fn zoom_and_fractional_dpi_do_not_change_text_width() {
+        let label = "Amount · Enabled · 0.50 Wavy";
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let mut f = fonts(scale);
+            let font = FontId(0);
+            for size in [10.5, 11.0, 13.0, 16.0] {
+                f.set_zoom(1.0);
+                let laid_out = f.measure(font, size, label);
+                for zoom in [0.125, 0.3125, 0.5, 0.75, 1.25, 1.75, 2.5, 4.0] {
+                    f.set_zoom(zoom);
+                    let m = f.measure(font, size, label);
+                    assert!((m.x - laid_out.x).abs() <= 1.0, "scale {scale} size {size} zoom {zoom}: {} vs {}", m.x, laid_out.x);
+                    assert!((m.y - laid_out.y).abs() <= 1.0, "height at scale {scale} size {size} zoom {zoom}");
+
+                    // The glyphs actually drawn stay within the laid-out width.
+                    let mut dl = DrawList::default();
+                    dl.clear(Rect::new(0.0, 0.0, 10_000.0, 10_000.0));
+                    f.draw(&mut dl, font, size, Vec2::ZERO, Color::WHITE, label);
+                    let right = dl.instances.iter().map(|i| i.rect[0] + i.rect[2]).fold(0.0f32, f32::max);
+                    // Allowed: two *screen* pixels (pixel snapping plus a glyph's
+                    // bitmap overhanging its advance), whatever the zoom.
+                    let slack = 1.0 + 2.0 / (scale * f.zoom);
+                    assert!(
+                        right <= laid_out.x + slack,
+                        "scale {scale} size {size} zoom {zoom}: drawn {right} > laid out {} (+{slack})",
+                        laid_out.x
+                    );
+                }
+            }
+        }
     }
 }

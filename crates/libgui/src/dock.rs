@@ -191,7 +191,7 @@ impl<T> DockNode<T> {
 
     fn for_each_tab<'a>(&'a self, f: &mut dyn FnMut(&'a T)) {
         match self {
-            DockNode::Leaf(l) => l.tabs.iter().for_each(|t| f(t)),
+            DockNode::Leaf(l) => l.tabs.iter().for_each(&mut *f),
             DockNode::Split(s) => {
                 s.first.for_each_tab(f);
                 s.second.for_each_tab(f);
@@ -1085,8 +1085,9 @@ fn show_leaf<V: TabViewer>(ui: &mut Ui, leaf: &mut Leaf<V::Tab>, cx: &mut ShowCt
             .shrink();
         let bar_frame = Frame { fill: ts.bar_fill, ..Frame::none() };
         ui.container_id(bar_id, bar_layout, bar_frame, |ui| {
-            for i in 0..leaf.tabs.len() {
-                let pressed = tab(ui, leaf, i, tab_ids[i], focused, cx);
+            // One id per tab, built above from the same `leaf.tabs`.
+            for (i, &tab_id) in tab_ids.iter().enumerate() {
+                let pressed = tab(ui, leaf, i, tab_id, focused, cx);
                 if pressed {
                     leaf.active = i;
                 }

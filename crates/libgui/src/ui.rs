@@ -5,6 +5,9 @@ use crate::input::UiEvent;
 use crate::input_state::InputState;
 use crate::{Align, Atlas, Color, Cursor, DrawList, FontError, FontId, Fonts, FrameInfo, FrameInput, Gesture, Id, InputEvent, Insets, Key, Layout, Painter, PlatformOutput, PointerButton, PointerKind, Rect, Shortcut, Size, Theme, Transform, Vec2};
 use std::hash::Hash;
+
+/// Paint callback run after the tree (drag previews, tooltips).
+type OverlayFn = Box<dyn FnOnce(&mut Painter)>;
 use std::ops::Range;
 
 /// Result of an interactive widget for this frame.
@@ -348,7 +351,7 @@ pub struct Ui {
     scroll_target: Option<Id>,
     /// Hit rects that win over normal widgets (splitters).
     top_hits: Vec<(Id, Rect)>,
-    overlays: Vec<Box<dyn FnOnce(&mut Painter)>>,
+    overlays: Vec<OverlayFn>,
     // Touch
     /// Finger travel (logical px) before a tap turns into a scroll.
     pub touch_slop: f32,
@@ -1605,6 +1608,16 @@ impl Ui {
         if bg.hovered && self.input.buttons_down[PointerButton::Middle.index()] {
             st.pan += self.mouse_delta;
         }
+        // Touch: two fingers anywhere over the canvas (even on its widgets) pan
+        // and pinch-zoom around their midpoint, so what is under the fingers
+        // stays under them. The gesture is in window space, like `area`.
+        let g = self.gesture;
+        if g.active && area.contains(g.center) {
+            st.pan += g.pan;
+            if g.zoom != 1.0 {
+                st.zoom_at(g.center, origin, g.zoom);
+            }
+        }
         st.zoom = st.zoom.clamp(st.min_zoom, st.max_zoom);
 
         let t = Transform::new(origin + st.pan, st.zoom);
@@ -2700,6 +2713,37 @@ mod tests {
         let (a, _) = build_touch(&mut ui, touch(&[]), &mut v);
         let (b, _) = build_touch(&mut ui, touch(&[]), &mut v);
         assert_eq!(a[0].rect.y, b[0].rect.y, "fling settles");
+    }
+
+    /// A canvas on a tablet: two fingers pinch-zoom around their midpoint and
+    /// pan, and the canvas point under the midpoint stays under it.
+    #[test]
+    fn two_fingers_pinch_zoom_and_pan_a_canvas() {
+        let mut ui = ui();
+        let mut st = CanvasState::default();
+        let frame = |ui: &mut Ui, st: &mut CanvasState, fingers: Vec<Vec2>| {
+            push_fingers(ui, &fingers);
+            ui.begin_frame(FrameInfo::default());
+            ui.canvas("c", st, |_, _| {});
+            let _ = ui.end_frame();
+        };
+        frame(&mut ui, &mut st, vec![]);
+        frame(&mut ui, &mut st, vec![]);
+        let mid = Vec2::new(300.0, 200.0);
+        let under = |st: &CanvasState| Vec2::new((mid.x - st.pan.x) / st.zoom, (mid.y - st.pan.y) / st.zoom);
+        let before = under(&st);
+        frame(&mut ui, &mut st, touch(&[(280.0, 200.0)]));
+        frame(&mut ui, &mut st, touch(&[(280.0, 200.0), (320.0, 200.0)]));
+        frame(&mut ui, &mut st, touch(&[(260.0, 200.0), (340.0, 200.0)]));
+        assert!((st.zoom - 2.0).abs() < 1e-3, "spreading 40 -> 80 px doubles the zoom: {}", st.zoom);
+        let after = under(&st);
+        assert!((after.x - before.x).abs() < 1e-3 && (after.y - before.y).abs() < 1e-3, "{before:?} vs {after:?}");
+
+        // Moving both fingers pans by the same screen distance.
+        let pan = st.pan;
+        frame(&mut ui, &mut st, touch(&[(270.0, 230.0), (350.0, 230.0)]));
+        assert_eq!(st.pan - pan, Vec2::new(10.0, 30.0));
+        assert!((st.zoom - 2.0).abs() < 1e-3, "a parallel move does not zoom");
     }
 
     #[test]

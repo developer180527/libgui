@@ -130,7 +130,7 @@ impl InputState {
                                 f.lifted = true;
                             }
                             // Already seen by a frame: release now; else after one frame.
-                            self.fingers.retain(|f| !(f.lifted && !f.fresh));
+                            self.fingers.retain(|f| !f.lifted || f.fresh);
                         }
                         TouchPhase::Cancel => self.fingers.retain(|f| f.id != id),
                     }

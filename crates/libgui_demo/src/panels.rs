@@ -466,12 +466,21 @@ impl Panels<'_> {
 
             // Wires, drawn under the nodes. Ports sit on the node edges, so
             // the curve is in canvas coordinates like everything else.
-            let size = Vec2::new(190.0, 112.0);
+            // Title bar follows the font, so it grows with density. A node's
+            // height is its title plus whatever its body laid out to last frame,
+            // so it fits any theme, density or widget mix without tuning.
+            let width = 190.0;
+            let header = (t.metrics.font_size * 2.0).round();
+            let body_ids: Vec<libgui::Id> = (0..nodes.len()).map(|i| ui.make_id(("node_body", i))).collect();
+            let heights: Vec<f32> = body_ids
+                .iter()
+                .map(|&id| header + ui.rect_of(id).map_or(t.metrics.control_height * 3.0, |r| r.h))
+                .collect();
             let links: Vec<(Vec2, Vec2)> = (0..nodes.len().saturating_sub(1))
                 .map(|i| {
                     let a = nodes[i].pos;
                     let b = nodes[i + 1].pos;
-                    (Vec2::new(a.x + size.x, a.y + 26.0), Vec2::new(b.x, b.y + 26.0))
+                    (Vec2::new(a.x + width, a.y + header), Vec2::new(b.x, b.y + header))
                 })
                 .collect();
             let accent = t.palette.accent;
@@ -487,7 +496,7 @@ impl Panels<'_> {
             });
 
             for (i, node) in nodes.iter_mut().enumerate() {
-                let rect = Rect::new(node.pos.x, node.pos.y, size.x, size.y);
+                let rect = Rect::new(node.pos.x, node.pos.y, width, heights[i]);
                 // Skip nodes that cannot be seen at all.
                 if rect.intersect(&vis).is_none() {
                     continue;
@@ -516,7 +525,7 @@ impl Panels<'_> {
                     let size = t.metrics.font_size;
                     ui.add_leaf(
                         node_id.with("bar"),
-                        libgui::Layout::leaf(Size::Grow(1.0), Size::Fixed(26.0)),
+                        libgui::Layout::leaf(Size::Grow(1.0), Size::Fixed(header)),
                         Vec2::ZERO,
                         true,
                         move |p, r| {
@@ -524,8 +533,11 @@ impl Panels<'_> {
                             p.text_left(r.shrink(10.0, 0.0, 10.0, 0.0), size, fg, &title);
                         },
                     );
-                    ui.container(
-                        libgui::Layout::column().padding(Insets::all(10.0)).gap(6.0),
+                    // Fit height: its laid-out rect is the content's height,
+                    // which sizes the node next frame.
+                    ui.container_id(
+                        body_ids[i],
+                        libgui::Layout::column().height(Size::Fit).padding(Insets::all(10.0)).gap(6.0),
                         libgui::Frame::none(),
                         |ui| {
                             ui.slider("Amount", &mut node.amount, 0.0, 1.0);
