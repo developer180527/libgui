@@ -275,6 +275,10 @@ impl Panels<'_> {
             p.text(Vec2::new(r.x + 14.0, r.bottom() - 26.0), small, t.palette.text_faint, "Drag to orbit  ·  Scroll or pinch to zoom");
         });
         d.viewport_px = ((resp.rect.w * self.scale).round() as u32, (resp.rect.h * self.scale).round() as u32);
+        // Mouse orbit is endless: lock the pointer and drive it from raw deltas.
+        if resp.active && ui.input().pointer_kind == libgui::PointerKind::Mouse {
+            ui.request_pointer_lock();
+        }
         d.yaw += resp.drag_delta.x * 0.008;
         d.pitch = (d.pitch + resp.drag_delta.y * 0.006).clamp(-0.2, 1.3);
         d.distance = (d.distance - resp.scroll.y * 0.02).clamp(3.0, 20.0);

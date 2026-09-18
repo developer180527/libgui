@@ -772,6 +772,7 @@ dependencies = [
  "bytemuck",
  "libgui",
  "libgui_wgpu",
+ "libgui_winit",
  "pollster",
  "wgpu",
  "winit",
@@ -792,6 +793,14 @@ dependencies = [
  "libgui",
  "libgui_shaders",
  "wgpu",
+]
+
+[[package]]
+name = "libgui_winit"
+version = "0.1.0"
+dependencies = [
+ "libgui",
+ "winit",
 ]
 
 [[package]]

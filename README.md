@@ -224,6 +224,32 @@ xcrun simctl launch booted com.libgui.demo
   end between two frames down for one frame, and call `set_ime_allowed(ui.wants_keyboard())` to show
   the on-screen keyboard (winit maps its Return to a newline insert: treat it as Enter).
 
+## Hosts and input providers
+
+libgui talks to a host through two small types, so any windowing layer or input device can drive it:
+
+```rust
+ui.push(InputEvent::PointerMoved { pos });                      // as events arrive, any source
+ui.push(InputEvent::Key { key: Key::from_hid_usage(u).unwrap(), pressed, repeat: false });
+ui.begin_frame(FrameInfo { screen_size, scale, dt });
+/* build UI */
+let out = ui.end_frame();          // draw data for your Backend + out.platform:
+// cursor, copied_text, paste_requested, text_input (show keyboard/IME at caret),
+// wants_pointer / wants_keyboard, pointer_lock, repaint_after (None = sleep until input)
+```
+
+- **Events:** pointer position and raw `PointerDelta` (unaccelerated), five buttons, wheel (pixel/line/page),
+  touch, physical `Key`s (US-layout names, like HID usages) plus separate `Text`, modifiers, clipboard, focus loss.
+- **Timing lives in the core:** a press and release inside one frame still clicks, fingers that tap between
+  frames still tap, modifiers are derived from modifier keys when a host only sends keys (raw HID),
+  Cmd/Ctrl+C/X/V become copy/cut/paste requests, and chords are never typed as text.
+- **Raw HID / relative input:** `Key::from_hid_usage` maps USB HID keyboard usages; `VirtualCursor` turns raw
+  deltas into a cursor with your own sensitivity; a widget calling `ui.request_pointer_lock()` (the demo's
+  viewport while orbiting) makes drags use raw deltas and asks the host to hide and lock the cursor, so
+  an orbit never stops at the screen edge. Keep text input on the OS: HID gives keys, not characters.
+- **`libgui_winit`:** the winit adapter (`push_window_event`, `push_device_event`, `PlatformState::apply`)
+  is ~250 lines and the template for other hosts (SDL, a C++ engine loop).
+
 ## Integrating with your engine
 
 - Render your scene to a texture, `renderer.register_texture(&view)` (wgpu backend), then show it with

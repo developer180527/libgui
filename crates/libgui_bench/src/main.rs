@@ -200,7 +200,7 @@ struct Sample {
 }
 
 fn frame(ui: &mut Ui, work: Work, n: usize, labels: &[String]) -> Sample {
-    let input = Input { screen_size: Vec2::new(1600.0, 1200.0), dt: 1.0 / 60.0, ..Input::default() };
+    let input = FrameInfo { screen_size: Vec2::new(1600.0, 1200.0), dt: 1.0 / 60.0, ..FrameInfo::default() };
     counter::reset();
     let t0 = Instant::now();
     ui.begin_frame(input);

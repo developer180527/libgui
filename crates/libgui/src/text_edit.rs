@@ -3,7 +3,8 @@
 //! kept separate from the widget so it can be unit-tested and reused for a
 //! future multi-line editor.
 
-use crate::{Color, Cursor, Event, Insets, Key, Layout, Modifiers, Rect, Response, Size, Ui, Vec2};
+use crate::input::UiEvent as Event;
+use crate::{Color, Cursor, Insets, Key, Layout, Modifiers, Rect, Response, Size, Ui, Vec2};
 
 /// Retained per-field state. Indices are in chars, not bytes.
 #[derive(Clone, Copy, Debug, Default)]
@@ -334,10 +335,10 @@ mod tests {
         (text, c, a)
     }
 
-    const NONE: Modifiers = Modifiers { shift: false, command: false, word: false };
-    const SHIFT: Modifiers = Modifiers { shift: true, command: false, word: false };
-    const WORD: Modifiers = Modifiers { shift: false, command: false, word: true };
-    const CMD: Modifiers = Modifiers { shift: false, command: true, word: false };
+    const NONE: Modifiers = Modifiers { shift: false, ctrl: false, alt: false, logo: false, command: false, word: false };
+    const SHIFT: Modifiers = Modifiers { shift: true, ..NONE };
+    const WORD: Modifiers = Modifiers { word: true, ..NONE };
+    const CMD: Modifiers = Modifiers { command: true, ..NONE };
 
     #[test]
     fn backspace_and_delete() {
@@ -359,7 +360,7 @@ mod tests {
     #[test]
     fn selection_replace_and_unicode() {
         // Select "wörld" with shift+word-left, then type over it.
-        let (mut text, cursor, anchor) = run(edit("héllo wörld", 11), &[(Key::ArrowLeft, Modifiers { shift: true, word: true, command: false })]);
+        let (mut text, cursor, anchor) = run(edit("héllo wörld", 11), &[(Key::ArrowLeft, Modifiers { shift: true, word: true, ..NONE })]);
         assert_eq!((cursor, anchor), (6, 11));
         let mut e = Edit { text: &mut text, cursor, anchor };
         assert_eq!(e.selected_text(), "wörld");
@@ -378,47 +379,55 @@ mod tests {
     /// Drives the real widget through `Ui` with host-style events.
     #[test]
     fn ui_focus_typing_clipboard_and_tab() {
-        use crate::{Input, Theme};
+        use crate::{FrameInfo, InputEvent as IE, PlatformOutput, PointerButton, Theme};
         let mut ui = Ui::new(Theme::dark(), include_bytes!("../../../assets/Inter.ttf")).unwrap();
+        ui.set_mac_shortcuts(true);
         let (mut a, mut b) = (String::new(), String::from("second"));
-        let mut frame = |ui: &mut Ui, input: Input| -> (TextResponse, TextResponse) {
-            ui.begin_frame(input);
+        let mut frame = |ui: &mut Ui, events: Vec<IE>| -> (TextResponse, TextResponse, PlatformOutput) {
+            for e in events {
+                ui.push(e);
+            }
+            ui.begin_frame(FrameInfo::default());
             let ra = ui.text_input("a", &mut a, "type here");
             let rb = ui.text_input("b", &mut b, "");
-            let _ = ui.end_frame();
-            (ra, rb)
+            let out = ui.end_frame().platform;
+            (ra, rb, out)
         };
-        let base = Input { mouse_inside: true, ..Input::default() };
-        frame(&mut ui, base.clone()); // layout pass so rects exist
+        let key = |key: Key, pressed: bool| IE::Key { key, pressed, repeat: false };
+        let at = Vec2::new(40.0, 15.0);
+        frame(&mut ui, vec![IE::PointerMoved { pos: at }]); // layout pass so rects exist
 
-        // Click field A (first row, 30px tall) to focus it, then type.
-        let mut click = base.clone();
-        click.mouse_pos = Vec2::new(40.0, 15.0);
-        click.mouse_down = true;
-        let (ra, _) = frame(&mut ui, click.clone());
-        assert!(ra.focused);
-        let mut up = click.clone();
-        up.mouse_down = false;
-        up.events = vec![Event::Text("hello libgui".into())];
-        let (ra, _) = frame(&mut ui, up.clone());
+        // Click field A (a press and release inside one frame still counts) and type.
+        let click = vec![
+            IE::PointerButton { button: PointerButton::Primary, pressed: true },
+            IE::PointerButton { button: PointerButton::Primary, pressed: false },
+        ];
+        let (ra, _, out) = frame(&mut ui, click);
+        assert!(ra.focused && out.wants_keyboard && out.text_input.is_some());
+        let (ra, _, _) = frame(&mut ui, vec![IE::Text("hello libgui".into())]);
         assert!(ra.changed);
 
-        // Select all + cut goes to the clipboard.
-        up.events = vec![Event::Key(Key::A, CMD), Event::Cut];
-        frame(&mut ui, up.clone());
-        assert_eq!(ui.take_copied().as_deref(), Some("hello libgui"));
+        // Cmd+A, Cmd+X from physical keys: the cut text is handed to the host.
+        let (_, _, out) = frame(
+            &mut ui,
+            vec![key(Key::SuperLeft, true), key(Key::A, true), key(Key::A, false), key(Key::X, true), key(Key::X, false)],
+        );
+        assert_eq!(out.copied_text.as_deref(), Some("hello libgui"));
 
-        // Paste back, then Tab moves focus to B.
-        up.events = vec![Event::Paste("pasted".into()), Event::Key(Key::Tab, NONE)];
-        frame(&mut ui, up.clone());
-        up.events.clear();
-        let (ra, rb) = frame(&mut ui, up.clone());
+        // Cmd+V asks the host for the clipboard; the host answers with Paste.
+        let (_, _, out) = frame(&mut ui, vec![key(Key::V, true), key(Key::V, false), key(Key::SuperLeft, false)]);
+        assert!(out.paste_requested);
+        frame(&mut ui, vec![IE::Paste("pasted".into())]);
+
+        // Text typed while Cmd is held is a shortcut, not input.
+        frame(&mut ui, vec![key(Key::SuperLeft, true), IE::Text("s".into()), key(Key::SuperLeft, false)]);
+
+        // Tab moves focus to B; Enter submits and releases focus.
+        frame(&mut ui, vec![key(Key::Tab, true)]);
+        let (ra, rb, _) = frame(&mut ui, vec![key(Key::Tab, false)]);
         assert!(!ra.focused && rb.focused);
-
-        // Enter submits and releases focus.
-        up.events = vec![Event::Key(Key::Enter, NONE)];
-        let (_, rb) = frame(&mut ui, up.clone());
-        assert!(rb.submitted && !ui.wants_keyboard());
+        let (_, rb, out) = frame(&mut ui, vec![key(Key::Enter, true)]);
+        assert!(rb.submitted && !out.wants_keyboard);
         drop(frame);
         assert_eq!(a, "pasted");
     }

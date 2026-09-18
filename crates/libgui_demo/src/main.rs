@@ -5,7 +5,10 @@
 mod panels;
 mod scene;
 
-use libgui::{Backend, Color, Cursor, Density, DockState, Event, FloatingMode, Frame, Input, Insets, Key, Layout, Modifiers, PointerKind, Size, SurfaceId, TextureId, Theme, ThemeWatcher, Touch, Ui, Vec2};
+use libgui::{
+    Backend, Color, Density, DockState, FloatingMode, FrameInfo, Frame, InputEvent, Insets, Layout, PointerButton, Size, SurfaceId,
+    TextureId, Theme, ThemeWatcher, Ui, Vec2,
+};
 use panels::{default_layout, Demo, Panels, Tab, THEMES};
 use scene::{Scene, SceneParams};
 use std::collections::HashMap;
@@ -13,10 +16,10 @@ use std::sync::Arc;
 use std::time::Instant;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
-use winit::event::{ElementState, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent};
+use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key as WKey, NamedKey};
-use winit::window::{CursorIcon, Window, WindowId};
+use winit::window::{Window, WindowId};
 
 const FONT: &[u8] = include_bytes!("../../../assets/Inter.ttf");
 const IOS: bool = cfg!(target_os = "ios");
@@ -109,29 +112,14 @@ struct Win {
     config: wgpu::SurfaceConfiguration,
     renderer: libgui_wgpu::Renderer,
     ui: Ui,
-    input: Input,
-    cursor: Cursor,
+    /// Applies the UI's cursor / pointer-lock / keyboard requests to the window.
+    platform: libgui_winit::PlatformState,
     dock_id: SurfaceId,
     last: Instant,
     visible: bool,
     title: String,
-    /// Fingers on this window. A touch that starts and ends between two frames
-    /// is kept for one frame (`lifted`) so quick taps are never lost.
-    touches: Vec<Finger>,
-    /// Same for a mouse click shorter than a frame.
-    release_after_frame: bool,
-    pressed_since_frame: bool,
-    /// On-screen keyboard currently requested.
-    keyboard: bool,
-}
-
-struct Finger {
-    id: u64,
-    pos: Vec2,
-    /// Not yet seen by a frame.
-    fresh: bool,
-    /// Ended, remove after the next frame.
-    lifted: bool,
+    /// Fingers down (id, logical pos): the dock follows the first one.
+    fingers: Vec<(u64, Vec2)>,
 }
 
 struct App {
@@ -236,16 +224,12 @@ impl App {
                 config,
                 renderer,
                 ui: Ui::new(libgui::Theme::dark(), FONT).expect("bundled font"),
-                input: Input::default(),
-                cursor: Cursor::Default,
+                platform: libgui_winit::PlatformState::default(),
                 dock_id,
                 last: Instant::now(),
                 visible: true,
                 title: title.to_string(),
-                touches: Vec::new(),
-                release_after_frame: false,
-                pressed_since_frame: false,
-                keyboard: false,
+                fingers: Vec::new(),
             },
         );
         id
@@ -401,9 +385,7 @@ impl App {
         let dt = (now - w.last).as_secs_f32().min(0.1);
         w.last = now;
         let scale = w.window.scale_factor() as f32;
-        w.input.dt = dt;
-        w.input.scale = scale;
-        w.input.screen_size = Vec2::new(w.config.width as f32 / scale, w.config.height as f32 / scale);
+        let info = FrameInfo { screen_size: Vec2::new(w.config.width as f32 / scale, w.config.height as f32 / scale), scale, dt };
 
         if main {
             let d = &mut self.demo;
@@ -420,20 +402,7 @@ impl App {
         if w.ui.theme != self.theme {
             w.ui.theme = self.theme.clone();
         }
-        if w.input.pointer_kind == PointerKind::Touch {
-            w.input.touches = w.touches.iter().map(|f| Touch { id: f.id, pos: f.pos }).collect();
-        }
-        let input = w.input.clone();
-        w.input.scroll = Vec2::ZERO;
-        w.input.events.clear();
-        // Deferred releases: the frame above saw the press; release on the next one.
-        w.touches.retain(|f| !f.lifted);
-        w.touches.iter_mut().for_each(|f| f.fresh = false);
-        w.pressed_since_frame = false;
-        if std::mem::take(&mut w.release_after_frame) {
-            w.input.mouse_down = false;
-        }
-        w.ui.begin_frame(input);
+        w.ui.begin_frame(info);
         {
             let ui = &mut w.ui;
             let dock = &mut self.dock;
@@ -453,20 +422,8 @@ impl App {
                 }
             });
         }
-        if w.ui.cursor != w.cursor {
-            w.cursor = w.ui.cursor;
-            w.window.set_cursor(match w.cursor {
-                Cursor::Default => CursorIcon::Default,
-                Cursor::Pointer => CursorIcon::Pointer,
-                Cursor::ResizeHorizontal => CursorIcon::EwResize,
-                Cursor::ResizeVertical => CursorIcon::NsResize,
-                Cursor::ResizeDiagonal => CursorIcon::NwseResize,
-                Cursor::Grab => CursorIcon::Grab,
-                Cursor::Grabbing => CursorIcon::Grabbing,
-                Cursor::Text => CursorIcon::Text,
-            });
-        }
         let out = w.ui.end_frame();
+        let platform = out.platform.clone();
         if main {
             self.demo.ui_instances = out.draw.instances.len();
             self.demo.ui_batches = out.draw.batches.len();
@@ -527,71 +484,17 @@ impl App {
             g.queue.submit([encoder.finish()]);
         }
 
-        if let Some(text) = w.ui.take_copied() {
+        // Host side of the UI's requests: cursor, pointer lock, keyboard, clipboard.
+        w.platform.apply(&w.window, &platform);
+        if let Some(text) = platform.copied_text {
             self.clipboard.set(text);
         }
-        // Touch devices: show the on-screen keyboard while a text field has focus.
-        if IOS && w.ui.wants_keyboard() != w.keyboard {
-            w.keyboard = w.ui.wants_keyboard();
-            w.window.set_ime_allowed(w.keyboard);
+        if platform.paste_requested {
+            if let Some(text) = self.clipboard.get() {
+                w.ui.push(InputEvent::Paste(text));
+            }
         }
         self.wins.insert(wid, w);
-    }
-
-    /// Translate a winit key press into libgui events for window `wid`.
-    fn key_event(&mut self, wid: WindowId, event: &winit::event::KeyEvent) {
-        if event.state != ElementState::Pressed {
-            return;
-        }
-        let Some(w) = self.wins.get_mut(&wid) else { return };
-        let m = w.input.modifiers;
-        let events = &mut w.input.events;
-        let key = match &event.logical_key {
-            WKey::Named(n) => match n {
-                NamedKey::Backspace => Some(Key::Backspace),
-                NamedKey::Delete => Some(Key::Delete),
-                NamedKey::ArrowLeft => Some(Key::ArrowLeft),
-                NamedKey::ArrowRight => Some(Key::ArrowRight),
-                NamedKey::ArrowUp => Some(Key::ArrowUp),
-                NamedKey::ArrowDown => Some(Key::ArrowDown),
-                NamedKey::Home => Some(Key::Home),
-                NamedKey::End => Some(Key::End),
-                NamedKey::PageUp => Some(Key::PageUp),
-                NamedKey::PageDown => Some(Key::PageDown),
-                NamedKey::Enter => Some(Key::Enter),
-                NamedKey::Escape => Some(Key::Escape),
-                NamedKey::Tab => Some(Key::Tab),
-                _ => None,
-            },
-            WKey::Character(c) if m.command => {
-                match c.to_lowercase().as_str() {
-                    "a" => events.push(Event::Key(Key::A, m)),
-                    "c" => events.push(Event::Copy),
-                    "x" => events.push(Event::Cut),
-                    "v" => {
-                        if let Some(text) = self.clipboard.get() {
-                            events.push(Event::Paste(text));
-                        }
-                    }
-                    _ => {}
-                }
-                return;
-            }
-            _ => None,
-        };
-        match key {
-            Some(k) => events.push(Event::Key(k, m)),
-            None => {
-                if let Some(text) = &event.text {
-                    // The iOS keyboard's Return arrives as a newline insert.
-                    if text == "\n" || text == "\r" {
-                        events.push(Event::Key(Key::Enter, m));
-                    } else if !text.chars().all(char::is_control) {
-                        events.push(Event::Text(text.to_string()));
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -642,6 +545,8 @@ impl ApplicationHandler for App {
 
     fn window_event(&mut self, el: &ActiveEventLoop, wid: WindowId, event: WindowEvent) {
         let Some(w) = self.wins.get_mut(&wid) else { return };
+        // All input goes to this window's UI; the arms below are host-only concerns.
+        libgui_winit::push_window_event(&mut w.ui, &event, w.window.scale_factor());
         match event {
             WindowEvent::CloseRequested => {
                 if w.dock_id == SurfaceId::MAIN {
@@ -657,10 +562,6 @@ impl ApplicationHandler for App {
                 w.surface.configure(&self.gfx.as_ref().unwrap().device, &w.config);
             }
             WindowEvent::CursorMoved { position, .. } => {
-                let scale = w.window.scale_factor();
-                let p = position.to_logical::<f32>(scale);
-                w.input.mouse_pos = Vec2::new(p.x, p.y);
-                w.input.mouse_inside = true;
                 // Global pointer for docking. During a drag the source window keeps
                 // receiving moves even outside its bounds.
                 if let Ok(origin) = w.window.inner_position() {
@@ -668,34 +569,22 @@ impl ApplicationHandler for App {
                     self.dock.set_pointer(screen, self.left_down);
                 }
             }
-            WindowEvent::CursorLeft { .. } => w.input.mouse_inside = false,
             WindowEvent::Touch(t) => {
+                // The dock follows the first finger in screen coordinates.
                 let scale = w.window.scale_factor() as f32;
                 let pos = Vec2::new(t.location.x as f32 / scale, t.location.y as f32 / scale);
                 match t.phase {
-                    TouchPhase::Started => w.touches.push(Finger { id: t.id, pos, fresh: true, lifted: false }),
-                    TouchPhase::Moved => {
-                        if let Some(f) = w.touches.iter_mut().find(|f| f.id == t.id) {
-                            f.pos = pos;
+                    winit::event::TouchPhase::Started => w.fingers.push((t.id, pos)),
+                    winit::event::TouchPhase::Moved => {
+                        if let Some(f) = w.fingers.iter_mut().find(|f| f.0 == t.id) {
+                            f.1 = pos;
                         }
                     }
-                    TouchPhase::Ended | TouchPhase::Cancelled => {
-                        if let Some(f) = w.touches.iter_mut().find(|f| f.id == t.id) {
-                            f.pos = pos;
-                            f.lifted = true;
-                        }
-                        // Already seen by a frame: release now. Otherwise after one frame.
-                        w.touches.retain(|f| !(f.lifted && !f.fresh));
-                    }
+                    _ => w.fingers.retain(|f| f.0 != t.id),
                 }
-                w.input.pointer_kind = PointerKind::Touch;
-                // The dock follows the first finger in screen coordinates.
-                let down = w.touches.iter().any(|f| !f.lifted);
-                if let Some(f) = w.touches.first() {
-                    let screen = content_origin(&w.window) + f.pos * scale;
-                    self.dock.set_pointer(screen, down);
-                } else {
-                    self.dock.set_pointer_down(false);
+                match w.fingers.first() {
+                    Some(&(_, p)) => self.dock.set_pointer(content_origin(&w.window) + p * scale, true),
+                    None => self.dock.set_pointer_down(false),
                 }
             }
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
@@ -704,52 +593,33 @@ impl ApplicationHandler for App {
                     // A press while "dragging" means we missed the release.
                     self.dock.cancel_drag();
                 }
-                if down {
-                    w.pressed_since_frame = true;
-                    w.input.mouse_down = true;
-                } else if w.pressed_since_frame {
-                    // Click shorter than a frame: let one frame see it pressed.
-                    w.release_after_frame = true;
-                } else {
-                    w.input.mouse_down = false;
-                }
                 self.left_down = down;
                 self.dock.set_pointer_down(down);
                 if !down {
-                    // A drag may have moved focus between windows; release everywhere.
-                    for other in self.wins.values_mut() {
-                        other.input.mouse_down = false;
+                    // A drag may have ended over another window: release everywhere.
+                    let up = InputEvent::PointerButton { button: PointerButton::Primary, pressed: false };
+                    for (id, other) in self.wins.iter_mut() {
+                        if *id != wid {
+                            other.ui.push(up.clone());
+                        }
                     }
                 }
-            }
-            WindowEvent::MouseWheel { delta, .. } => {
-                w.input.scroll += match delta {
-                    MouseScrollDelta::LineDelta(x, y) => Vec2::new(x, y) * 24.0,
-                    MouseScrollDelta::PixelDelta(p) => {
-                        let p = p.to_logical::<f32>(w.window.scale_factor());
-                        Vec2::new(p.x, p.y)
-                    }
-                };
-            }
-            WindowEvent::ModifiersChanged(mods) => {
-                let s = mods.state();
-                let mac = cfg!(target_os = "macos");
-                w.input.modifiers = Modifiers {
-                    shift: s.shift_key(),
-                    command: if mac { s.super_key() } else { s.control_key() },
-                    word: if mac { s.alt_key() } else { s.control_key() },
-                };
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 let esc = event.state == ElementState::Pressed && event.logical_key == WKey::Named(NamedKey::Escape);
                 if esc && self.dock.is_dragging() {
                     self.dock.cancel_drag();
-                } else {
-                    self.key_event(wid, &event);
                 }
             }
             WindowEvent::RedrawRequested => self.render(wid),
             _ => {}
+        }
+    }
+
+    fn device_event(&mut self, _el: &ActiveEventLoop, _id: winit::event::DeviceId, event: winit::event::DeviceEvent) {
+        // Raw, unaccelerated motion. Only used while a widget holds pointer lock.
+        for w in self.wins.values_mut() {
+            libgui_winit::push_device_event(&mut w.ui, &event);
         }
     }
 

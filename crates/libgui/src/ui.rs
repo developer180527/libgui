@@ -1,7 +1,9 @@
 use crate::layout::{self, Node, PaintFn, Scroll};
 use crate::text_edit::TextState;
 use crate::hash::{FxMap, FxSet};
-use crate::{Atlas, Color, Cursor, DrawList, Event, FontError, FontId, Fonts, Gesture, Id, Input, Insets, Key, Layout, Painter, PointerKind, Rect, Size, Theme, Vec2};
+use crate::input::UiEvent;
+use crate::input_state::InputState;
+use crate::{Atlas, Color, Cursor, DrawList, FontError, FontId, Fonts, FrameInfo, FrameInput, Gesture, Id, InputEvent, Insets, Key, Layout, Painter, PlatformOutput, PointerButton, PointerKind, Rect, Size, Theme, Vec2};
 use std::hash::Hash;
 
 /// Result of an interactive widget for this frame.
@@ -15,7 +17,15 @@ pub struct Response {
     pub active: bool,
     pub pressed: bool,
     pub clicked: bool,
+    /// Movement since last frame while active. Raw (unaccelerated) motion while
+    /// the pointer is locked, otherwise the change in pointer position.
     pub drag_delta: Vec2,
+    /// Raw `PointerDelta` motion this frame while active, if the host sends it.
+    pub raw_delta: Option<Vec2>,
+    /// Secondary (right) button pressed over this widget this frame.
+    pub secondary_pressed: bool,
+    /// Middle button pressed over this widget this frame.
+    pub middle_pressed: bool,
     pub scroll: Vec2,
     pub mouse_pos: Vec2,
     /// Two-finger pinch over this widget: zoom ratio minus 1 (0 = none).
@@ -82,6 +92,8 @@ pub struct FrameOutput<'a> {
     pub screen_size: Vec2,
     pub scale: f32,
     pub clear_color: Color,
+    /// Requests for the host: cursor, clipboard, keyboard/IME, pointer lock, repaint.
+    pub platform: PlatformOutput,
 }
 
 pub struct Ui {
@@ -90,7 +102,13 @@ pub struct Ui {
     pub font: FontId,
     /// Cursor requested by widgets this frame; apply it in the host.
     pub cursor: Cursor,
-    pub(crate) input: Input,
+    pub(crate) input: FrameInput,
+    input_state: InputState,
+    /// Pointer lock requested this frame / granted for this frame.
+    lock_request: bool,
+    locked: bool,
+    /// Something is still moving: ask the host for another frame.
+    animating: bool,
     mouse_prev: Vec2,
     pub(crate) mouse_delta: Vec2,
     prev_down: bool,
@@ -159,7 +177,11 @@ impl Ui {
             fonts,
             font,
             cursor: Cursor::Default,
-            input: Input::default(),
+            input: FrameInput::default(),
+            input_state: InputState::new(),
+            lock_request: false,
+            locked: false,
+            animating: false,
             mouse_prev: Vec2::ZERO,
             mouse_delta: Vec2::ZERO,
             prev_down: false,
@@ -199,13 +221,25 @@ impl Ui {
         })
     }
 
-    pub fn input(&self) -> &Input {
+    /// Queue an input event; it is applied when the next frame begins. Call
+    /// as events arrive, from any input source.
+    pub fn push(&mut self, event: InputEvent) {
+        self.input_state.push(event);
+    }
+
+    /// Use Apple-style shortcuts (Cmd; Option for words) instead of Ctrl.
+    /// Defaults to the platform libgui was built for.
+    pub fn set_mac_shortcuts(&mut self, mac: bool) {
+        self.input_state.mac = mac;
+    }
+
+    /// This frame's input (after `begin_frame`).
+    pub fn input(&self) -> &FrameInput {
         &self.input
     }
 
-    /// True while any widget is being dragged or pressed; hosts can use this to
-    /// avoid forwarding the mouse to the game.
-    pub fn wants_mouse(&self) -> bool {
+    /// True while the pointer is over, or dragging, UI: don't route it to the game.
+    pub fn wants_pointer(&self) -> bool {
         self.active.is_some() || self.hovered.is_some()
     }
 
@@ -214,14 +248,33 @@ impl Ui {
         self.focused.is_some()
     }
 
-    /// Text the user copied/cut this frame; write it to the OS clipboard.
-    pub fn take_copied(&mut self) -> Option<String> {
-        self.copied.take()
+    /// `key` went down this frame (not a repeat). For shortcuts; check
+    /// `wants_keyboard()` first if typing should win.
+    pub fn key_pressed(&self, key: Key) -> bool {
+        self.input.keys_pressed.contains(&key)
     }
 
-    /// Caret rect of the focused text field, for positioning an IME window.
-    pub fn ime_rect(&self) -> Option<Rect> {
-        self.ime_rect
+    pub fn key_down(&self, key: Key) -> bool {
+        self.input.keys_down.contains(&key)
+    }
+
+    pub fn button_down(&self, button: PointerButton) -> bool {
+        self.input.buttons_down[button.index()]
+    }
+
+    /// Ask for relative pointer mode this frame (hide + lock the cursor; drags
+    /// use raw deltas). Typically while a viewport is being orbited.
+    pub fn request_pointer_lock(&mut self) {
+        // On the release frame the dragged widget is still `active` (so it can
+        // report `clicked`); the lock must already end there.
+        if !self.released {
+            self.lock_request = true;
+        }
+    }
+
+    /// Ask the host for another frame soon (custom animations).
+    pub fn request_repaint(&mut self) {
+        self.animating = true;
     }
 
     pub fn focused(&self) -> Option<Id> {
@@ -238,7 +291,7 @@ impl Ui {
     }
 
     /// Derive the primary pointer and gestures from touches.
-    fn apply_touches(&mut self, input: &mut Input) {
+    fn apply_touches(&mut self, input: &mut FrameInput) {
         self.gesture = Gesture::default();
         let n = input.touches.len();
         if n >= 2 {
@@ -270,7 +323,11 @@ impl Ui {
         input.mouse_inside = n > 0 || self.prev_down;
     }
 
-    pub fn begin_frame(&mut self, mut input: Input) {
+    /// Start a frame: applies the events pushed since the last one.
+    pub fn begin_frame(&mut self, info: FrameInfo) {
+        let mut input = self.input_state.frame(info);
+        self.locked = std::mem::take(&mut self.lock_request);
+        self.animating = false;
         let touch = input.pointer_kind == PointerKind::Touch;
         if touch {
             self.apply_touches(&mut input);
@@ -321,7 +378,7 @@ impl Ui {
             }
         }
         self.pending_tab = input.events.iter().rev().find_map(|e| match e {
-            Event::Key(Key::Tab, m) => Some(m.shift),
+            UiEvent::Key(Key::Tab, m) => Some(m.shift),
             _ => None,
         });
         self.time += input.dt as f64;
@@ -401,12 +458,30 @@ impl Ui {
             self.focused = None;
         }
 
+        let busy = self.active.is_some() || self.touch_scroll.is_some() || self.animating;
+        let platform = PlatformOutput {
+            cursor: self.cursor,
+            copied_text: self.copied.take(),
+            paste_requested: self.input_state.paste_requested && self.focused.is_some(),
+            text_input: self.focused.and(self.ime_rect),
+            wants_pointer: self.wants_pointer(),
+            wants_keyboard: self.wants_keyboard(),
+            pointer_lock: self.lock_request,
+            repaint_after: if busy {
+                Some(0.0)
+            } else if self.focused.is_some() {
+                Some(0.5) // caret blink
+            } else {
+                None
+            },
+        };
         FrameOutput {
             draw: &self.draw,
             atlas: self.fonts.atlas(),
             screen_size: s,
             scale: self.input.scale,
             clear_color: self.theme.palette.bg_app,
+            platform,
         }
     }
 
@@ -459,6 +534,11 @@ impl Ui {
         }
         let over = self.gesture.active && rect.contains(self.gesture.center);
         let active = self.active == Some(id);
+        let over_now = self.hovered == Some(id);
+        let delta = match (self.locked, self.input.raw_delta) {
+            (true, Some(raw)) => raw,
+            _ => self.mouse_delta,
+        };
         Response {
             id,
             rect,
@@ -466,7 +546,10 @@ impl Ui {
             active,
             pressed: hovered && self.pressed,
             clicked: active && hovered && self.released,
-            drag_delta: if active { self.mouse_delta } else { Vec2::ZERO },
+            drag_delta: if active { delta } else { Vec2::ZERO },
+            raw_delta: if active { self.input.raw_delta } else { None },
+            secondary_pressed: over_now && self.input.buttons_pressed[PointerButton::Secondary.index()],
+            middle_pressed: over_now && self.input.buttons_pressed[PointerButton::Middle.index()],
             scroll: if hovered { self.input.scroll } else { Vec2::ZERO },
             mouse_pos: self.input.mouse_pos,
             pinch: if over { self.gesture.zoom - 1.0 } else { 0.0 },
@@ -482,7 +565,9 @@ impl Ui {
         if (target - *v).abs() < 0.001 {
             *v = target;
         }
-        *v
+        let v = *v;
+        self.animating |= v != target;
+        v
     }
 
     /// Like [`Ui::animate`] with an explicit rate (1/s).
@@ -493,7 +578,9 @@ impl Ui {
         if (target - *v).abs() < 0.01 {
             *v = target;
         }
-        *v
+        let v = *v;
+        self.animating |= v != target;
+        v
     }
 
     /// Jump an animation to `value` (it then eases towards its next target).
@@ -703,6 +790,7 @@ impl Ui {
             }
         }
         st.offset = st.offset.clamp(0.0, max);
+        self.animating |= st.offset != st.target || st.velocity != 0.0;
         self.scroll_states.insert(id, st);
         if bar.hovered || bar.active {
             self.cursor = Cursor::Default;
@@ -812,9 +900,30 @@ mod tests {
         Ui::new(Theme::dark(), include_bytes!("../../../assets/Inter.ttf")).unwrap()
     }
 
+    /// Mouse state for one test frame, pushed as events.
+    #[derive(Clone)]
+    struct M {
+        mouse_pos: Vec2,
+        mouse_inside: bool,
+        scroll: Vec2,
+        dt: f32,
+    }
+
+    impl Default for M {
+        fn default() -> Self {
+            M { mouse_pos: Vec2::ZERO, mouse_inside: false, scroll: Vec2::ZERO, dt: 1.0 / 60.0 }
+        }
+    }
+
     /// 20 buttons (30px + 0 gap) in a 100px scroll area at the top of the screen.
-    fn build(ui: &mut Ui, input: Input) -> Vec<Response> {
-        ui.begin_frame(input);
+    fn build(ui: &mut Ui, m: M) -> Vec<Response> {
+        if m.mouse_inside {
+            ui.push(InputEvent::PointerMoved { pos: m.mouse_pos });
+        }
+        if m.scroll != Vec2::ZERO {
+            ui.push(InputEvent::Wheel { delta: m.scroll, unit: crate::WheelUnit::Pixel });
+        }
+        ui.begin_frame(FrameInfo { dt: m.dt, ..FrameInfo::default() });
         let mut out = Vec::new();
         ui.scroll_area_with("list", ScrollOptions::new(Size::Fixed(100.0)), |ui| {
             for i in 0..20 {
@@ -828,7 +937,7 @@ mod tests {
     #[test]
     fn wheel_scrolls_clamps_and_clips_hit_testing() {
         let mut ui = ui();
-        let base = Input { mouse_inside: true, mouse_pos: Vec2::new(20.0, 50.0), dt: 1.0, ..Input::default() };
+        let base = M { mouse_inside: true, mouse_pos: Vec2::new(20.0, 50.0), dt: 1.0, ..M::default() };
         build(&mut ui, base.clone());
         build(&mut ui, base.clone());
 
@@ -868,7 +977,7 @@ mod tests {
         let mut ui = ui();
         let mut sel = 3usize;
         let frame = |ui: &mut Ui, sel: &mut usize, options: &[&str]| {
-            ui.begin_frame(Input { dt: 1.0, ..Input::default() });
+            ui.begin_frame(FrameInfo { dt: 1.0, ..FrameInfo::default() });
             ui.segmented("mode", sel, options);
             let _ = ui.end_frame();
         };
@@ -891,7 +1000,7 @@ mod tests {
     fn duplicate_keys_get_stable_distinct_ids() {
         let mut ui = ui();
         let ids = |ui: &mut Ui| -> Vec<Id> {
-            ui.begin_frame(Input::default());
+            ui.begin_frame(FrameInfo::default());
             let v: Vec<Id> = (0..64).map(|_| ui.make_id("same")).collect();
             let _ = ui.end_frame();
             v
@@ -909,7 +1018,7 @@ mod tests {
         assert_eq!(a[63], base.with(63u32));
 
         // A key used once still gets the bare base id.
-        ui.begin_frame(Input::default());
+        ui.begin_frame(FrameInfo::default());
         assert_eq!(ui.make_id("solo"), root.with("solo"));
         let _ = ui.end_frame();
     }
@@ -927,29 +1036,39 @@ mod tests {
         let mut ui = ui();
         let wide = ui.fonts.measure(ui.font, 4000.0, "WW").x;
         assert!(wide > 0.0, "advances still measure");
-        ui.begin_frame(Input::default());
+        ui.begin_frame(FrameInfo::default());
         ui.text_with("WW", 4000.0, Color::WHITE);
         let out = ui.end_frame();
         assert!(out.draw.instances.is_empty(), "nothing is drawn for an unplaceable glyph");
         // Normal text still renders afterwards: the atlas was not left broken.
-        ui.begin_frame(Input::default());
+        ui.begin_frame(FrameInfo::default());
         ui.text_with("ok", 13.0, Color::WHITE);
         let out = ui.end_frame();
         assert!(!out.draw.instances.is_empty());
     }
 
-    fn touch(points: &[(f32, f32)]) -> Input {
-        Input {
-            pointer_kind: PointerKind::Touch,
-            touches: points.iter().enumerate().map(|(i, &(x, y))| crate::Touch { id: i as u64, pos: Vec2::new(x, y) }).collect(),
-            dt: 1.0 / 60.0,
-            ..Input::default()
+    /// The fingers wanted on screen this frame (finger id = index).
+    fn touch(points: &[(f32, f32)]) -> Vec<Vec2> {
+        points.iter().map(|&(x, y)| Vec2::new(x, y)).collect()
+    }
+
+    /// Push Start/Move/End events turning last frame's fingers into `now`.
+    fn push_fingers(ui: &mut Ui, now: &[Vec2]) {
+        use crate::TouchPhase::*;
+        let prev = ui.input().touches.clone();
+        for (i, &pos) in now.iter().enumerate() {
+            let phase = if prev.iter().any(|t| t.id == i as u64) { Move } else { Start };
+            ui.push(InputEvent::Touch { id: i as u64, phase, pos });
+        }
+        for t in prev.iter().filter(|t| t.id as usize >= now.len()) {
+            ui.push(InputEvent::Touch { id: t.id, phase: End, pos: t.pos });
         }
     }
 
     /// A 100px scroll area of 20 buttons, then a slider below it.
-    fn build_touch(ui: &mut Ui, input: Input, slider: &mut f32) -> (Vec<Response>, Response) {
-        ui.begin_frame(input);
+    fn build_touch(ui: &mut Ui, fingers: Vec<Vec2>, slider: &mut f32) -> (Vec<Response>, Response) {
+        push_fingers(ui, &fingers);
+        ui.begin_frame(FrameInfo::default());
         let mut out = Vec::new();
         ui.scroll_area_with("list", ScrollOptions::new(Size::Fixed(100.0)), |ui| {
             for i in 0..20 {

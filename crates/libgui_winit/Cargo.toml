@@ -1,0 +1,9 @@
+[package]
+name = "libgui_winit"
+version = "0.1.0"
+edition = "2021"
+description = "winit adapter for libgui: events in, platform requests out."
+
+[dependencies]
+libgui = { path = "../libgui" }
+winit.workspace = true
