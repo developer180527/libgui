@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = ["crates/libgui", "crates/libgui_shaders", "crates/libgui_wgpu", "crates/libgui_demo"]
+
+[workspace.dependencies]
+wgpu = "30"
+winit = "0.30"
+fontdue = "0.9"
+bytemuck = { version = "1", features = ["derive"] }
+pollster = "1"
+naga = "30"
+
+[profile.dev.package."*"]
+opt-level = 2

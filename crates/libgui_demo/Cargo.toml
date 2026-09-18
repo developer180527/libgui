@@ -1,0 +1,13 @@
+[package]
+name = "libgui_demo"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libgui = { path = "../libgui" }
+libgui_wgpu = { path = "../libgui_wgpu" }
+wgpu.workspace = true
+winit.workspace = true
+bytemuck.workspace = true
+pollster.workspace = true
+arboard = { version = "3", default-features = false }

@@ -1,0 +1,10 @@
+[package]
+name = "libgui_wgpu"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libgui = { path = "../libgui" }
+libgui_shaders = { path = "../libgui_shaders" }
+wgpu.workspace = true
+bytemuck.workspace = true

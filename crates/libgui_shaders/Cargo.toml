@@ -1,0 +1,8 @@
+[package]
+name = "libgui_shaders"
+version = "0.1.0"
+edition = "2021"
+description = "libgui's UI shader: WGSL source plus naga-generated HLSL, MSL, GLSL and SPIR-V."
+
+[build-dependencies]
+naga = { workspace = true, features = ["wgsl-in", "hlsl-out", "msl-out", "glsl-out", "spv-out"] }

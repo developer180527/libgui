@@ -1,0 +1,8 @@
+[package]
+name = "libgui"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+fontdue.workspace = true
+bytemuck.workspace = true

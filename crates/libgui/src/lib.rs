@@ -1,0 +1,31 @@
+//! libgui: a hybrid immediate/retained UI core.
+//!
+//! You call widgets every frame (immediate API). Behind the scenes the library
+//! keeps per-widget state keyed by stable [`Id`]s (retained internals), builds
+//! a layout tree, solves it after the frame is built, and emits a
+//! backend-agnostic [`DrawList`]. It never touches the GPU; see [`Backend`].
+
+mod backend;
+mod draw;
+mod id;
+mod input;
+mod layout;
+mod math;
+mod painter;
+mod text;
+mod theme;
+mod ui;
+mod text_edit;
+mod widgets;
+
+pub use backend::{Backend, Globals, INSTANCE_STRIDE, VERTICES_PER_INSTANCE};
+pub use draw::{Batch, DrawList, Instance, TextureId};
+pub use id::Id;
+pub use input::{Cursor, Event, Input, Key, Modifiers};
+pub use layout::{Align, Axis, Insets, Layout, Size};
+pub use math::{Color, Rect, Vec2};
+pub use painter::Painter;
+pub use text::{Atlas, FontId, Fonts};
+pub use theme::Theme;
+pub use text_edit::TextResponse;
+pub use ui::{Frame, FrameOutput, Response, ScrollOptions, Ui};
