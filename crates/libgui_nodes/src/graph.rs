@@ -387,29 +387,32 @@ fn finish(g: &mut GraphUi, zoom: f32, released: bool) -> bool {
     let grab = s.link_grab_px / zoom.max(1e-6);
 
     // Which link is under the pointer? Nearest wins, so crossing wires behave.
-    let mut hover: Option<(f32, Link)> = None;
+    // A link whose ports were not declared this frame draws no wire, so the
+    // hovered wire is remembered by its index in `wires`, which is not the
+    // link's index in `links`.
+    let mut hover: Option<(f32, Link, usize)> = None;
     let mut scratch = std::mem::take(&mut g.scratch);
     let links = g.links.clone();
     for l in &links {
         let (Some(a), Some(b)) = (g.port_pos(l.from), g.port_pos(l.to)) else { continue };
         wire_points(a, b, s.routing, zoom, &mut scratch);
         let d = distance_to(&scratch, g.pointer);
-        if d <= grab && hover.is_none_or(|(bd, _)| d < bd) {
-            hover = Some((d, *l));
-        }
         let selected = *g.selected_link == Some(*l);
         let color = if selected { s.link_selected } else { s.link };
-        g.wires.borrow_mut().push(WireDraw { points: scratch.clone(), color, width });
+        let mut w = g.wires.borrow_mut();
+        if d <= grab && hover.is_none_or(|(bd, ..)| d < bd) {
+            hover = Some((d, *l, w.len()));
+        }
+        w.push(WireDraw { points: scratch.clone(), color, width });
     }
     // Recolour the hovered one, now that we know which it is.
-    if let Some((_, l)) = hover {
-        if let Some(i) = links.iter().position(|x| *x == l) {
-            let mut w = g.wires.borrow_mut();
-            if *g.selected_link != Some(l) {
-                w[i].color = s.link_hover;
-            }
-            w[i].width = width * 1.3;
+    if let Some((_, l, i)) = hover {
+        let mut w = g.wires.borrow_mut();
+        if *g.selected_link != Some(l) {
+            w[i].color = s.link_hover;
         }
+        w[i].width = width * 1.3;
+        drop(w);
         g.ui.cursor = Cursor::Pointer;
     }
 
@@ -418,7 +421,7 @@ fn finish(g: &mut GraphUi, zoom: f32, released: bool) -> bool {
     let pressed = g.ui.button_pressed(PointerButton::Primary);
     let mut wire_hit = false;
     if pressed && g.drag.is_none() {
-        if let Some((_, l)) = hover {
+        if let Some((_, l, _)) = hover {
             *g.selected_link = Some(l);
             g.selection.clear();
             g.events.push(GraphEvent::SelectionChanged);

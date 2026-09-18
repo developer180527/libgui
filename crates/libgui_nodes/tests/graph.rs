@@ -245,3 +245,35 @@ fn clicking_a_link_selects_it() {
     h.frame();
     assert_eq!(h.st.selected_link, None, "clicking empty canvas did not clear the link selection");
 }
+
+/// A link whose ports were not declared this frame — an app culling off-screen
+/// nodes, or declaring a link before its node — draws no wire. Hovering a real
+/// link must still highlight that link, and must not index past the wires.
+#[test]
+fn a_link_to_an_undeclared_node_does_not_disturb_hover() {
+    let mut h = Harness::new();
+    h.doc.nodes.push((3, Vec2::new(40.0, 400.0)));
+    // Declared first, but node 9 is never declared: this link draws nothing.
+    h.doc.links.push(Link { from: PortId::output(9, 0), to: PortId::input(3, 0) });
+    h.doc.links.push(Link { from: PortId::output(1, 0), to: PortId::input(2, 0) });
+    h.settle();
+
+    let s = h.style;
+    let (n1, n2) = (h.doc.nodes[0].1, h.doc.nodes[1].1);
+    let a = Vec2::new(n1.x + s.node_width, n1.y + s.header_height + s.port_row * 0.5);
+    let b = Vec2::new(n2.x, n2.y + s.header_height + s.port_row * 0.5);
+    let mid = Vec2::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5);
+
+    // Hovering alone used to panic here (index into `links`, not into `wires`).
+    h.move_to(h.win(mid));
+    h.frame();
+    h.press();
+    h.frame();
+    h.release();
+    h.frame();
+    assert_eq!(
+        h.st.selected_link,
+        Some(Link { from: PortId::output(1, 0), to: PortId::input(2, 0) }),
+        "hovering the only drawn wire selected the wrong link"
+    );
+}
