@@ -5,6 +5,7 @@
 //!   5. `add_leaf` with a layout + a paint closure that runs after layout.
 
 use crate::{ButtonStyle, Color, Cursor, Insets, Layout, Painter, Rect, Response, Size, TextureId, Theme, Ui, Vec2};
+use std::hash::Hash;
 
 impl Ui {
     fn text_size(&self, size: f32, text: &str) -> Vec2 {
@@ -74,6 +75,14 @@ impl Ui {
         self.button_styled(label, &style)
     }
 
+    /// [`Ui::button`] with an identity that does not depend on the label or on
+    /// build order. Use it when two buttons in one container share a label, or
+    /// when one of them is conditional. See [`Ui::with_key`].
+    pub fn button_keyed(&mut self, key: impl Hash, label: &str) -> Response {
+        let style = self.theme.button;
+        self.button_styled_keyed(key, label, &style)
+    }
+
     pub fn button_primary(&mut self, label: &str) -> Response {
         let style = self.theme.button_primary;
         self.button_styled(label, &style)
@@ -81,8 +90,13 @@ impl Ui {
 
     /// Button with an explicit style (e.g. a one-off destructive button).
     pub fn button_styled(&mut self, label: &str, style: &ButtonStyle) -> Response {
+        self.button_styled_keyed(label, label, style)
+    }
+
+    /// [`Ui::button_styled`] with an explicit key.
+    pub fn button_styled_keyed(&mut self, key: impl Hash, label: &str, style: &ButtonStyle) -> Response {
         let s = *style;
-        let id = self.make_id(("button", label));
+        let id = self.make_id(("button", key));
         let size = self.theme.metrics.font_size;
         let m = self.text_size(size, label);
         let resp = self.interact(id);
@@ -111,8 +125,13 @@ impl Ui {
 
     /// Inspector-style row: label on the left, animated switch on the right.
     pub fn toggle(&mut self, label: &str, value: &mut bool) -> Response {
+        self.toggle_keyed(label, label, value)
+    }
+
+    /// [`Ui::toggle`] with an explicit key. See [`Ui::with_key`].
+    pub fn toggle_keyed(&mut self, key: impl Hash, label: &str, value: &mut bool) -> Response {
         let s = self.theme.toggle;
-        let id = self.make_id(("toggle", label));
+        let id = self.make_id(("toggle", key));
         let (size, h) = (self.theme.metrics.font_size, self.theme.metrics.control_height);
         let muted = self.theme.palette.text_muted;
         let m = self.text_size(size, label);
@@ -144,8 +163,13 @@ impl Ui {
 
     /// Labelled horizontal slider. Drag anywhere on it.
     pub fn slider(&mut self, label: &str, value: &mut f32, min: f32, max: f32) -> Response {
+        self.slider_keyed(label, label, value, min, max)
+    }
+
+    /// [`Ui::slider`] with an explicit key. See [`Ui::with_key`].
+    pub fn slider_keyed(&mut self, key: impl Hash, label: &str, value: &mut f32, min: f32, max: f32) -> Response {
         let s = self.theme.slider;
-        let id = self.make_id(("slider", label));
+        let id = self.make_id(("slider", key));
         let size = self.theme.metrics.font_size;
         let m = self.text_size(size, label);
         let resp = self.interact_drag(id);
@@ -184,8 +208,14 @@ impl Ui {
 
     /// List / tree row with selection highlight.
     pub fn selectable(&mut self, label: &str, selected: bool) -> Response {
+        self.selectable_keyed(label, label, selected)
+    }
+
+    /// [`Ui::selectable`] with an explicit key: the right call for list and
+    /// tree rows, whose labels are often duplicated. See [`Ui::with_key`].
+    pub fn selectable_keyed(&mut self, key: impl Hash, label: &str, selected: bool) -> Response {
         let s = self.theme.selectable;
-        let id = self.make_id(("selectable", label));
+        let id = self.make_id(("selectable", key));
         let size = self.theme.metrics.font_size;
         let m = self.text_size(size, label);
         let resp = self.interact(id);

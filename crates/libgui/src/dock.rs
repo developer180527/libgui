@@ -476,7 +476,13 @@ impl<T> DockState<T> {
         }
         let Some(i) = self.index_of(id) else { return };
         let surface = self.surfaces.remove(i);
-        if self.drag.is_some_and(|d| d.source == id || d.phase == (Phase::Floating { surface: id, grab: Vec2::ZERO })) {
+        // `Phase` derives PartialEq, so comparing against a whole `Floating`
+        // value also compared `grab` and matched only when it happened to be
+        // zero: a drag of this surface survived its window closing.
+        let dragging_this = self.drag.is_some_and(|d| {
+            d.source == id || matches!(d.phase, Phase::Floating { surface, .. } if surface == id)
+        });
+        if dragging_this {
             self.drag = None;
         }
         let mut tabs = Vec::new();
@@ -719,33 +725,50 @@ impl<T> DockState<T> {
                 if side.first() { (new, existing, fraction) } else { (existing, new, 1.0 - fraction) };
             DockNode::Split(Split { id: split_id, axis: side.axis(), fraction, first: Box::new(first), second: Box::new(second) })
         };
-        let focused = match target.kind {
-            DropKind::Tab { leaf, index } => match s.root.as_mut().and_then(|r| r.leaf_mut(leaf)) {
-                Some(l) => {
-                    let index = index.min(l.tabs.len());
-                    for (k, t) in tabs.into_iter().enumerate() {
-                        l.tabs.insert(index + k, t);
-                    }
-                    l.active = index;
-                    leaf
+        // The target was picked on an earlier frame, against a tree that may
+        // since have changed (a pane closed, a window went away). The source
+        // surface is already gone by now, so `tabs` is the only copy: put them
+        // somewhere sensible rather than panicking or dropping them.
+        let salvage = |s: &mut Surface<T>, tabs: Vec<T>| -> u64 {
+            match &mut s.root {
+                Some(root) => {
+                    let l = root.first_leaf_mut();
+                    l.tabs.extend(tabs);
+                    l.id
                 }
-                None => return,
-            },
-            DropKind::Split { leaf, side } => {
-                let root = s.root.take().unwrap();
+                None => {
+                    s.root = Some(DockNode::Leaf(Leaf { id: new_leaf_id, tabs, active: 0 }));
+                    new_leaf_id
+                }
+            }
+        };
+        let has_leaf = |s: &mut Surface<T>, leaf: u64| s.root.as_mut().is_some_and(|r| r.leaf_mut(leaf).is_some());
+        let focused = match target.kind {
+            DropKind::Tab { leaf, index } if has_leaf(s, leaf) => {
+                let l = s.root.as_mut().and_then(|r| r.leaf_mut(leaf)).expect("checked by has_leaf");
+                let index = index.min(l.tabs.len());
+                for (k, t) in tabs.into_iter().enumerate() {
+                    l.tabs.insert(index + k, t);
+                }
+                l.active = index;
+                leaf
+            }
+            DropKind::Split { leaf, side } if has_leaf(s, leaf) => {
+                let root = s.root.take().expect("checked by has_leaf");
                 let mut f = Some(|old| wrap(side, cfg.split_fraction, old, new_leaf(tabs)));
                 s.root = Some(replace_leaf(root, leaf, &mut f));
                 new_leaf_id
             }
-            DropKind::Root { side } => {
-                let root = s.root.take().unwrap();
+            DropKind::Root { side } if s.root.is_some() => {
+                let root = s.root.take().expect("checked above");
                 s.root = Some(wrap(side, cfg.root_split_fraction, root, new_leaf(tabs)));
                 new_leaf_id
             }
-            DropKind::Empty => {
+            DropKind::Empty if s.root.is_none() => {
                 s.root = Some(new_leaf(tabs));
                 new_leaf_id
             }
+            _ => salvage(s, tabs),
         };
         self.focused_leaf = Some(focused);
     }
@@ -1284,6 +1307,63 @@ mod tests {
         d.update();
         assert_eq!(d.surfaces.len(), 1);
         assert_eq!(leaves(d.surfaces[0].root.as_ref().unwrap())[0], vec!["outliner", "inspector"]);
+    }
+
+    /// A drop target is picked on one frame and applied on the next, so the
+    /// tree can change in between. The source surface is already gone by then,
+    /// so a stale target must never panic or drop the dragged tabs.
+    #[test]
+    fn stale_drop_targets_keep_their_tabs() {
+        let stale = [
+            DropKind::Tab { leaf: 9999, index: 0 },
+            DropKind::Split { leaf: 9999, side: Side::Left },
+            DropKind::Empty, // "empty" but the surface has a root by now
+        ];
+        for kind in stale {
+            let mut d = fresh();
+            let sid = SurfaceId(99);
+            let leaf = d.leaf(vec!["console"]);
+            d.surfaces.push(Surface::new(sid, Some(leaf), true));
+            d.dock_into(sid, DropTarget { surface: SurfaceId::MAIN, kind, preview: Rect::default() });
+            assert_eq!(d.surfaces.len(), 1, "{kind:?}: the floating surface is gone");
+            let tabs: Vec<&str> = leaves(d.surfaces[0].root.as_ref().unwrap()).concat();
+            assert!(tabs.contains(&"console"), "{kind:?}: lost the dragged tab, got {tabs:?}");
+            // ...and nothing that was already docked was displaced by it.
+            for existing in ["outliner", "inspector", "viewport"] {
+                assert!(tabs.contains(&existing), "{kind:?}: lost {existing}, got {tabs:?}");
+            }
+        }
+
+        // Root-edge drop onto a surface whose tree vanished: no panic, tab kept.
+        let mut d = fresh();
+        let sid = SurfaceId(99);
+        let leaf = d.leaf(vec!["console"]);
+        d.surfaces.push(Surface::new(sid, Some(leaf), true));
+        d.surfaces[0].root = None;
+        d.dock_into(sid, DropTarget { surface: SurfaceId::MAIN, kind: DropKind::Root { side: Side::Top }, preview: Rect::default() });
+        assert_eq!(leaves(d.surfaces[0].root.as_ref().unwrap()).concat(), vec!["console"]);
+    }
+
+    /// Closing a floating window mid-drag must clear the drag that refers to
+    /// it. The check used to compare the whole `Phase::Floating` value, whose
+    /// `grab` field only matched when it happened to be zero.
+    #[test]
+    fn closing_a_window_cancels_a_drag_that_refers_to_it() {
+        let mut d = fresh();
+        let sid = SurfaceId(99);
+        let leaf = d.leaf(vec!["console"]);
+        d.surfaces.push(Surface::new(sid, Some(leaf), true));
+        d.drag = Some(Drag {
+            source: SurfaceId::MAIN,
+            leaf: 1,
+            index: 0,
+            press: Vec2::ZERO,
+            grab: Vec2::new(32.0, 11.0), // non-zero, as a real grab always is
+            phase: Phase::Floating { surface: sid, grab: Vec2::new(32.0, 11.0) },
+            target: None,
+        });
+        d.close_surface(sid);
+        assert!(d.drag.is_none(), "drag still points at a removed surface");
     }
 
     #[test]

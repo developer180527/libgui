@@ -126,6 +126,8 @@ pub struct Ui {
     /// Next free suffix per colliding base id, so N widgets sharing a key cost
     /// O(N) to disambiguate rather than O(N^2).
     dup_next: FxMap<Id, u32>,
+    /// Active `with_key` scopes as (salt, container depth at push).
+    key_salt: Vec<(Id, usize)>,
     draw: DrawList,
     pub(crate) time: f64,
     // Keyboard focus
@@ -196,6 +198,7 @@ impl Ui {
             anims: FxMap::default(),
             seen: FxSet::default(),
             dup_next: FxMap::default(),
+            key_salt: Vec::new(),
             draw: DrawList::default(),
             time: 0.0,
             focused: None,
@@ -391,6 +394,7 @@ impl Ui {
         self.stack.clear();
         self.seen.clear();
         self.dup_next.clear();
+        self.key_salt.clear();
         let s = self.input.screen_size;
         let root = Node::new(Id::new("root"), Layout::column().width(Size::Fixed(s.x)).height(Size::Fixed(s.y)));
         self.nodes.push(root);
@@ -497,7 +501,13 @@ impl Ui {
     /// quadratic: 2000 spacers cost 25 ms/frame.
     pub fn make_id(&mut self, src: impl Hash) -> Id {
         let parent = self.nodes[*self.stack.last().unwrap()].id;
-        let base = parent.with(&src);
+        // A `with_key` scope salts the widgets built directly inside it. Nested
+        // containers inherit it through their own (already salted) id, so the
+        // salt is mixed in exactly once.
+        let base = match self.key_salt.last() {
+            Some(&(salt, depth)) if depth == self.stack.len() => parent.with(salt.0).with(&src),
+            _ => parent.with(&src),
+        };
         if self.seen.insert(base) {
             return base;
         }
@@ -510,6 +520,38 @@ impl Ui {
         }
         self.dup_next.insert(base, n + 1);
         id
+    }
+
+    /// Give everything built inside `body` a distinct identity.
+    ///
+    /// Widget ids come from the label, and duplicates in one container are
+    /// separated by *build order*, so hiding the first of two same-labelled
+    /// widgets hands its id — and its animation, focus and drag state — to the
+    /// second. Wrap each item in a key that does not move:
+    ///
+    /// ```ignore
+    /// for obj in &objects {
+    ///     ui.with_key(obj.id, |ui| {
+    ///         ui.selectable(&obj.name, obj.id == selected);   // two "Mesh" rows stay distinct
+    ///         if obj.removable { ui.button("Delete"); }
+    ///     });
+    /// }
+    /// ```
+    ///
+    /// This applies to custom widgets too, since they derive ids with
+    /// [`Ui::make_id`]. For a single widget, the `*_keyed` variants
+    /// ([`Ui::button_keyed`] and friends) are shorter.
+    pub fn with_key<R>(&mut self, key: impl Hash, body: impl FnOnce(&mut Self) -> R) -> R {
+        let depth = self.stack.len();
+        // Nested scopes in the same container combine rather than shadow.
+        let salt = match self.key_salt.last() {
+            Some(&(prev, d)) if d == depth => prev.with(&key),
+            _ => Id::new(&key),
+        };
+        self.key_salt.push((salt, depth));
+        let r = body(self);
+        self.key_salt.pop();
+        r
     }
 
     /// Resolve hover/press/click for `id` using last frame's rect. On touch,
@@ -1021,6 +1063,76 @@ mod tests {
         ui.begin_frame(FrameInfo::default());
         assert_eq!(ui.make_id("solo"), root.with("solo"));
         let _ = ui.end_frame();
+    }
+
+    /// The footgun `with_key` and the `*_keyed` variants exist for: hiding a
+    /// widget must not hand its identity (and its retained state) to the next
+    /// one that happens to share a label.
+    #[test]
+    fn a_stable_key_survives_a_hidden_sibling() {
+        let mut ui = ui();
+        // Build order alone: the surviving button inherits the hidden one's id.
+        let ids = |ui: &mut Ui, show_first: bool| -> Id {
+            ui.begin_frame(FrameInfo::default());
+            if show_first {
+                let _ = ui.button("Delete");
+            }
+            let second = ui.button("Delete").id;
+            let _ = ui.end_frame();
+            second
+        };
+        let both = ids(&mut ui, true);
+        let alone = ids(&mut ui, false);
+        assert_ne!(both, alone, "unkeyed: the second button's id moved (the bug)");
+
+        // With a key, the second widget keeps its identity either way.
+        let keyed = |ui: &mut Ui, show_first: bool| -> Id {
+            ui.begin_frame(FrameInfo::default());
+            if show_first {
+                let _ = ui.button_keyed("delete-selected", "Delete");
+            }
+            let second = ui.button_keyed("delete-all", "Delete").id;
+            let _ = ui.end_frame();
+            second
+        };
+        assert_eq!(keyed(&mut ui, true), keyed(&mut ui, false), "keyed: identity is stable");
+
+        // `with_key` does the same for whole groups, custom widgets included.
+        let scoped = |ui: &mut Ui, show_first: bool| -> Id {
+            ui.begin_frame(FrameInfo::default());
+            if show_first {
+                ui.with_key(1u32, |ui| {
+                    let _ = ui.button("Delete");
+                });
+            }
+            let second = ui.with_key(2u32, |ui| ui.button("Delete").id);
+            let _ = ui.end_frame();
+            second
+        };
+        assert_eq!(scoped(&mut ui, true), scoped(&mut ui, false), "with_key: identity is stable");
+    }
+
+    /// Scopes must separate otherwise-identical subtrees, nest, and leave
+    /// widgets outside them untouched.
+    #[test]
+    fn with_key_scopes_are_distinct_nested_and_bounded() {
+        let mut ui = ui();
+        ui.begin_frame(FrameInfo::default());
+        let a = ui.with_key("row-a", |ui| ui.button("Rename").id);
+        let b = ui.with_key("row-b", |ui| ui.button("Rename").id);
+        assert_ne!(a, b, "different scopes, different ids");
+
+        let nested = ui.with_key("outer", |ui| ui.with_key("inner", |ui| ui.button("X").id));
+        let flat = ui.with_key("inner", |ui| ui.button("X").id);
+        assert_ne!(nested, flat, "nested scopes combine rather than shadow");
+
+        // A scope that ends leaves following widgets on the plain path.
+        let outside = ui.button("Plain").id;
+        let _ = ui.end_frame();
+        ui.begin_frame(FrameInfo::default());
+        let again = ui.button("Plain").id;
+        let _ = ui.end_frame();
+        assert_eq!(outside, again);
     }
 
     #[test]

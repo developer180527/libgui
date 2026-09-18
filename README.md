@@ -109,6 +109,26 @@ if r.submitted { /* Enter pressed */ }
   See `key_event` in `libgui_demo/src/main.rs` for a winit + arboard reference mapping.
 - `ui.ime_rect()` gives the caret rect for positioning an IME candidate window.
 
+## Widget identity
+
+Widget ids come from the label, and duplicates in one container are separated by *build order*.
+That is fine for static UI, but hiding the first of two same-labelled widgets hands its id — and
+with it the animation, focus and drag state — to the second. Anywhere labels repeat or widgets are
+conditional, give them a key that does not move:
+
+```rust
+ui.button_keyed("delete-selected", "Delete");     // one widget
+ui.with_key(obj.id, |ui| {                        // a whole group, custom widgets included
+    ui.selectable(&obj.name, obj.id == selected); // two objects named "Mesh" stay distinct
+    if obj.removable { ui.button("Delete"); }
+});
+```
+
+`with_key` salts every id built inside it (including those from your own `ui.make_id`), and nested
+scopes combine. `button_keyed`, `button_styled_keyed`, `toggle_keyed`, `slider_keyed` and
+`selectable_keyed` take a key for a single widget; `segmented`, `text_input`, `scroll_area` and
+`viewport` already take one.
+
 ## Scroll areas
 
 ```rust
@@ -274,6 +294,28 @@ let out = ui.end_frame();          // draw data for your Backend + out.platform:
   your post-processing), so the UI composites over the frame.
 - Run it alongside Dear ImGui during migration: both just record into the same pass.
 
+## Performance guards
+
+The UI is meant to be a rounding error next to a pro app's real work, so that is
+enforced by tests rather than left to a benchmark nobody runs
+(`crates/libgui/tests/perf.rs`, `perf_alloc.rs`):
+
+| guard | today |
+|---|---|
+| A visible 211-widget inspector, as a share of a 60 fps frame | **0.26%** (44 µs) |
+| Allocations per widget per frame | **2.00** (170 bytes) |
+| Allocations in an empty frame | **0** |
+| Draw instances for offscreen widgets | **0** (15x the rows, same instance count) |
+| Glyph rasterisation in a steady frame | **none** (atlas version unchanged) |
+| An idle UI | `repaint_after: None` — the host sleeps |
+
+They assert properties that hold on any machine: deterministic counts, and
+*ratios* for complexity (4x the widgets must not cost more than 7x the time,
+where linear is 4x) rather than wall-clock times that flake on a loaded CI box.
+The one absolute budget is asserted in release only, since a debug build is an
+order of magnitude slower. `crates/libgui_bench` is the measuring tool;
+these are the regression guards.
+
 ## Roadmap (roughly in order)
 
 1. ~~Text input~~ ✅ single-line; next: multi-line editor, IME preedit, double-click word select, undo.
@@ -293,9 +335,5 @@ let out = ui.end_frame();          // draw data for your Backend + out.platform:
 - Glyph atlas resets when full (possible one-frame flicker).
 - No z-layers yet: overlays are drawn inside their node's paint closure.
 - Container ids are positional; give containers explicit keys once you add conditional UI.
-- Widgets sharing a label in one container are disambiguated **by build order**
-  (`ui.rs::make_id`), so hiding the first `ui.button("Delete")` hands its id — and its
-  animation, drag and focus state — to the second. Vary the label, or wrap each in a
-  `container_id` with an explicit key.
 
 Font: Inter (SIL Open Font License, see `assets/Inter-OFL.txt`).
