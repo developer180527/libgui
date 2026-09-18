@@ -1,4 +1,4 @@
-use crate::{Color, Rect, Transform};
+use crate::{Color, Rect, Transform, Vec2};
 use std::ops::Range;
 
 /// Which texture an instance samples. `Atlas` is the glyph atlas (also bound
@@ -14,6 +14,7 @@ use crate::render_contract::PrimitiveKind;
 const KIND_SHAPE: f32 = PrimitiveKind::Shape.code();
 const KIND_GLYPH: f32 = PrimitiveKind::Glyph.code();
 const KIND_IMAGE: f32 = PrimitiveKind::Image.code();
+const KIND_LINE: f32 = PrimitiveKind::Line.code();
 
 /// One GPU instance = one quad. Shapes are rounded rects evaluated as an SDF
 /// in the fragment shader, so fills, borders, and shadows are crisp at any DPI.
@@ -154,6 +155,38 @@ impl DrawList {
                 border_color: [0.0; 4],
                 clip: [0.0; 4],
                 params: [0.0, 0.0, 0.0, KIND_GLYPH],
+            },
+        );
+    }
+
+    /// Line segment with round caps, in the current canvas's coordinates.
+    ///
+    /// Overlapping caps give a round join, so a polyline is simply several of
+    /// these. `width` scales with the canvas zoom like every other dimension;
+    /// divide by the zoom for a hairline that stays one pixel wide.
+    pub fn line(&mut self, a: Vec2, b: Vec2, width: f32, color: Color) {
+        let t = self.xform();
+        let (a, b) = (t.point(a), t.point(b));
+        let hw = (width * t.zoom * 0.5).max(0.05);
+        // Bounding box grown for the width and for anti-aliasing, so the
+        // vertex shader needs no padding of its own.
+        let pad = hw + 2.0;
+        let bounds = Rect::new(
+            a.x.min(b.x) - pad,
+            a.y.min(b.y) - pad,
+            (a.x - b.x).abs() + pad * 2.0,
+            (a.y - b.y).abs() + pad * 2.0,
+        );
+        self.push(
+            TextureId::Atlas,
+            bounds,
+            Instance {
+                rect: [bounds.x, bounds.y, bounds.w, bounds.h],
+                uv: [a.x, a.y, b.x, b.y],
+                color: color.to_array(),
+                border_color: [0.0; 4],
+                clip: [0.0; 4],
+                params: [hw, 0.0, 0.0, KIND_LINE],
             },
         );
     }

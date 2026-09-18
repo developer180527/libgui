@@ -18,6 +18,7 @@
 //! - Colours are **sRGB-encoded, straight alpha** floats; the shader outputs
 //!   **premultiplied** colour, blended with [`BLEND`]. Render into a UNORM (not
 //!   sRGB) target, or convert in a later pass. No depth test, no culling.
+//! - Shapes and lines do not read a texture, so the atlas may stay bound.
 //! - The glyph atlas is [`ATLAS_FORMAT`] coverage; user textures
 //!   (`TextureId::User`) are [`USER_TEXTURE_FORMAT`] and composite as opaque RGB.
 //! - Textures are read with texel loads and filtered in the shader: no sampler.
@@ -25,7 +26,7 @@
 use crate::Instance;
 
 /// Bumped whenever anything in this module changes meaning.
-pub const CONTRACT_VERSION: u32 = 1;
+pub const CONTRACT_VERSION: u32 = 2;
 
 /// What an instance draws, stored in `Instance::params[3]` as a float code.
 #[repr(u32)]
@@ -39,10 +40,20 @@ pub enum PrimitiveKind {
     /// Image with a rounded-corner mask: texture `.rgb` × colour.
     /// `params = [corner radius, 0, 0, kind]`, `uv` = texture rect (0..1).
     Image = 2,
+    /// Line segment with round caps, evaluated as a capsule SDF.
+    /// `uv` = `[x0, y0, x1, y1]`, the endpoints in the same space as `rect`;
+    /// `params = [half width, 0, 0, kind]`. `rect` is the segment's bounding
+    /// box, already grown for the width and for anti-aliasing.
+    ///
+    /// Polylines and curves are many of these: overlapping round caps make a
+    /// round join, so no join geometry is needed. (Overlap double-blends where
+    /// two segments meet, which shows only on translucent strokes.)
+    Line = 3,
 }
 
 impl PrimitiveKind {
-    pub const ALL: [PrimitiveKind; 3] = [PrimitiveKind::Shape, PrimitiveKind::Glyph, PrimitiveKind::Image];
+    pub const ALL: [PrimitiveKind; 4] =
+        [PrimitiveKind::Shape, PrimitiveKind::Glyph, PrimitiveKind::Image, PrimitiveKind::Line];
 
     /// Value stored in `Instance::params[3]`.
     pub const fn code(self) -> f32 {
@@ -55,6 +66,7 @@ impl PrimitiveKind {
             0 => Some(PrimitiveKind::Shape),
             1 => Some(PrimitiveKind::Glyph),
             2 => Some(PrimitiveKind::Image),
+            3 => Some(PrimitiveKind::Line),
             _ => None,
         }
     }
@@ -65,6 +77,7 @@ impl PrimitiveKind {
             PrimitiveKind::Shape => "KIND_SHAPE",
             PrimitiveKind::Glyph => "KIND_GLYPH",
             PrimitiveKind::Image => "KIND_IMAGE",
+            PrimitiveKind::Line => "KIND_LINE",
         }
     }
 }
@@ -154,6 +167,17 @@ mod tests {
         }
     }
 
+    /// A line's endpoints ride in `uv`, which shapes and lines do not otherwise
+    /// use — so adding paths changed the kind enum but not the instance layout,
+    /// the stride, or the attribute table a backend binds.
+    #[test]
+    fn adding_lines_did_not_change_the_instance_layout() {
+        assert_eq!(INSTANCE_STRIDE, 96);
+        assert_eq!(INSTANCE_ATTRIBUTES.len(), 6);
+        assert_eq!(std::mem::size_of::<Instance>(), INSTANCE_STRIDE);
+        assert_eq!(CONTRACT_VERSION, 2, "bump this when the contract changes meaning");
+    }
+
     #[test]
     fn kinds_round_trip_through_their_float_code() {
         for k in PrimitiveKind::ALL {
@@ -161,5 +185,6 @@ mod tests {
         }
         assert_eq!(PrimitiveKind::from_code(7.0), None);
         assert!(wgsl_prelude().contains("const KIND_GLYPH: u32 = 1u;"));
+        assert!(wgsl_prelude().contains("const KIND_LINE: u32 = 3u;"));
     }
 }

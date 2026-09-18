@@ -361,15 +361,17 @@ impl Ui {
         // While a menu is open the sheet swallows the pointer, so hovering is
         // judged against this button's own rect: that is what lets you slide
         // from one menu to the next.
-        let sliding = self.any_popup_open() && resp.rect.contains(self.input().mouse_pos);
+        let sliding = self.any_popup_open() && resp.rect.contains(resp.mouse_pos);
+        // Popups live at the root in window coordinates, but a response is in
+        // whatever space its widget was built in: map the anchor across, or a
+        // menu inside a canvas would open at its canvas coordinates.
+        let anchor = self.xform().rect(resp.rect);
         if sliding && !open {
-            let anchor = resp.rect;
             self.open_popup(menu_id, anchor);
         } else if resp.clicked {
             if open {
                 self.close_popups();
             } else {
-                let anchor = resp.rect;
                 self.open_popup(menu_id, anchor);
             }
         }
@@ -460,7 +462,7 @@ impl Ui {
         let open = self.popup_open(child);
         if resp.hovered && !open {
             // Anchored to the row's right edge, so the child sits beside it.
-            let a = resp.rect;
+            let a = self.xform().rect(resp.rect);
             let anchor = Rect::new(a.right() - 4.0, a.y - s.padding.top - 1.0, 0.0, 0.0);
             if let Some(parent) = self.enclosing_popup() {
                 self.open_child_popup(parent, child, anchor);
@@ -496,8 +498,9 @@ impl Ui {
     pub fn context_menu<R>(&mut self, resp: &Response, body: impl FnOnce(&mut Ui) -> R) -> Option<R> {
         let id = resp.id.with("context_menu");
         if resp.secondary_pressed {
-            // Anchored to the pointer, so it opens where you clicked.
-            let p = resp.mouse_pos;
+            // Anchored to the pointer, so it opens where you clicked — in
+            // window coordinates, since the popup itself is not in the canvas.
+            let p = self.xform().point(resp.mouse_pos);
             self.open_popup(id, Rect::new(p.x, p.y, 0.0, 0.0));
         }
         self.popup(id, 160.0, body)
@@ -712,6 +715,45 @@ mod tests {
         let (open, chosen) = frame(&mut ui);
         assert!(chosen.is_empty(), "clicking away chose an item");
         assert!(!open, "clicking away left the menu open");
+    }
+
+    /// A context menu opened from inside a canvas must appear under the
+    /// pointer on screen, not at the canvas coordinates the widget reported.
+    #[test]
+    fn a_context_menu_inside_a_canvas_opens_under_the_pointer() {
+        let mut ui = ui();
+        let mut st = CanvasState { zoom: 2.0, pan: Vec2::new(40.0, 30.0), wheel_zooms: false, ..Default::default() };
+        let run = |ui: &mut Ui, st: &mut CanvasState| {
+            ui.begin_frame(FrameInfo::default());
+            ui.canvas("c", st, |ui, _| {
+                let id = ui.make_id("node");
+                let opts = LeafOptions { interactive: true, ..Default::default() };
+                ui.add_leaf_at(id, Rect::new(0.0, 0.0, 400.0, 400.0), opts, |_, _| {});
+                let r = ui.interact(id);
+                ui.context_menu(&r, |ui| {
+                    let _ = ui.menu_item("Delete");
+                });
+            });
+            let _ = ui.end_frame();
+        };
+        run(&mut ui, &mut st);
+        run(&mut ui, &mut st);
+
+        let pointer = Vec2::new(300.0, 220.0);
+        ui.push(InputEvent::PointerMoved { pos: pointer });
+        ui.push(InputEvent::PointerButton { button: PointerButton::Secondary, pressed: true });
+        run(&mut ui, &mut st);
+        ui.push(InputEvent::PointerButton { button: PointerButton::Secondary, pressed: false });
+        run(&mut ui, &mut st);
+        run(&mut ui, &mut st);
+
+        // The menu's id is derived from the widget it belongs to.
+        let node = Id::new("root").with(("canvas", "c")).with("node");
+        let r = ui.rect_of(node.with("context_menu")).expect("context menu has no rect");
+        assert!(
+            (r.x - pointer.x).abs() < 8.0 && r.y >= pointer.y - 1.0,
+            "menu opened at {r:?} but the pointer was at {pointer:?}"
+        );
     }
 
     /// Right-click opens a menu where the pointer is, not where the widget is.

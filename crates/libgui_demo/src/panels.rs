@@ -464,8 +464,29 @@ impl Panels<'_> {
                 }
             });
 
+            // Wires, drawn under the nodes. Ports sit on the node edges, so
+            // the curve is in canvas coordinates like everything else.
+            let size = Vec2::new(190.0, 112.0);
+            let links: Vec<(Vec2, Vec2)> = (0..nodes.len().saturating_sub(1))
+                .map(|i| {
+                    let a = nodes[i].pos;
+                    let b = nodes[i + 1].pos;
+                    (Vec2::new(a.x + size.x, a.y + 26.0), Vec2::new(b.x, b.y + 26.0))
+                })
+                .collect();
+            let accent = t.palette.accent;
+            let wire_id = ui.make_id("wires");
+            ui.add_leaf_at(wire_id, vis, LeafOptions::default(), move |p, _| {
+                for (from, to) in &links {
+                    // A hairline would vanish when zoomed out, so give the wire
+                    // a real canvas width and a minimum on screen.
+                    p.wire(*from, *to, (2.0f32).max(1.5 / zoom), accent);
+                    p.rect(Rect::new(from.x - 4.0, from.y - 4.0, 8.0, 8.0), accent, 4.0);
+                    p.rect(Rect::new(to.x - 4.0, to.y - 4.0, 8.0, 8.0), accent, 4.0);
+                }
+            });
+
             for (i, node) in nodes.iter_mut().enumerate() {
-                let size = Vec2::new(190.0, 112.0);
                 let rect = Rect::new(node.pos.x, node.pos.y, size.x, size.y);
                 // Skip nodes that cannot be seen at all.
                 if rect.intersect(&vis).is_none() {
@@ -486,7 +507,9 @@ impl Panels<'_> {
                 if bar.active {
                     node.pos += bar.drag_delta;
                 }
-                ui.layer_in(node_id, libgui::Layer::Window, rect, frame, |ui| {
+                // `container_at`, not `layer_in`: a layer hangs off the root and
+                // would ignore the canvas transform and its clip.
+                ui.container_at(node_id, rect, frame, |ui| {
                     let head = t.palette.bg_inset;
                     let title = node.title.clone();
                     let fg = t.palette.text;

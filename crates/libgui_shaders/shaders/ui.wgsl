@@ -3,6 +3,7 @@
 //   KIND_SHAPE: rounded-rect SDF (fills, borders, soft shadows)
 //   KIND_GLYPH: glyph (coverage from the R8 atlas)
 //   KIND_IMAGE: image with rounded-corner mask (e.g. engine viewport)
+//   KIND_LINE:  line segment with round caps (wires, curves, waveforms)
 // Output is premultiplied alpha.
 //
 // CONTRACT_VERSION and the KIND_* constants are generated from
@@ -39,6 +40,9 @@ struct VOut {
     @location(5) @interpolate(flat) params: vec4<f32>,
     @location(6) @interpolate(flat) half_size: vec2<f32>,
     @location(7) world: vec2<f32>,
+    // KIND_LINE endpoints; flat, because the fragment needs the segment
+    // itself rather than a value interpolated across the quad.
+    @location(8) @interpolate(flat) seg: vec4<f32>,
 };
 
 @vertex
@@ -67,7 +71,16 @@ fn vs_main(@builtin(vertex_index) vi: u32, i: Inst) -> VOut {
     o.params = i.params;
     o.half_size = half_size;
     o.world = world;
+    o.seg = i.uv;
     return o;
+}
+
+// Distance from p to the segment ab.
+fn sd_segment(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
+    let pa = p - a;
+    let ba = b - a;
+    let h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-6), 0.0, 1.0);
+    return length(pa - ba * h);
 }
 
 fn sd_round_rect(p: vec2<f32>, b: vec2<f32>, r: f32) -> f32 {
@@ -104,6 +117,11 @@ fn fs_main(v: VOut) -> @location(0) vec4<f32> {
 
     // Sample only in the branches that need it: shapes are the bulk of UI
     // fragments and never read the texture.
+    if (kind == KIND_LINE) {
+        let d = sd_segment(v.world, v.seg.xy, v.seg.zw) - v.params.x;
+        let m = clamp(0.5 - d / aa, 0.0, 1.0);
+        return premul(v.color) * m;
+    }
     if (kind == KIND_IMAGE) {
         let r = min(v.params.x, min(v.half_size.x, v.half_size.y));
         let d = sd_round_rect(v.local, v.half_size, r);

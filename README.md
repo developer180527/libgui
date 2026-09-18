@@ -179,6 +179,11 @@ ui.canvas("graph", &mut view, |ui, view| {
 - **Ordinary widgets work inside it.** They lay out, hit-test and report `rect`, `mouse_pos` and
   `drag_delta` in **canvas coordinates**, so app logic is identical at any zoom — no dividing drag
   deltas by the zoom, no transforming the pointer yourself.
+- **Position content with `ui.container_at(id, rect, frame, …)`** — a node, a clip on a timeline, a
+  key on a curve. It attaches to the current container, so it follows the pan and zoom and is
+  clipped to the canvas. `ui.layer` and `ui.layer_in` deliberately hang off the **root** so menus and
+  floating windows sit above everything; that also means they ignore the canvas, so do not use them
+  to place canvas content.
 - **Text is rasterised at the zoomed resolution**, not scaled up from a 1x bitmap, so a node's
   labels stay crisp. The size is quantised so a continuous zoom does not re-rasterise every frame,
   and `measure` is unaffected, so layout is identical at any zoom.
@@ -192,11 +197,32 @@ ui.canvas("graph", &mut view, |ui, view| {
   animated. `ui.with_transform(id, t, body)` is the raw primitive.
 
 There is **no rotation**: the shader draws axis-aligned quads, so `Transform` is pan plus uniform
-zoom. Diagonal lines and curves (node wires, automation curves, waveforms) need a path primitive
-that does not exist yet — see the roadmap.
+zoom.
 
-The demo's *Node Graph* tab is a worked example: a zooming grid, nodes with sliders and toggles
-inside them, drag-to-move, and culling.
+The demo's *Node Graph* tab is a worked example: a zooming grid, bezier wires between ports, nodes
+with sliders and toggles inside them, drag-to-move, and culling.
+
+## Lines and curves
+
+```rust
+p.line(a, b, 2.0, colour);                       // round caps
+p.polyline(&points, 1.5, colour);                // joins are round for free
+p.bezier(p0, c0, c1, p1, 2.0, colour);           // flattened by on-screen size
+p.wire(from, to, 2.0, colour);                   // node-graph cable: horizontal tangents
+```
+
+Node wires, automation and easing curves, waveforms, motion paths, line charts — none of which the
+axis-aligned rounded rect could express.
+
+A segment is one instance evaluated as a capsule SDF, so it is anti-aliased, clipped and culled like
+everything else, and it follows the canvas transform. Overlapping round caps make a round join, so a
+polyline needs no join geometry. (Two segments double-blend where they meet, which shows only on
+translucent strokes.)
+
+This bumped `CONTRACT_VERSION` to 2, but **not** the instance layout: a segment's endpoints ride in
+`uv`, which untextured primitives do not use, so the 96-byte stride and the six attributes a backend
+binds are unchanged. Curves are flattened on the CPU by their size *on screen*, so they stay smooth
+zoomed in without wasting instances zoomed out.
 
 ## Menus, popups and tooltips
 
@@ -478,9 +504,9 @@ these are the regression guards.
 2. ~~Scroll areas~~ ✅ ~~virtualised lists, variable row heights, trees~~ ✅ `ui.virtual_list`, `ui.virtual_rows`, `ui.tree_row`; next: horizontal scroll, keyboard PageUp/Down, multi-select and drag-to-reparent.
 3. ~~Keyboard/shortcut routing~~ ✅ ~~menus, popups/context menus, tooltips, z-order~~ ✅ `Layer`, `popup`, `menu_button`, `context_menu`, `tooltip`; next: checkable/icon menu items, keyboard navigation within a menu, "safe triangle" submenu tracking.
 4. ~~Docking + tabs + splitters~~ ✅ Unity-style with OS-window tear-off; next: layout save/load, tab close/context menu, maximize pane.
-5. **Paths**: lines, polylines and beziers as a new `PrimitiveKind` (bump `CONTRACT_VERSION`).
-   Node-graph wires, automation and easing curves, waveforms, motion paths, line charts — none of
-   which can be drawn today, since the only shape is an axis-aligned rounded rect.
+5. ~~Paths~~ ✅ `p.line` / `polyline` / `bezier` / `wire`, a `Line` primitive at `CONTRACT_VERSION` 2;
+   next: stroked/filled arbitrary paths, dashes, arrowheads, and a real line/area plot (`plot` is
+   still a debug bar chart).
 6. **Horizontal and 2D scrolling**, then tables/data grids with resizable and frozen columns.
 7. **Real text shaping**: replace `text.rs` internals with `cosmic-text`/`swash` or HarfBuzz
    (ligatures, bidi, font fallback, CJK), multi-page atlas with LRU eviction.

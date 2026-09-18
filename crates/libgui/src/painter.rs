@@ -27,6 +27,46 @@ impl Painter<'_> {
         self.draw.image(r, tex, radius, Color::WHITE);
     }
 
+    /// Straight line with round caps.
+    pub fn line(&mut self, a: Vec2, b: Vec2, width: f32, color: Color) {
+        self.draw.line(a, b, width, color);
+    }
+
+    /// Connected line segments. Round caps make the joins round for free.
+    pub fn polyline(&mut self, points: &[Vec2], width: f32, color: Color) {
+        for w in points.windows(2) {
+            self.draw.line(w[0], w[1], width, color);
+        }
+    }
+
+    /// Cubic bezier, flattened to segments. The number of segments follows the
+    /// curve's size *on screen*, so it stays smooth when zoomed in and does not
+    /// waste instances when zoomed out.
+    pub fn bezier(&mut self, p0: Vec2, c0: Vec2, c1: Vec2, p1: Vec2, width: f32, color: Color) {
+        let n = Self::bezier_steps(p0, c0, c1, p1, self.draw.xform().zoom);
+        let mut prev = p0;
+        for i in 1..=n {
+            let t = i as f32 / n as f32;
+            let p = cubic(p0, c0, c1, p1, t);
+            self.draw.line(prev, p, width, color);
+            prev = p;
+        }
+    }
+
+    /// A left-to-right wire between two points, the shape a node graph uses:
+    /// the tangents leave horizontally, so it reads as a cable.
+    pub fn wire(&mut self, from: Vec2, to: Vec2, width: f32, color: Color) {
+        let dx = ((to.x - from.x).abs() * 0.5).max(24.0);
+        self.bezier(from, Vec2::new(from.x + dx, from.y), Vec2::new(to.x - dx, to.y), to, width, color);
+    }
+
+    fn bezier_steps(p0: Vec2, c0: Vec2, c1: Vec2, p1: Vec2, zoom: f32) -> usize {
+        let len = |a: Vec2, b: Vec2| (b.x - a.x).hypot(b.y - a.y);
+        // Control polygon length is an upper bound on the arc length.
+        let screen_len = (len(p0, c0) + len(c0, c1) + len(c1, p1)) * zoom;
+        (screen_len.max(1.0).sqrt() * 1.2) as usize + 2
+    }
+
     pub fn measure(&self, size: f32, text: &str) -> Vec2 {
         self.fonts.measure(self.font, size, text)
     }
@@ -52,4 +92,13 @@ impl Painter<'_> {
         let c = r.center();
         self.text(Vec2::new(c.x - m.x * 0.5, c.y - m.y * 0.5), size, color, text);
     }
+}
+
+fn cubic(p0: Vec2, c0: Vec2, c1: Vec2, p1: Vec2, t: f32) -> Vec2 {
+    let u = 1.0 - t;
+    let (a, b, c, d) = (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
+    Vec2::new(
+        p0.x * a + c0.x * b + c1.x * c + p1.x * d,
+        p0.y * a + c0.y * b + c1.y * c + p1.y * d,
+    )
 }

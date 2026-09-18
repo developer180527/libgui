@@ -1238,8 +1238,16 @@ impl Ui {
         r
     }
 
-    /// A floating layer at `rect` (window coordinates), drawn and hit-tested
-    /// above everything built before it: in-app windows, popovers, palettes.
+    /// A floating layer at `rect`, drawn and hit-tested above everything built
+    /// before it: in-app windows, popovers, palettes.
+    ///
+    /// A layer hangs off the **root**, not the current container, which is what
+    /// puts it above everything — but it also means it ignores any enclosing
+    /// [`Ui::canvas`]: its rect is in window coordinates and it is not clipped
+    /// to the container it was written inside. That is right for a menu, which
+    /// should not scale with a canvas's zoom. For a box positioned *within* the
+    /// current container — a node in a graph, a clip on a timeline — use
+    /// [`Ui::container_at`].
     pub fn layer<R>(&mut self, id: Id, rect: Rect, frame: Frame, body: impl FnOnce(&mut Self) -> R) -> R {
         self.layer_in(id, Layer::Window, rect, frame, body)
     }
@@ -1264,6 +1272,50 @@ impl Ui {
         self.nodes.push(n);
         self.nodes[0].children.push(idx);
         self.stack.push(idx);
+        let r = body(self);
+        self.stack.pop();
+        r
+    }
+
+    /// A container at an explicit rect **inside the current container**, so it
+    /// follows any enclosing [`Ui::canvas`]'s pan and zoom and is clipped to it.
+    ///
+    /// This is what positions content on a canvas: a node in a graph, a clip on
+    /// a timeline, a key on a curve editor. Unlike [`Ui::layer_in`] it does not
+    /// escape to the root; unlike [`Ui::add_leaf_at`] it can hold widgets.
+    ///
+    /// ```ignore
+    /// ui.canvas("graph", &mut view, |ui, _| {
+    ///     ui.container_at(node_id, node.rect, frame, |ui| {
+    ///         ui.slider("Amount", &mut node.amount, 0.0, 1.0);
+    ///     });
+    /// });
+    /// ```
+    ///
+    /// Siblings stack in build order, or by [`Layer`] with
+    /// [`Ui::container_at_in`].
+    pub fn container_at<R>(&mut self, id: Id, rect: Rect, frame: Frame, body: impl FnOnce(&mut Self) -> R) -> R {
+        self.container_at_in(id, Layer::Window, rect, frame, body)
+    }
+
+    /// [`Ui::container_at`] with an explicit stacking [`Layer`] among its
+    /// positioned siblings.
+    pub fn container_at_in<R>(&mut self, id: Id, z: Layer, rect: Rect, frame: Frame, body: impl FnOnce(&mut Self) -> R) -> R {
+        self.seen.insert(id);
+        let mut n = Node::new(id, Layout::column().shrink());
+        n.absolute = Some(rect);
+        n.z = z;
+        n.clip = frame.clip;
+        if frame.fill.a > 0.0 || frame.border_width > 0.0 || frame.shadow {
+            n.paint = Some(Box::new(move |p: &mut Painter, r: Rect| {
+                if frame.shadow {
+                    p.shadow(r.translate(0.0, 4.0), frame.radius, 16.0, p.theme.palette.shadow);
+                }
+                p.rect_bordered(r, frame.fill, frame.radius, frame.border_width, frame.border);
+            }));
+        }
+        let i = self.attach(n);
+        self.stack.push(i);
         let r = body(self);
         self.stack.pop();
         r
@@ -2393,6 +2445,169 @@ mod tests {
             );
         }
         assert!(st.zoom <= st.max_zoom && st.zoom >= st.min_zoom);
+    }
+
+    /// Lines are emitted as `Line` instances carrying their endpoints, are
+    /// culled like everything else, and follow the canvas transform.
+    #[test]
+    fn lines_carry_their_endpoints_and_follow_the_canvas() {
+        use crate::render_contract::PrimitiveKind;
+        let mut ui = ui();
+        let seg = |out: &FrameOutput| -> Vec<[f32; 4]> {
+            out.draw
+                .instances
+                .iter()
+                .filter(|i| PrimitiveKind::from_code(i.params[3]) == Some(PrimitiveKind::Line))
+                .map(|i| i.uv)
+                .collect()
+        };
+
+        // Plain, untransformed.
+        ui.begin_frame(FrameInfo::default());
+        let lid = ui.make_id("l");
+        ui.add_leaf(lid, Layout::leaf(Size::Fixed(10.0), Size::Fixed(10.0)), Vec2::ZERO, false, |p, _| {
+            p.line(Vec2::new(10.0, 20.0), Vec2::new(110.0, 220.0), 2.0, Color::WHITE);
+        });
+        let out = ui.end_frame();
+        assert_eq!(seg(&out), vec![[10.0, 20.0, 110.0, 220.0]], "endpoints are not in the instance");
+
+        // Inside a 2x canvas panned by (30, 40): endpoints map to the window.
+        let mut st = CanvasState { zoom: 2.0, pan: Vec2::new(30.0, 40.0), wheel_zooms: false, ..CanvasState::default() };
+        let run = |ui: &mut Ui, st: &mut CanvasState| -> Vec<[f32; 4]> {
+            ui.begin_frame(FrameInfo::default());
+            ui.canvas("c", st, |ui, _| {
+                let id = ui.make_id("l");
+                ui.add_leaf_at(id, Rect::new(0.0, 0.0, 400.0, 400.0), LeafOptions::default(), |p, _| {
+                    p.line(Vec2::new(10.0, 20.0), Vec2::new(110.0, 220.0), 2.0, Color::WHITE);
+                });
+            });
+            let out = ui.end_frame();
+            seg(&out)
+        };
+        run(&mut ui, &mut st);
+        let got = run(&mut ui, &mut st);
+        assert_eq!(got, vec![[10.0 * 2.0 + 30.0, 20.0 * 2.0 + 40.0, 110.0 * 2.0 + 30.0, 220.0 * 2.0 + 40.0]]);
+
+        // Far off screen: culled, like any other primitive.
+        ui.begin_frame(FrameInfo::default());
+        let lid = ui.make_id("l2");
+        ui.add_leaf(lid, Layout::leaf(Size::Fixed(10.0), Size::Fixed(10.0)), Vec2::ZERO, false, |p, _| {
+            p.line(Vec2::new(-9000.0, -9000.0), Vec2::new(-8000.0, -8000.0), 2.0, Color::WHITE);
+        });
+        let out = ui.end_frame();
+        assert!(seg(&out).is_empty(), "an offscreen line was not culled");
+    }
+
+    /// A curve is flattened by how big it is *on screen*, so it stays smooth
+    /// when zoomed in without wasting instances when zoomed out.
+    #[test]
+    fn bezier_detail_follows_the_zoom() {
+        use crate::render_contract::PrimitiveKind;
+        let mut ui = ui();
+        let count = |ui: &mut Ui, st: &mut CanvasState| -> usize {
+            ui.begin_frame(FrameInfo::default());
+            ui.canvas("c", st, |ui, _| {
+                let id = ui.make_id("w");
+                ui.add_leaf_at(id, Rect::new(0.0, 0.0, 600.0, 400.0), LeafOptions::default(), |p, _| {
+                    p.wire(Vec2::new(0.0, 0.0), Vec2::new(300.0, 200.0), 2.0, Color::WHITE);
+                });
+            });
+            let out = ui.end_frame();
+            out.draw
+                .instances
+                .iter()
+                .filter(|i| PrimitiveKind::from_code(i.params[3]) == Some(PrimitiveKind::Line))
+                .count()
+        };
+        let mut far = CanvasState { zoom: 0.25, wheel_zooms: false, ..CanvasState::default() };
+        let mut near = CanvasState { zoom: 4.0, wheel_zooms: false, ..CanvasState::default() };
+        count(&mut ui, &mut far);
+        let at_far = count(&mut ui, &mut far);
+        count(&mut ui, &mut near);
+        let at_near = count(&mut ui, &mut near);
+        assert!(at_far >= 3, "a curve should still be a curve when zoomed out: {at_far}");
+        assert!(at_near > at_far * 2, "zoomed in {at_near} segments vs {at_far} zoomed out");
+    }
+
+    /// Content positioned on a canvas must follow the canvas: drawn at the
+    /// transformed place, hit there, clipped to the canvas, and lining up with
+    /// anything else drawn in canvas coordinates.
+    ///
+    /// Regression: node panels were built with `layer_in`, which hangs off the
+    /// root, so they drew at raw canvas coordinates over other panels while
+    /// the wires (built with `add_leaf_at`, inside the canvas) moved correctly.
+    #[test]
+    fn positioned_content_follows_the_canvas() {
+        use crate::render_contract::PrimitiveKind;
+        let node = Rect::new(100.0, 50.0, 120.0, 60.0);
+        let mut st = CanvasState { zoom: 2.0, pan: Vec2::new(30.0, 40.0), wheel_zooms: false, ..CanvasState::default() };
+        let mut ui = ui();
+
+        // Canvas fills the window, so the transform is exactly zoom + pan.
+        let expect = Rect::new(100.0 * 2.0 + 30.0, 50.0 * 2.0 + 40.0, 120.0 * 2.0, 60.0 * 2.0);
+
+        let run = |ui: &mut Ui, st: &mut CanvasState| -> (Vec<[f32; 4]>, Vec<[f32; 4]>, Response) {
+            ui.begin_frame(FrameInfo::default());
+            let mut inner = Response::default();
+            ui.canvas("c", st, |ui, _| {
+                // A wire in canvas coordinates, from the node's right edge.
+                let wid = ui.make_id("wire");
+                ui.add_leaf_at(wid, Rect::new(0.0, 0.0, 900.0, 600.0), LeafOptions::default(), move |p, _| {
+                    p.line(Vec2::new(node.right(), node.y), Vec2::new(400.0, 300.0), 2.0, Color::WHITE);
+                });
+                let f = Frame { fill: Color::WHITE, border: Color::WHITE, border_width: 1.0, radius: 0.0, shadow: false, clip: true };
+                let nid = ui.make_id("node");
+                ui.container_at(nid, node, f, |ui| {
+                    let bid = ui.make_id("hit");
+                    ui.add_leaf(bid, Layout::leaf(Size::Grow(1.0), Size::Grow(1.0)), Vec2::ZERO, true, |_, _| {});
+                    inner = ui.interact(bid);
+                });
+            });
+            let out = ui.end_frame();
+            let mut shapes = Vec::new();
+            let mut lines = Vec::new();
+            for i in &out.draw.instances {
+                match PrimitiveKind::from_code(i.params[3]) {
+                    Some(PrimitiveKind::Line) => lines.push(i.uv),
+                    _ => shapes.push(i.rect),
+                }
+            }
+            (shapes, lines, inner)
+        };
+
+        run(&mut ui, &mut st);
+        let (shapes, lines, _) = run(&mut ui, &mut st);
+
+        // 1. Drawn where the canvas puts it, at the canvas's scale.
+        let found = shapes.iter().any(|r| {
+            (r[0] - expect.x).abs() < 0.5 && (r[1] - expect.y).abs() < 0.5 && (r[2] - expect.w).abs() < 0.5
+        });
+        assert!(found, "node drawn at {shapes:?}, expected {expect:?}");
+
+        // 2. The wire leaving the node's edge starts at the node's drawn edge,
+        //    so wires and nodes cannot disagree.
+        let wire = lines[0];
+        assert!(
+            (wire[0] - expect.right()).abs() < 0.5 && (wire[1] - expect.y).abs() < 0.5,
+            "wire starts at ({}, {}) but the node's corner is ({}, {})",
+            wire[0],
+            wire[1],
+            expect.right(),
+            expect.y
+        );
+
+        // 3. Hit where it is drawn, not at its canvas coordinates.
+        ui.push(InputEvent::PointerMoved { pos: Vec2::new(node.x + 10.0, node.y + 10.0) });
+        assert!(!run(&mut ui, &mut st).2.hovered, "hit at raw canvas coordinates");
+        ui.push(InputEvent::PointerMoved { pos: Vec2::new(expect.x + 10.0, expect.y + 10.0) });
+        assert!(run(&mut ui, &mut st).2.hovered, "not hit where it is drawn");
+
+        // 4. Panned far away it is clipped out entirely, rather than escaping
+        //    the canvas and drawing over neighbouring panels.
+        st.pan = Vec2::new(-20_000.0, -20_000.0);
+        run(&mut ui, &mut st);
+        let (shapes, _, _) = run(&mut ui, &mut st);
+        assert!(shapes.is_empty(), "content escaped the canvas: {shapes:?}");
     }
 
     #[test]
