@@ -22,10 +22,10 @@ mod text_edit;
 mod widgets;
 
 pub use backend::{Backend, Globals, INSTANCE_STRIDE, VERTICES_PER_INSTANCE};
-pub use dock::{DockConfig, DockNode, DockState, DropKind, DropTarget, Side, Surface, SurfaceId, TabViewer};
+pub use dock::{DockConfig, FloatingMode, DockNode, DockState, DropKind, DropTarget, Side, Surface, SurfaceId, TabViewer};
 pub use draw::{Batch, DrawList, Instance, TextureId};
 pub use id::Id;
-pub use input::{Cursor, Event, Input, Key, Modifiers};
+pub use input::{Cursor, Event, Gesture, Input, Key, Modifiers, PointerKind, Touch};
 pub use layout::{Align, Axis, Insets, Layout, Size};
 pub use math::{Color, Rect, Vec2};
 pub use painter::Painter;

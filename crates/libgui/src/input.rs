@@ -15,6 +15,42 @@ pub struct Input {
     pub modifiers: Modifiers,
     /// Keyboard / text / clipboard events since last frame, in order.
     pub events: Vec<Event>,
+    /// Mouse or touch. With `Touch`, fill `touches`; libgui derives the
+    /// primary pointer (`mouse_pos`/`mouse_down`) and gestures from them.
+    pub pointer_kind: PointerKind,
+    /// Fingers currently on the screen, in the order they landed.
+    pub touches: Vec<Touch>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PointerKind {
+    #[default]
+    Mouse,
+    Touch,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Touch {
+    pub id: u64,
+    /// Logical px.
+    pub pos: Vec2,
+}
+
+/// Two-finger gesture for this frame (touch only).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Gesture {
+    pub active: bool,
+    pub center: Vec2,
+    /// Movement of the two-finger centre since last frame.
+    pub pan: Vec2,
+    /// Distance ratio since last frame (1.0 = no zoom).
+    pub zoom: f32,
+}
+
+impl Default for Gesture {
+    fn default() -> Self {
+        Self { active: false, center: Vec2::ZERO, pan: Vec2::ZERO, zoom: 1.0 }
+    }
 }
 
 impl Default for Input {
@@ -29,6 +65,8 @@ impl Default for Input {
             scroll: Vec2::ZERO,
             modifiers: Modifiers::default(),
             events: Vec::new(),
+            pointer_kind: PointerKind::Mouse,
+            touches: Vec::new(),
         }
     }
 }

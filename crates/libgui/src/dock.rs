@@ -77,6 +77,9 @@ pub struct DockConfig {
     pub tear_off_distance: f32,
     /// Hide the dragged window while it hovers a drop target (Unity-style).
     pub hide_window_over_target: bool,
+    pub floating_mode: FloatingMode,
+    /// Title strip height of in-app floating panels.
+    pub inapp_header: f32,
     /// Size of torn-off windows: the source pane's size, clamped to these.
     pub floating_min_size: Vec2,
     pub floating_max_size: Vec2,
@@ -94,6 +97,16 @@ pub struct DockConfig {
     pub reorder_speed: f32,
 }
 
+/// Where torn-off tabs go.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FloatingMode {
+    /// Real OS windows (desktop). The host creates/moves them.
+    #[default]
+    OsWindows,
+    /// Panels floating inside the main window (tablets, or single-window hosts).
+    InApp,
+}
+
 impl Default for DockConfig {
     fn default() -> Self {
         Self {
@@ -103,6 +116,8 @@ impl Default for DockConfig {
             drag_threshold: 6.0,
             tear_off_distance: 26.0,
             hide_window_over_target: true,
+            floating_mode: FloatingMode::OsWindows,
+            inapp_header: 26.0,
             floating_min_size: Vec2::new(280.0, 200.0),
             floating_max_size: Vec2::new(900.0, 700.0),
             edge_zone: 0.28,
@@ -247,6 +262,8 @@ pub struct Surface<T> {
     pub window_pos: Option<Vec2>,
     /// Initial inner size (logical px) for creating the OS window.
     pub window_size: Vec2,
+    /// In-app floating placement, in the main window's logical coordinates.
+    pub rect: Rect,
     pub visible: bool,
     origin: Vec2,
     scale: f32,
@@ -263,6 +280,7 @@ impl<T> Surface<T> {
             floating,
             window_pos: None,
             window_size: Vec2::new(480.0, 360.0),
+            rect: Rect::new(80.0, 80.0, 480.0, 360.0),
             visible: true,
             origin: Vec2::ZERO,
             scale: 1.0,
@@ -517,7 +535,12 @@ impl<T> DockState<T> {
             let tab_rect = geom.tabs.get(d.index).copied().unwrap_or_default();
             if self.surfaces[si].floating && self.surfaces[si].is_single_tab() {
                 // The only tab of a floating window: drag moves the window.
-                let grab = Vec2::new(tab_rect.x + d.grab.x, tab_rect.y + d.grab.y);
+                let origin = if cfg.floating_mode == FloatingMode::InApp {
+                    Vec2::new(self.surfaces[si].rect.x, self.surfaces[si].rect.y)
+                } else {
+                    Vec2::ZERO
+                };
+                let grab = Vec2::new(tab_rect.x + d.grab.x, tab_rect.y + d.grab.y) - origin;
                 d.phase = Phase::Floating { surface: d.source, grab };
             } else {
                 let t = cfg.tear_off_distance;
@@ -535,8 +558,20 @@ impl<T> DockState<T> {
             let target = self.find_target(self.pointer, surface);
             let hide = target.is_some() && cfg.hide_window_over_target && surface != d.source;
             let pointer = self.pointer;
+            let main = (self.surfaces[0].origin, self.surfaces[0].scale);
+            let inapp = cfg.floating_mode == FloatingMode::InApp;
             if let Some(s) = self.surface_mut(surface) {
-                s.window_pos = Some(pointer - grab * s.scale);
+                if inapp {
+                    // Panel follows the pointer inside the main window.
+                    let p = (pointer - main.0) * (1.0 / main.1);
+                    s.rect.x = p.x - grab.x;
+                    s.rect.y = p.y - grab.y;
+                    s.origin = main.0;
+                    s.scale = main.1;
+                    s.has_frame = true;
+                } else {
+                    s.window_pos = Some(pointer - grab * s.scale);
+                }
                 s.visible = !hide;
             }
             d.target = target;
@@ -566,7 +601,11 @@ impl<T> DockState<T> {
             geom.rect.w.clamp(cfg.floating_min_size.x, cfg.floating_max_size.x),
             geom.rect.h.clamp(cfg.floating_min_size.y, cfg.floating_max_size.y),
         );
-        let grab = Vec2::new(cfg.tab_bar_padding + d.grab.x, d.grab.y);
+        let inapp = cfg.floating_mode == FloatingMode::InApp;
+        let header = if inapp { cfg.inapp_header } else { 0.0 };
+        let tab_dy = geom.tabs.get(d.index).map_or(0.0, |t| t.y - geom.bar.y);
+        let grab = Vec2::new(cfg.tab_bar_padding + d.grab.x, header + tab_dy + d.grab.y);
+        let main = (self.surfaces[0].origin, self.surfaces[0].scale);
         let source = &mut self.surfaces[si];
         let scale = source.scale;
         let Some(tab) = source.root.as_mut().and_then(|r| r.leaf_mut(d.leaf)).and_then(|l| {
@@ -580,9 +619,17 @@ impl<T> DockState<T> {
         let leaf = self.next();
         let mut s = Surface::new(sid, Some(DockNode::Leaf(Leaf { id: leaf, tabs: vec![tab], active: 0 })), true);
         s.window_size = size;
-        s.scale = scale;
-        s.origin = self.pointer - grab * scale;
-        s.window_pos = Some(s.origin);
+        if inapp {
+            let p = (self.pointer - main.0) * (1.0 / main.1);
+            s.rect = Rect::new(p.x - grab.x, p.y - grab.y, size.x, size.y + header);
+            s.origin = main.0;
+            s.scale = main.1;
+            s.has_frame = true;
+        } else {
+            s.scale = scale;
+            s.origin = self.pointer - grab * scale;
+            s.window_pos = Some(s.origin);
+        }
         self.surfaces.push(s);
         self.focused_leaf = Some(leaf);
         d.phase = Phase::Floating { surface: sid, grab };
@@ -605,6 +652,13 @@ impl<T> DockState<T> {
             if s.root.is_none() {
                 return at(DropKind::Empty, r);
             }
+            // Tab bars win over window edges: top panes' bars sit on the edge.
+            for g in &s.leaves {
+                if g.bar.contains(p) {
+                    let index = g.tabs.iter().filter(|t| t.center().x < p.x).count();
+                    return at(DropKind::Tab { leaf: g.id, index }, g.rect);
+                }
+            }
             let e = cfg.root_edge_px;
             let root_side = if p.x < r.x + e {
                 Some(Side::Left)
@@ -621,10 +675,6 @@ impl<T> DockState<T> {
                 return at(DropKind::Root { side }, side.part(r, cfg.root_split_fraction));
             }
             for g in &s.leaves {
-                if g.bar.contains(p) {
-                    let index = g.tabs.iter().filter(|t| t.center().x < p.x).count();
-                    return at(DropKind::Tab { leaf: g.id, index }, g.rect);
-                }
                 if g.rect.contains(p) {
                     let nx = (p.x - g.rect.x) / g.rect.w.max(1.0);
                     let ny = (p.y - g.rect.y) / g.rect.h.max(1.0);
@@ -632,6 +682,11 @@ impl<T> DockState<T> {
                     let (dist, side) = edges.into_iter().fold((f32::MAX, Side::Left), |a, b| if b.0 < a.0 { b } else { a });
                     if dist < cfg.edge_zone {
                         return at(DropKind::Split { leaf: g.id, side }, side.part(g.rect, cfg.split_fraction));
+                    }
+                    // In-app, a pane's middle leaves the panel floating (there is no
+                    // "outside the window" to drop it on); tab bars still dock as tabs.
+                    if cfg.floating_mode == FloatingMode::InApp {
+                        return None;
                     }
                     return at(DropKind::Tab { leaf: g.id, index: g.tabs.len() }, g.rect);
                 }
@@ -697,8 +752,36 @@ impl<T> DockState<T> {
 
     // ---- rendering --------------------------------------------------------
 
-    /// Draw one surface's dock tree (fills the remaining space in `ui`).
+    /// Draw one surface's dock tree (fills the remaining space in `ui`). With
+    /// `FloatingMode::InApp`, showing `SurfaceId::MAIN` also draws every
+    /// floating surface as a panel above it.
     pub fn show<V: TabViewer<Tab = T>>(&mut self, ui: &mut Ui, surface: SurfaceId, viewer: &mut V) {
+        self.show_surface(ui, surface, viewer);
+        let inapp = surface == SurfaceId::MAIN && self.config.floating_mode == FloatingMode::InApp;
+        if inapp {
+            let (origin, scale) = (self.surfaces[0].origin, self.surfaces[0].scale);
+            let floats: Vec<SurfaceId> = self.surfaces.iter().skip(1).map(|s| s.id).collect();
+            for sid in floats {
+                if let Some(s) = self.surface_mut(sid) {
+                    s.origin = origin;
+                    s.scale = scale;
+                    s.has_frame = true;
+                }
+                self.show_floating_panel(ui, sid, viewer);
+            }
+        }
+        if let Some(d) = self.drag {
+            if d.phase != Phase::Pending && (d.source == surface || inapp) {
+                ui.cursor = Cursor::Grabbing;
+            }
+            let here = |t: &DropTarget| t.surface == surface || (inapp && t.surface != SurfaceId::MAIN);
+            if let Some(t) = d.target.filter(here) {
+                drop_preview(ui, surface, t.preview, &self.config);
+            }
+        }
+    }
+
+    fn show_surface<V: TabViewer<Tab = T>>(&mut self, ui: &mut Ui, surface: SurfaceId, viewer: &mut V) {
         let Some(si) = self.index_of(surface) else { return };
         let cfg = self.config.clone();
         let local_pointer = self.surfaces[si].to_local(self.pointer);
@@ -745,13 +828,104 @@ impl<T> DockState<T> {
                 }
             }
         }
+    }
 
-        if let Some(d) = self.drag {
-            if d.phase != Phase::Pending && d.source == surface {
+    /// In-app floating panel: title strip (drag to move, x to close), the
+    /// surface's dock tree, and a resize grip.
+    fn show_floating_panel<V: TabViewer<Tab = T>>(&mut self, ui: &mut Ui, sid: SurfaceId, viewer: &mut V) {
+        let Some(s) = self.surface(sid) else { return };
+        if !s.visible {
+            return;
+        }
+        let cfg = self.config.clone();
+        let bounds = self.surfaces[0].root_rect;
+        let title = s.first_tab().map_or(String::new(), |t| viewer.title(t));
+        let mut r = s.rect;
+        // Keep at least the title strip reachable.
+        if bounds.w > 0.0 {
+            r.w = r.w.clamp(cfg.floating_min_size.x, bounds.w.max(cfg.floating_min_size.x));
+            r.h = r.h.clamp(cfg.floating_min_size.y, bounds.h.max(cfg.floating_min_size.y));
+            r.x = r.x.clamp(bounds.x - r.w + 80.0, bounds.right() - 80.0);
+            r.y = r.y.clamp(bounds.y, bounds.bottom() - cfg.inapp_header);
+        }
+        let t = ui.theme.clone();
+        let frame = Frame {
+            fill: t.panel.fill,
+            border: t.palette.border_strong,
+            border_width: 1.0,
+            radius: t.metrics.radius_large,
+            shadow: true,
+            clip: true,
+        };
+        let mut moved = Vec2::ZERO;
+        let mut resized = Vec2::ZERO;
+        let mut close = false;
+        let mut raise = false;
+        ui.layer(Id::new(("dock_float", sid.0)), r, frame, |ui| {
+            let grip = Id::new(("dock_float_grip", sid.0));
+            let resp = ui.interact_drag(grip);
+            raise |= resp.pressed;
+            if resp.active {
+                moved = resp.drag_delta;
                 ui.cursor = Cursor::Grabbing;
             }
-            if let Some(t) = d.target.filter(|t| t.surface == surface) {
-                drop_preview(ui, surface, t.preview, &cfg);
+            let header = cfg.inapp_header;
+            let (faint, muted, border) = (t.palette.text_faint, t.palette.text_muted, t.palette.border);
+            let size = t.metrics.font_size_small;
+            let title2 = title.clone();
+            let layout = Layout::leaf(Size::Grow(1.0), Size::Fixed(header));
+            ui.add_leaf(grip, layout, Vec2::ZERO, true, move |p, r| {
+                p.rect(Rect::new(r.x, r.bottom() - 1.0, r.w, 1.0), border, 0.0);
+                // Grip dots.
+                for k in 0..3 {
+                    let c = Rect::new(r.x + 10.0 + k as f32 * 5.0, r.center().y - 1.5, 3.0, 3.0);
+                    p.rect(c, faint, 1.5);
+                }
+                p.text_left(r.shrink(30.0, 0.0, 30.0, 0.0), size, muted, &title2);
+            });
+            let close_id = Id::new(("dock_float_close", sid.0));
+            let c = ui.interact(close_id);
+            close |= c.clicked;
+            let hot = ui.animate_bool(close_id, 0, c.hovered);
+            let danger = t.palette.danger;
+            let cr = Rect::new(r.right() - header, r.y, header, header);
+            let opts = LeafOptions { interactive: true, hit_pad: 0.0, hit_top: true };
+            ui.add_leaf_at(close_id, cr, opts, move |p, r| {
+                let dot = r.shrink(6.0, 6.0, 6.0, 6.0);
+                p.rect(dot, danger.with_alpha(0.15 + 0.7 * hot), dot.w * 0.5);
+                p.text_centered(r.translate(0.0, -0.5), size, muted.lerp(Color::WHITE, hot), "×");
+            });
+
+            self.show_surface(ui, sid, viewer);
+
+            let rs = Id::new(("dock_float_resize", sid.0));
+            let g = ui.interact_drag(rs);
+            if g.active {
+                resized = g.drag_delta;
+            }
+            let gr = Rect::new(r.right() - 18.0, r.bottom() - 18.0, 18.0, 18.0);
+            ui.add_leaf_at(rs, gr, LeafOptions { interactive: true, hit_pad: 4.0, hit_top: true }, move |p, r| {
+                for k in 0..3 {
+                    let o = 4.0 + k as f32 * 4.0;
+                    p.rect(Rect::new(r.right() - o, r.bottom() - 4.0, 2.0, 2.0), faint, 1.0);
+                    p.rect(Rect::new(r.right() - 4.0, r.bottom() - o, 2.0, 2.0), faint, 1.0);
+                }
+            });
+            if g.hovered || g.active {
+                ui.cursor = Cursor::ResizeHorizontal;
+            }
+        });
+        if close {
+            self.close_surface(sid);
+            return;
+        }
+        if let Some(s) = self.surface_mut(sid) {
+            s.rect = Rect::new(r.x + moved.x, r.y + moved.y, (r.w + resized.x).max(cfg.floating_min_size.x), (r.h + resized.y).max(cfg.floating_min_size.y));
+        }
+        if raise {
+            if let Some(i) = self.index_of(sid) {
+                let s = self.surfaces.remove(i);
+                self.surfaces.push(s);
             }
         }
     }
@@ -831,7 +1005,7 @@ fn show_split<V: TabViewer>(ui: &mut Ui, s: &mut Split<V::Tab>, cx: &mut ShowCtx
 fn splitter<T>(ui: &mut Ui, s: &mut Split<T>, total: f32, cfg: &DockConfig) {
     let id = Id::new(("dock_splitter", s.id));
     ui.keep_id(id);
-    let resp = ui.interact(id);
+    let resp = ui.interact_drag(id);
     if resp.active && total > 0.0 {
         let d = if s.axis == Axis::X { resp.drag_delta.x } else { resp.drag_delta.y };
         let min = (cfg.min_pane_size / total).min(0.5);
@@ -922,7 +1096,7 @@ fn tab<V: TabViewer>(ui: &mut Ui, leaf: &Leaf<V::Tab>, i: usize, id: Id, leaf_fo
     let size = ui.theme.metrics.font_size;
     let m = ui.fonts.measure(ui.font, size, &title);
     ui.keep_id(id);
-    let resp = ui.interact(id);
+    let resp = ui.interact_drag(id);
     if resp.pressed {
         let grab = Vec2::new(resp.mouse_pos.x - resp.rect.x, resp.mouse_pos.y - resp.rect.y);
         cx.actions.push(Action::StartDrag { leaf: leaf.id, index: i, grab });
@@ -1056,7 +1230,8 @@ mod tests {
         d.update();
         assert_eq!(d.surfaces.len(), 2, "tear-off created a floating surface");
         let floating = d.surfaces[1].id;
-        assert_eq!(d.surfaces[1].window_pos, Some(screen(120.0, 200.0) - Vec2::new(6.0 + 32.0, 11.0) * 2.0));
+        // Grab = tab-bar padding + offset in tab; the tab sits 4px below the bar top.
+        assert_eq!(d.surfaces[1].window_pos, Some(screen(120.0, 200.0) - Vec2::new(6.0 + 32.0, 4.0 + 11.0) * 2.0));
         assert_eq!(leaves(d.surfaces[0].root.as_ref().unwrap()), vec![vec!["outliner"], vec!["viewport"]]);
 
         // Pretend the floating window exists, then hover the right edge zone of the viewport pane.
@@ -1072,6 +1247,43 @@ mod tests {
         d.update();
         assert_eq!(d.surfaces.len(), 1);
         assert_eq!(leaves(d.surfaces[0].root.as_ref().unwrap()), vec![vec!["outliner"], vec!["viewport"], vec!["inspector"]]);
+    }
+
+    #[test]
+    fn inapp_tear_off_floats_inside_main_and_docks_back() {
+        let mut d = fresh();
+        d.config.floating_mode = FloatingMode::InApp;
+        d.set_surface_frame(SurfaceId::MAIN, Vec2::ZERO, 1.0);
+        let (left, right) = match d.surfaces[0].root.as_ref().unwrap() {
+            DockNode::Split(s) => match (&*s.first, &*s.second) {
+                (DockNode::Leaf(a), DockNode::Leaf(b)) => (a.id, b.id),
+                _ => unreachable!(),
+            },
+            _ => unreachable!(),
+        };
+        d.surfaces[0].root_rect = Rect::new(0.0, 0.0, 800.0, 600.0);
+        d.surfaces[0].leaves = vec![
+            LeafGeom { id: left, rect: Rect::new(0.0, 0.0, 200.0, 600.0), bar: Rect::new(0.0, 0.0, 200.0, 30.0), tabs: vec![Rect::new(6.0, 4.0, 80.0, 26.0), Rect::new(88.0, 4.0, 90.0, 26.0)] },
+            LeafGeom { id: right, rect: Rect::new(203.0, 0.0, 597.0, 600.0), bar: Rect::new(203.0, 0.0, 597.0, 30.0), tabs: vec![Rect::new(209.0, 4.0, 90.0, 26.0)] },
+        ];
+        d.set_pointer(Vec2::new(120.0, 15.0), true);
+        d.drag = Some(Drag { source: SurfaceId::MAIN, leaf: left, index: 1, press: d.pointer, grab: Vec2::new(32.0, 11.0), phase: Phase::Pending, target: None });
+        d.set_pointer(Vec2::new(400.0, 300.0), true);
+        d.update();
+        assert_eq!(d.surfaces.len(), 2);
+        let f = &d.surfaces[1];
+        assert_eq!(f.window_pos, None, "in-app: no OS window placement");
+        let header = d.config.inapp_header;
+        assert_eq!((f.rect.x, f.rect.y), (400.0 - 38.0, 300.0 - (header + 15.0)), "panel keeps the tab under the finger");
+
+        // Move, then drop onto the outliner's tab bar -> becomes a tab again.
+        d.set_pointer(Vec2::new(150.0, 12.0), true);
+        d.update();
+        assert!(matches!(d.drop_target().map(|t| t.kind), Some(DropKind::Tab { leaf, .. }) if leaf == left));
+        d.set_pointer(Vec2::new(150.0, 12.0), false);
+        d.update();
+        assert_eq!(d.surfaces.len(), 1);
+        assert_eq!(leaves(d.surfaces[0].root.as_ref().unwrap())[0], vec!["outliner", "inspector"]);
     }
 
     #[test]

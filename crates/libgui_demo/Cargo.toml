@@ -10,4 +10,7 @@ wgpu.workspace = true
 winit.workspace = true
 bytemuck.workspace = true
 pollster.workspace = true
+
+# OS clipboard on desktop; iOS gets UIPasteboard later.
+[target.'cfg(not(target_os = "ios"))'.dependencies]
 arboard = { version = "3", default-features = false }

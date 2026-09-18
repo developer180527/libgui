@@ -174,6 +174,9 @@ pub(crate) struct Node {
     pub scroll: Option<Scroll>,
     /// Scroll containers: full content height incl. padding, set by `place`.
     pub content: f32,
+    /// Positioned at this rect (window coordinates), outside the parent's flow;
+    /// painted and hit-tested above its flow siblings.
+    pub absolute: Option<Rect>,
 }
 
 impl Node {
@@ -192,6 +195,7 @@ impl Node {
             paint: None,
             scroll: None,
             content: 0.0,
+            absolute: None,
         }
     }
 }
@@ -227,14 +231,18 @@ fn measure(nodes: &mut [Node], i: usize) -> Vec2 {
     let children = std::mem::take(&mut nodes[i].children);
     let l = nodes[i].layout;
     let mut content = nodes[i].intrinsic;
-    if !children.is_empty() {
-        let (mut main, mut cross) = (0.0f32, 0.0f32);
-        for &c in &children {
-            let m = measure(nodes, c);
+    let mut flow = 0;
+    let (mut main, mut cross) = (0.0f32, 0.0f32);
+    for &c in &children {
+        let m = measure(nodes, c);
+        if nodes[c].absolute.is_none() {
             main += get(m, l.axis);
             cross = cross.max(get(m, other(l.axis)));
+            flow += 1;
         }
-        main += l.gap * (children.len() - 1) as f32;
+    }
+    if flow > 0 {
+        main += l.gap * (flow - 1) as f32;
         let c = from_axes(l.axis, main, cross);
         content = Vec2::new(content.x.max(c.x), content.y.max(c.y));
     }
@@ -264,8 +272,15 @@ fn measure(nodes: &mut [Node], i: usize) -> Vec2 {
 /// Top-down: distribute space and assign final rects.
 fn place(nodes: &mut [Node], i: usize, rect: Rect) {
     nodes[i].rect = rect;
-    let children = std::mem::take(&mut nodes[i].children);
+    let all = std::mem::take(&mut nodes[i].children);
+    for &c in &all {
+        if let Some(r) = nodes[c].absolute {
+            place(nodes, c, r);
+        }
+    }
+    let children: Vec<usize> = all.iter().copied().filter(|&c| nodes[c].absolute.is_none()).collect();
     if children.is_empty() {
+        nodes[i].children = all;
         return;
     }
     let l = nodes[i].layout;
@@ -332,7 +347,7 @@ fn place(nodes: &mut [Node], i: usize, rect: Rect) {
         place(nodes, c, Rect::new(pos.x, pos.y, size.x, size.y));
         cursor += main + l.gap;
     }
-    nodes[i].children = children;
+    nodes[i].children = all;
 }
 
 #[cfg(test)]
@@ -410,6 +425,19 @@ mod tests {
         solve(&mut nodes, 0, Rect::new(0.0, 0.0, 400.0, 100.0));
         assert_eq!(nodes[a].rect.w, 100.0, "fraction wins over wide content");
         assert_eq!(nodes[b].rect.w, 300.0);
+    }
+
+    #[test]
+    fn absolute_children_skip_flow() {
+        let mut nodes = vec![Node::new(Id::new("root"), Layout::column().gap(10.0))];
+        let a = leaf(&mut nodes, 0, Size::Fixed(50.0), Size::Fixed(20.0), Vec2::ZERO);
+        let f = leaf(&mut nodes, 0, Size::Fixed(999.0), Size::Fixed(999.0), Vec2::ZERO);
+        nodes[f].absolute = Some(Rect::new(300.0, 40.0, 120.0, 80.0));
+        let b = leaf(&mut nodes, 0, Size::Fixed(50.0), Size::Fixed(20.0), Vec2::ZERO);
+        solve(&mut nodes, 0, Rect::new(0.0, 0.0, 500.0, 500.0));
+        assert_eq!(nodes[f].rect, Rect::new(300.0, 40.0, 120.0, 80.0));
+        assert_eq!(nodes[b].rect.y, 30.0, "b follows a directly; the absolute node takes no space");
+        assert_eq!(nodes[a].rect.y, 0.0);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use crate::layout::{self, Node, PaintFn, Scroll};
 use crate::text_edit::TextState;
-use crate::{Atlas, Color, Cursor, DrawList, Event, FontId, Fonts, Id, Input, Insets, Key, Layout, Painter, Rect, Size, Theme, Vec2};
+use crate::{Atlas, Color, Cursor, DrawList, Event, FontId, Fonts, Gesture, Id, Input, Insets, Key, Layout, Painter, PointerKind, Rect, Size, Theme, Vec2};
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 
@@ -18,6 +18,10 @@ pub struct Response {
     pub drag_delta: Vec2,
     pub scroll: Vec2,
     pub mouse_pos: Vec2,
+    /// Two-finger pinch over this widget: zoom ratio minus 1 (0 = none).
+    pub pinch: f32,
+    /// Two-finger pan over this widget.
+    pub pan2: Vec2,
 }
 
 /// Visual style for a container.
@@ -67,6 +71,8 @@ struct ScrollState {
     offset: f32,
     content: f32,
     viewport: f32,
+    /// Touch fling velocity (px/s).
+    velocity: f32,
 }
 
 /// Everything a renderer needs for this frame.
@@ -115,6 +121,18 @@ pub struct Ui {
     /// Hit rects that win over normal widgets (splitters).
     top_hits: Vec<(Id, Rect)>,
     overlays: Vec<Box<dyn FnOnce(&mut Painter)>>,
+    // Touch
+    /// Finger travel (logical px) before a tap turns into a scroll.
+    pub touch_slop: f32,
+    /// Fling deceleration (1/s): higher stops sooner.
+    pub scroll_friction: f32,
+    active_drag: bool,
+    touch_press: Option<Vec2>,
+    touch_candidate: Option<Id>,
+    touch_scroll: Option<Id>,
+    multi_lock: bool,
+    prev_two: Option<(Vec2, f32)>,
+    gesture: Gesture,
 }
 
 /// Options for [`Ui::add_leaf_ex`].
@@ -163,6 +181,15 @@ impl Ui {
             scroll_target: None,
             top_hits: Vec::new(),
             overlays: Vec::new(),
+            touch_slop: 8.0,
+            scroll_friction: 3.2,
+            active_drag: false,
+            touch_press: None,
+            touch_candidate: None,
+            touch_scroll: None,
+            multi_lock: false,
+            prev_two: None,
+            gesture: Gesture::default(),
         }
     }
 
@@ -199,11 +226,53 @@ impl Ui {
         self.focused = id;
     }
 
-    pub fn begin_frame(&mut self, input: Input) {
+    /// This frame's two-finger gesture (touch only).
+    pub fn gesture(&self) -> Gesture {
+        self.gesture
+    }
+
+    /// Derive the primary pointer and gestures from touches.
+    fn apply_touches(&mut self, input: &mut Input) {
+        self.gesture = Gesture::default();
+        let n = input.touches.len();
+        if n >= 2 {
+            let (a, b) = (input.touches[0].pos, input.touches[1].pos);
+            let center = (a + b) * 0.5;
+            let d = a - b;
+            let dist = d.x.hypot(d.y).max(1.0);
+            let (pan, zoom) = match self.prev_two {
+                Some((pc, pd)) => (center - pc, dist / pd),
+                None => (Vec2::ZERO, 1.0),
+            };
+            self.gesture = Gesture { active: true, center, pan, zoom };
+            self.prev_two = Some((center, dist));
+            // A second finger cancels single-finger interaction without clicking.
+            self.multi_lock = true;
+            self.active = None;
+            self.active_drag = false;
+            self.touch_scroll = None;
+        } else {
+            self.prev_two = None;
+        }
+        if n == 0 {
+            self.multi_lock = false;
+        }
+        // After lifting, the pointer stays where the finger left (release lands there).
+        input.mouse_pos = input.touches.first().map_or(self.mouse_prev, |t| t.pos);
+        input.mouse_down = n == 1 && !self.multi_lock;
+        // No hover on touch: "inside" only while touching (and on the release frame).
+        input.mouse_inside = n > 0 || self.prev_down;
+    }
+
+    pub fn begin_frame(&mut self, mut input: Input) {
+        let touch = input.pointer_kind == PointerKind::Touch;
+        if touch {
+            self.apply_touches(&mut input);
+        }
         self.pressed = input.mouse_down && !self.prev_down;
         self.released = !input.mouse_down && self.prev_down;
         self.prev_down = input.mouse_down;
-        self.mouse_delta = input.mouse_pos - self.mouse_prev;
+        self.mouse_delta = if touch && self.pressed { Vec2::ZERO } else { input.mouse_pos - self.mouse_prev };
         self.mouse_prev = input.mouse_pos;
         self.fonts.set_scale(input.scale);
         // Hit-test against last frame's layout; later entries were painted on top.
@@ -222,6 +291,28 @@ impl Ui {
         // Clicking anywhere drops focus; a text field re-takes it if it was the target.
         if self.pressed {
             self.focused = None;
+        }
+        if touch {
+            // Tap vs. scroll: once a finger travels past the slop on something
+            // that isn't a drag widget, the innermost scroll area takes over.
+            if self.pressed {
+                self.touch_press = Some(input.mouse_pos);
+                self.touch_candidate = self.scroll_target;
+                self.touch_scroll = None;
+            }
+            if input.mouse_down && self.touch_scroll.is_none() && !self.active_drag {
+                if let (Some(p0), Some(c)) = (self.touch_press, self.touch_candidate) {
+                    let d = input.mouse_pos - p0;
+                    if d.x.hypot(d.y) > self.touch_slop {
+                        self.touch_scroll = Some(c);
+                        self.active = None;
+                    }
+                }
+            }
+            if !input.mouse_down {
+                self.touch_scroll = None;
+                self.touch_press = None;
+            }
         }
         self.pending_tab = input.events.iter().rev().find_map(|e| match e {
             Event::Key(Key::Tab, m) => Some(m.shift),
@@ -293,6 +384,7 @@ impl Ui {
 
         if self.released {
             self.active = None;
+            self.active_drag = false;
         }
         let seen = &self.seen;
         self.anims.retain(|(id, _), _| seen.contains(id));
@@ -327,13 +419,27 @@ impl Ui {
         id
     }
 
-    /// Resolve hover/press/drag for `id` using last frame's rect.
+    /// Resolve hover/press/click for `id` using last frame's rect. On touch,
+    /// dragging past the slop scrolls instead (and cancels the click).
     pub fn interact(&mut self, id: Id) -> Response {
+        self.interact_sense(id, false)
+    }
+
+    /// Like `interact`, for widgets that own drags (sliders, splitters,
+    /// viewports, text selection): on touch they keep the finger instead of
+    /// letting the surrounding scroll area take it.
+    pub fn interact_drag(&mut self, id: Id) -> Response {
+        self.interact_sense(id, true)
+    }
+
+    fn interact_sense(&mut self, id: Id, drag: bool) -> Response {
         let rect = self.rects.get(&id).copied().unwrap_or_default();
         let hovered = self.hovered == Some(id) && (self.active.is_none() || self.active == Some(id));
         if hovered && self.pressed {
             self.active = Some(id);
+            self.active_drag = drag;
         }
+        let over = self.gesture.active && rect.contains(self.gesture.center);
         let active = self.active == Some(id);
         Response {
             id,
@@ -345,6 +451,8 @@ impl Ui {
             drag_delta: if active { self.mouse_delta } else { Vec2::ZERO },
             scroll: if hovered { self.input.scroll } else { Vec2::ZERO },
             mouse_pos: self.input.mouse_pos,
+            pinch: if over { self.gesture.zoom - 1.0 } else { 0.0 },
+            pan2: if over { self.gesture.pan } else { Vec2::ZERO },
         }
     }
 
@@ -464,6 +572,43 @@ impl Ui {
         r
     }
 
+    /// A floating layer at `rect` (window coordinates), drawn and hit-tested
+    /// above everything built before it: in-app windows, popovers, palettes.
+    pub fn layer<R>(&mut self, id: Id, rect: Rect, frame: Frame, body: impl FnOnce(&mut Self) -> R) -> R {
+        self.seen.insert(id);
+        let mut n = Node::new(id, Layout::column().shrink());
+        n.absolute = Some(rect);
+        n.clip = frame.clip;
+        if frame.fill.a > 0.0 || frame.border_width > 0.0 || frame.shadow {
+            n.paint = Some(Box::new(move |p: &mut Painter, r: Rect| {
+                if frame.shadow {
+                    p.shadow(r.translate(0.0, 8.0), frame.radius, 28.0, p.theme.palette.shadow);
+                }
+                p.rect_bordered(r, frame.fill, frame.radius, frame.border_width, frame.border);
+            }));
+        }
+        // Layers hang off the root so they sit above all flow content.
+        let idx = self.nodes.len();
+        self.nodes.push(n);
+        self.nodes[0].children.push(idx);
+        self.stack.push(idx);
+        let r = body(self);
+        self.stack.pop();
+        r
+    }
+
+    /// Leaf at an absolute rect inside the current container (resize grips, badges).
+    pub fn add_leaf_at(&mut self, id: Id, rect: Rect, opts: LeafOptions, paint: impl FnOnce(&mut Painter, Rect) + 'static) {
+        self.seen.insert(id);
+        let mut n = Node::new(id, Layout::leaf(Size::Fixed(rect.w), Size::Fixed(rect.h)));
+        n.absolute = Some(rect);
+        n.interactive = opts.interactive;
+        n.hit_pad = opts.hit_pad;
+        n.hit_top = opts.hit_top;
+        n.paint = Some(Box::new(paint) as PaintFn);
+        self.attach(n);
+    }
+
     /// Vertical scroll area that fills the remaining height.
     pub fn scroll_area<R>(&mut self, key: &str, body: impl FnOnce(&mut Self) -> R) -> R {
         let gap = self.theme.metrics.space;
@@ -484,12 +629,32 @@ impl Ui {
         let inside = self.scroll_target == Some(id);
         if inside && self.input.scroll.y != 0.0 {
             st.target -= self.input.scroll.y;
+            st.velocity = 0.0;
+        }
+        let dt = self.input.dt.max(1e-4);
+        let touching = self.touch_scroll == Some(id);
+        let mut direct = false;
+        if touching {
+            // Content follows the finger 1:1; remember velocity for the fling.
+            let dy = self.mouse_delta.y;
+            st.target = (st.target - dy).clamp(0.0, max);
+            st.velocity = st.velocity + (-dy / dt - st.velocity) * 0.4;
+            direct = true;
+        } else if st.velocity.abs() > 5.0 {
+            st.target += st.velocity * dt;
+            st.velocity *= (-self.scroll_friction * dt).exp();
+            if st.target <= 0.0 || st.target >= max {
+                st.velocity = 0.0;
+            }
+            direct = true;
+        } else {
+            st.velocity = 0.0;
         }
         if opts.stick_to_end && at_end && max > 0.0 {
             st.target = f32::INFINITY;
         }
 
-        let bar = self.interact(bar_id);
+        let bar = self.interact_drag(bar_id);
         let mut dragging = false;
         if max > 0.0 && bar.rect.h > 0.0 {
             let thumb_h = (bar.rect.h * st.viewport / st.content).max(24.0).min(bar.rect.h);
@@ -510,7 +675,7 @@ impl Ui {
             }
         }
         st.target = st.target.clamp(0.0, max);
-        if dragging {
+        if dragging || direct {
             st.offset = st.target;
         } else {
             let k = 1.0 - (-20.0 * self.input.dt).exp();
@@ -583,8 +748,13 @@ fn paint(nodes: &mut [Node], i: usize, p: &mut Painter, sink: &mut HitSink) {
         p.draw.push_clip(rect);
     }
     let children = std::mem::take(&mut nodes[i].children);
-    for &c in &children {
-        paint(nodes, c, p, sink);
+    // Flow children first, then absolute ones on top.
+    for pass in [false, true] {
+        for &c in &children {
+            if nodes[c].absolute.is_some() == pass {
+                paint(nodes, c, p, sink);
+            }
+        }
     }
     nodes[i].children = children;
     if let Some(sc) = nodes[i].scroll {
@@ -614,4 +784,144 @@ fn scrollbar(p: &mut Painter, sink: &mut HitSink, rect: Rect, content: f32, sc: 
     let alpha = s.rest_alpha + (1.0 - s.rest_alpha) * sc.visible.max(sc.hover) * 0.8;
     let color = s.thumb.lerp(s.thumb_hover, sc.hover);
     p.rect(thumb, color.with_alpha(color.a * alpha), w * 0.5);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ui() -> Ui {
+        Ui::new(Theme::dark(), include_bytes!("../../../assets/Inter.ttf"))
+    }
+
+    /// 20 buttons (30px + 0 gap) in a 100px scroll area at the top of the screen.
+    fn build(ui: &mut Ui, input: Input) -> Vec<Response> {
+        ui.begin_frame(input);
+        let mut out = Vec::new();
+        ui.scroll_area_with("list", ScrollOptions::new(Size::Fixed(100.0)), |ui| {
+            for i in 0..20 {
+                out.push(ui.button(&format!("item {i}")));
+            }
+        });
+        let _ = ui.end_frame();
+        out
+    }
+
+    #[test]
+    fn wheel_scrolls_clamps_and_clips_hit_testing() {
+        let mut ui = ui();
+        let base = Input { mouse_inside: true, mouse_pos: Vec2::new(20.0, 50.0), dt: 1.0, ..Input::default() };
+        build(&mut ui, base.clone());
+        build(&mut ui, base.clone());
+
+        // Scroll down 90px; dt = 1s so smoothing settles in one frame.
+        let mut wheel = base.clone();
+        wheel.scroll = Vec2::new(0.0, -90.0);
+        build(&mut ui, wheel);
+        let r = build(&mut ui, base.clone());
+        assert_eq!(r[3].rect.y, 0.0, "item 3 now at the top");
+
+        // Items scrolled out of the viewport are not hoverable/clickable.
+        let mut hover_top = base.clone();
+        hover_top.mouse_pos = Vec2::new(20.0, 5.0);
+        let r = build(&mut ui, hover_top);
+        assert!(r[3].hovered && !r[0].hovered && !r[2].hovered);
+
+        // Over-scrolling clamps at content - viewport = 600 - 100.
+        let mut far = base.clone();
+        far.scroll = Vec2::new(0.0, -10_000.0);
+        build(&mut ui, far);
+        let r = build(&mut ui, base.clone());
+        assert_eq!(r[19].rect.bottom(), 100.0);
+
+        // Wheel outside the area does nothing.
+        let mut outside = base.clone();
+        outside.mouse_pos = Vec2::new(20.0, 300.0);
+        outside.scroll = Vec2::new(0.0, 500.0);
+        build(&mut ui, outside);
+        let r = build(&mut ui, base);
+        assert_eq!(r[19].rect.bottom(), 100.0);
+    }
+
+    fn touch(points: &[(f32, f32)]) -> Input {
+        Input {
+            pointer_kind: PointerKind::Touch,
+            touches: points.iter().enumerate().map(|(i, &(x, y))| crate::Touch { id: i as u64, pos: Vec2::new(x, y) }).collect(),
+            dt: 1.0 / 60.0,
+            ..Input::default()
+        }
+    }
+
+    /// A 100px scroll area of 20 buttons, then a slider below it.
+    fn build_touch(ui: &mut Ui, input: Input, slider: &mut f32) -> (Vec<Response>, Response) {
+        ui.begin_frame(input);
+        let mut out = Vec::new();
+        ui.scroll_area_with("list", ScrollOptions::new(Size::Fixed(100.0)), |ui| {
+            for i in 0..20 {
+                out.push(ui.button(&format!("item {i}")));
+            }
+        });
+        let s = ui.slider("s", slider, 0.0, 1.0);
+        let _ = ui.end_frame();
+        (out, s)
+    }
+
+    #[test]
+    fn touch_tap_clicks_but_drag_scrolls_without_clicking() {
+        let mut ui = ui();
+        let mut v = 0.5;
+        build_touch(&mut ui, touch(&[]), &mut v);
+        build_touch(&mut ui, touch(&[]), &mut v);
+
+        // Tap item 1 (y 30..60): down, up -> click.
+        build_touch(&mut ui, touch(&[(20.0, 45.0)]), &mut v);
+        let (r, _) = build_touch(&mut ui, touch(&[]), &mut v);
+        assert!(r[1].clicked, "tap clicks");
+        let (r, _) = build_touch(&mut ui, touch(&[]), &mut v);
+        assert!(!r[1].hovered, "no hover left behind after lifting the finger");
+
+        // Press item 1 and drag up 60px: the list scrolls and nothing clicks.
+        build_touch(&mut ui, touch(&[(20.0, 45.0)]), &mut v);
+        for y in [40.0, 30.0, 15.0, 0.0, -15.0] {
+            build_touch(&mut ui, touch(&[(20.0, y)]), &mut v);
+        }
+        let (r, _) = build_touch(&mut ui, touch(&[]), &mut v);
+        assert!(r.iter().all(|b| !b.clicked), "drag must not click");
+        let scrolled = -r[0].rect.y;
+        assert!(scrolled > 40.0, "content followed the finger ({scrolled})");
+
+        // Fling: it keeps going after release, then settles.
+        let (r, _) = build_touch(&mut ui, touch(&[]), &mut v);
+        assert!(-r[0].rect.y > scrolled, "momentum continues");
+        for _ in 0..240 {
+            build_touch(&mut ui, touch(&[]), &mut v);
+        }
+        let (a, _) = build_touch(&mut ui, touch(&[]), &mut v);
+        let (b, _) = build_touch(&mut ui, touch(&[]), &mut v);
+        assert_eq!(a[0].rect.y, b[0].rect.y, "fling settles");
+    }
+
+    #[test]
+    fn touch_slider_keeps_the_finger_and_pinch_cancels() {
+        let mut ui = ui();
+        let mut v = 0.0;
+        build_touch(&mut ui, touch(&[]), &mut v);
+        build_touch(&mut ui, touch(&[]), &mut v);
+        let (_, s) = build_touch(&mut ui, touch(&[]), &mut v);
+        let y = s.rect.center().y;
+        build_touch(&mut ui, touch(&[(s.rect.x + 10.0, y)]), &mut v);
+        build_touch(&mut ui, touch(&[(s.rect.right() - 10.0, y + 40.0)]), &mut v);
+        assert!(v > 0.9, "slider follows the finger even off its row: {v}");
+        build_touch(&mut ui, touch(&[]), &mut v);
+
+        // Pinch: second finger cancels the tap on item 0; gesture reports zoom.
+        build_touch(&mut ui, touch(&[(20.0, 15.0)]), &mut v);
+        build_touch(&mut ui, touch(&[(20.0, 15.0), (60.0, 15.0)]), &mut v);
+        build_touch(&mut ui, touch(&[(10.0, 15.0), (70.0, 15.0)]), &mut v);
+        let g = ui.gesture();
+        assert!(g.active && (g.zoom - 1.5).abs() < 0.01, "{g:?}");
+        build_touch(&mut ui, touch(&[(10.0, 15.0)]), &mut v);
+        let (r, _) = build_touch(&mut ui, touch(&[]), &mut v);
+        assert!(!r[0].clicked, "a pinch never clicks");
+    }
 }

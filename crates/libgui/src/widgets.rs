@@ -148,7 +148,7 @@ impl Ui {
         let id = self.make_id(("slider", label));
         let size = self.theme.metrics.font_size;
         let m = self.text_size(size, label);
-        let resp = self.interact(id);
+        let resp = self.interact_drag(id);
         let kr0 = s.knob_radius;
         if resp.active && resp.rect.w > 2.0 * kr0 {
             let frac = ((resp.mouse_pos.x - resp.rect.x - kr0) / (resp.rect.w - 2.0 * kr0)).clamp(0.0, 1.0);
@@ -291,7 +291,7 @@ impl Ui {
     pub fn viewport(&mut self, key: &str, texture: TextureId, overlay: impl FnOnce(&mut Painter, Rect) + 'static) -> Response {
         let s = self.theme.viewport;
         let id = self.make_id(("viewport", key));
-        let resp = self.interact(id);
+        let resp = self.interact_drag(id);
         if resp.active {
             self.cursor = Cursor::Grabbing;
         }

@@ -5,7 +5,7 @@
 mod panels;
 mod scene;
 
-use libgui::{Backend, Color, Cursor, Density, DockState, Event, Frame, Input, Insets, Key, Layout, Modifiers, Size, SurfaceId, TextureId, Theme, ThemeWatcher, Ui, Vec2};
+use libgui::{Backend, Color, Cursor, Density, DockState, Event, FloatingMode, Frame, Input, Insets, Key, Layout, Modifiers, PointerKind, Size, SurfaceId, TextureId, Theme, ThemeWatcher, Touch, Ui, Vec2};
 use panels::{default_layout, Demo, Panels, Tab, THEMES};
 use scene::{Scene, SceneParams};
 use std::collections::HashMap;
@@ -13,12 +13,83 @@ use std::sync::Arc;
 use std::time::Instant;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
-use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key as WKey, NamedKey};
 use winit::window::{CursorIcon, Window, WindowId};
 
 const FONT: &[u8] = include_bytes!("../../../assets/Inter.ttf");
+const IOS: bool = cfg!(target_os = "ios");
+
+/// Theme files compiled in, for devices where `themes/` isn't on disk.
+fn embedded_theme(file: &str) -> Option<&'static str> {
+    match file {
+        "unity.toml" => Some(include_str!("../../../themes/unity.toml")),
+        "blender.toml" => Some(include_str!("../../../themes/blender.toml")),
+        "custom.toml" => Some(include_str!("../../../themes/custom.toml")),
+        _ => None,
+    }
+}
+
+/// OS clipboard where available (desktop); a no-op elsewhere for now.
+struct Clipboard(#[cfg(not(target_os = "ios"))] Option<arboard::Clipboard>);
+
+impl Clipboard {
+    fn new() -> Self {
+        #[cfg(not(target_os = "ios"))]
+        return Clipboard(arboard::Clipboard::new().ok());
+        #[cfg(target_os = "ios")]
+        Clipboard()
+    }
+
+    fn get(&mut self) -> Option<String> {
+        #[cfg(not(target_os = "ios"))]
+        return self.0.as_mut().and_then(|c| c.get_text().ok());
+        #[cfg(target_os = "ios")]
+        None
+    }
+
+    fn set(&mut self, _text: String) {
+        #[cfg(not(target_os = "ios"))]
+        if let Some(c) = self.0.as_mut() {
+            let _ = c.set_text(_text);
+        }
+    }
+}
+
+/// Size of the drawable: iOS reports the safe area as the inner size, but the
+/// Metal layer covers the whole screen.
+fn surface_size(w: &Window) -> winit::dpi::PhysicalSize<u32> {
+    if IOS {
+        w.outer_size()
+    } else {
+        w.inner_size()
+    }
+}
+
+/// Screen position of the drawable's top-left (physical px).
+fn content_origin(w: &Window) -> Vec2 {
+    let p = if IOS { w.outer_position() } else { w.inner_position() };
+    p.map(vec).unwrap_or(Vec2::ZERO)
+}
+
+/// Safe-area insets in logical px (notch, home indicator, status bar).
+fn safe_insets(w: &Window) -> Insets {
+    if !IOS {
+        return Insets::all(0.0);
+    }
+    let s = w.scale_factor() as f32;
+    let (Ok(outer), Ok(inner)) = (w.outer_position(), w.inner_position()) else { return Insets::all(0.0) };
+    let (os, is) = (w.outer_size(), w.inner_size());
+    let left = (inner.x - outer.x) as f32 / s;
+    let top = (inner.y - outer.y) as f32 / s;
+    Insets {
+        left,
+        top,
+        right: (os.width as f32 - is.width as f32) / s - left,
+        bottom: (os.height as f32 - is.height as f32) / s - top,
+    }
+}
 /// All windows register the viewport texture under the same id.
 const VIEWPORT_TEX: TextureId = TextureId::User(0);
 
@@ -44,6 +115,23 @@ struct Win {
     last: Instant,
     visible: bool,
     title: String,
+    /// Fingers on this window. A touch that starts and ends between two frames
+    /// is kept for one frame (`lifted`) so quick taps are never lost.
+    touches: Vec<Finger>,
+    /// Same for a mouse click shorter than a frame.
+    release_after_frame: bool,
+    pressed_since_frame: bool,
+    /// On-screen keyboard currently requested.
+    keyboard: bool,
+}
+
+struct Finger {
+    id: u64,
+    pos: Vec2,
+    /// Not yet seen by a frame.
+    fresh: bool,
+    /// Ended, remove after the next frame.
+    lifted: bool,
 }
 
 struct App {
@@ -51,7 +139,7 @@ struct App {
     wins: HashMap<WindowId, Win>,
     dock: DockState<Tab>,
     demo: Demo,
-    clipboard: Option<arboard::Clipboard>,
+    clipboard: Clipboard,
     /// Left button state across all windows (drags can end in any of them).
     left_down: bool,
     /// Outer-minus-inner offset of a decorated window (title bar), physical px.
@@ -80,7 +168,7 @@ impl App {
             wins: HashMap::new(),
             dock,
             demo: Demo::default(),
-            clipboard: arboard::Clipboard::new().ok(),
+            clipboard: Clipboard::new(),
             left_down: false,
             decoration: Vec2::ZERO,
             theme: Theme::dark(),
@@ -93,9 +181,12 @@ impl App {
         let main = dock_id == SurfaceId::MAIN;
         let mut attrs = Window::default_attributes()
             .with_title(title)
-            .with_inner_size(LogicalSize::new(size.x, size.y))
             // Don't steal focus mid-drag: the source window keeps receiving the mouse.
             .with_active(main);
+        // iOS applies a requested size to the UIWindow frame; let it fill the screen.
+        if !IOS {
+            attrs = attrs.with_inner_size(LogicalSize::new(size.x, size.y));
+        }
         if let Some(p) = inner_pos {
             let outer = p - self.decoration;
             attrs = attrs.with_position(PhysicalPosition::new(outer.x as i32, outer.y as i32));
@@ -111,14 +202,17 @@ impl App {
                 ..Default::default()
             }))
             .expect("no GPU adapter");
-            let (device, queue) = pollster::block_on(adapter.request_device(&Default::default())).expect("device");
+            // Ask for what this GPU supports: e.g. the iOS Simulator allows fewer
+            // inter-stage variables than wgpu's desktop defaults.
+            let desc = wgpu::DeviceDescriptor { required_limits: adapter.limits(), ..Default::default() };
+            let (device, queue) = pollster::block_on(adapter.request_device(&desc)).expect("device");
             let scene = Scene::new(&device);
             drop(probe);
             self.gfx = Some(Gfx { instance, adapter, device, queue, scene });
         }
         let g = self.gfx.as_ref().unwrap();
         let surface = g.instance.create_surface(window.clone()).expect("surface");
-        let px = window.inner_size();
+        let px = surface_size(&window);
         let mut config = surface.get_default_config(&g.adapter, px.width.max(1), px.height.max(1)).expect("surface config");
         let caps = surface.get_capabilities(&g.adapter);
         config.format = caps.formats.iter().copied().find(|f| !f.is_srgb()).unwrap_or(caps.formats[0]);
@@ -148,6 +242,10 @@ impl App {
                 last: Instant::now(),
                 visible: true,
                 title: title.to_string(),
+                touches: Vec::new(),
+                release_after_frame: false,
+                pressed_since_frame: false,
+                keyboard: false,
             },
         );
         id
@@ -166,10 +264,26 @@ impl App {
         if self.applied_theme != Some(choice) {
             self.applied_theme = Some(choice);
             match THEMES[d.theme_choice] {
-                (_, Some(file)) => {
+                (_, Some(file)) if themes_dir().is_dir() => {
                     let mut w = ThemeWatcher::new(themes_dir().join(file));
                     w.density = density;
                     self.watcher = Some(w);
+                }
+                (_, Some(file)) => {
+                    // On a device the source tree isn't there: use the compiled-in copy.
+                    self.watcher = None;
+                    match embedded_theme(file).map(|src| Theme::from_toml_with(src, density)) {
+                        Some(Ok(t)) => {
+                            d.theme_status = format!("Embedded {file} (hot reload needs the source tree)");
+                            d.theme_error = false;
+                            self.theme = t;
+                        }
+                        Some(Err(e)) => {
+                            d.theme_status = e.to_string();
+                            d.theme_error = true;
+                        }
+                        None => {}
+                    }
                 }
                 (name, None) => {
                     self.watcher = None;
@@ -226,12 +340,14 @@ impl App {
         self.wins.retain(|_, w| alive.contains(&w.dock_id));
 
         // Create windows for new floating surfaces, render them at once so they
-        // appear with content instead of a blank frame.
+        // appear with content instead of a blank frame. (In-app mode draws them
+        // inside the main window instead.)
+        let os_windows = self.dock.config.floating_mode == FloatingMode::OsWindows;
         let missing: Vec<(SurfaceId, String, Vec2, Option<Vec2>)> = self
             .dock
             .surfaces()
             .iter()
-            .filter(|s| !self.wins.values().any(|w| w.dock_id == s.id))
+            .filter(|s| os_windows && !self.wins.values().any(|w| w.dock_id == s.id))
             .map(|s| (s.id, s.first_tab().map_or("libgui", |t| t.title()).to_string(), s.window_size, s.window_pos))
             .collect();
         for (sid, title, size, pos) in missing {
@@ -265,9 +381,7 @@ impl App {
 
     fn report_frame(&mut self, wid: WindowId) {
         if let Some(w) = self.wins.get(&wid) {
-            if let Ok(p) = w.window.inner_position() {
-                self.dock.set_surface_frame(w.dock_id, vec(p), w.window.scale_factor() as f32);
-            }
+            self.dock.set_surface_frame(w.dock_id, content_origin(&w.window), w.window.scale_factor() as f32);
         }
     }
 
@@ -275,6 +389,14 @@ impl App {
         let Some(mut w) = self.wins.remove(&wid) else { return };
         let g = self.gfx.as_mut().unwrap();
         let main = w.dock_id == SurfaceId::MAIN;
+        // Rotation / Stage Manager / split view can change the size without a
+        // Resized event on some platforms: keep the swapchain matching the window.
+        let size = surface_size(&w.window);
+        if size.width.max(1) != w.config.width || size.height.max(1) != w.config.height {
+            w.config.width = size.width.max(1);
+            w.config.height = size.height.max(1);
+            w.surface.configure(&g.device, &w.config);
+        }
         let now = Instant::now();
         let dt = (now - w.last).as_secs_f32().min(0.1);
         w.last = now;
@@ -298,23 +420,38 @@ impl App {
         if w.ui.theme != self.theme {
             w.ui.theme = self.theme.clone();
         }
+        if w.input.pointer_kind == PointerKind::Touch {
+            w.input.touches = w.touches.iter().map(|f| Touch { id: f.id, pos: f.pos }).collect();
+        }
         let input = w.input.clone();
         w.input.scroll = Vec2::ZERO;
         w.input.events.clear();
+        // Deferred releases: the frame above saw the press; release on the next one.
+        w.touches.retain(|f| !f.lifted);
+        w.touches.iter_mut().for_each(|f| f.fresh = false);
+        w.pressed_since_frame = false;
+        if std::mem::take(&mut w.release_after_frame) {
+            w.input.mouse_down = false;
+        }
         w.ui.begin_frame(input);
         {
             let ui = &mut w.ui;
-            if main {
-                top_bar(ui, &mut self.demo);
-            }
             let dock = &mut self.dock;
-            let mut viewer = Panels { d: &mut self.demo, viewport_tex: VIEWPORT_TEX, scale };
-            ui.container(Layout::column().shrink().padding(Insets::all(4.0)), Frame::none(), |ui| {
-                dock.show(ui, w.dock_id, &mut viewer);
+            let demo = &mut self.demo;
+            let dock_id = w.dock_id;
+            let safe = safe_insets(&w.window);
+            ui.container(Layout::column().shrink().padding(safe), Frame::none(), |ui| {
+                if main {
+                    top_bar(ui, demo);
+                }
+                let mut viewer = Panels { d: &mut *demo, viewport_tex: VIEWPORT_TEX, scale };
+                ui.container(Layout::column().shrink().padding(Insets::all(4.0)), Frame::none(), |ui| {
+                    dock.show(ui, dock_id, &mut viewer);
+                });
+                if main {
+                    status_bar(ui, demo);
+                }
             });
-            if main {
-                status_bar(ui, &self.demo);
-            }
         }
         if w.ui.cursor != w.cursor {
             w.cursor = w.ui.cursor;
@@ -389,8 +526,13 @@ impl App {
             g.queue.submit([encoder.finish()]);
         }
 
-        if let (Some(text), Some(cb)) = (w.ui.take_copied(), self.clipboard.as_mut()) {
-            let _ = cb.set_text(text);
+        if let Some(text) = w.ui.take_copied() {
+            self.clipboard.set(text);
+        }
+        // Touch devices: show the on-screen keyboard while a text field has focus.
+        if IOS && w.ui.wants_keyboard() != w.keyboard {
+            w.keyboard = w.ui.wants_keyboard();
+            w.window.set_ime_allowed(w.keyboard);
         }
         self.wins.insert(wid, w);
     }
@@ -426,7 +568,7 @@ impl App {
                     "c" => events.push(Event::Copy),
                     "x" => events.push(Event::Cut),
                     "v" => {
-                        if let Some(text) = self.clipboard.as_mut().and_then(|cb| cb.get_text().ok()) {
+                        if let Some(text) = self.clipboard.get() {
                             events.push(Event::Paste(text));
                         }
                     }
@@ -440,7 +582,10 @@ impl App {
             Some(k) => events.push(Event::Key(k, m)),
             None => {
                 if let Some(text) = &event.text {
-                    if !text.chars().all(char::is_control) {
+                    // The iOS keyboard's Return arrives as a newline insert.
+                    if text == "\n" || text == "\r" {
+                        events.push(Event::Key(Key::Enter, m));
+                    } else if !text.chars().all(char::is_control) {
                         events.push(Event::Text(text.to_string()));
                     }
                 }
@@ -505,7 +650,7 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
-                let size = w.window.inner_size();
+                let size = surface_size(&w.window);
                 w.config.width = size.width.max(1);
                 w.config.height = size.height.max(1);
                 w.surface.configure(&self.gfx.as_ref().unwrap().device, &w.config);
@@ -523,13 +668,50 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::CursorLeft { .. } => w.input.mouse_inside = false,
+            WindowEvent::Touch(t) => {
+                let scale = w.window.scale_factor() as f32;
+                let pos = Vec2::new(t.location.x as f32 / scale, t.location.y as f32 / scale);
+                match t.phase {
+                    TouchPhase::Started => w.touches.push(Finger { id: t.id, pos, fresh: true, lifted: false }),
+                    TouchPhase::Moved => {
+                        if let Some(f) = w.touches.iter_mut().find(|f| f.id == t.id) {
+                            f.pos = pos;
+                        }
+                    }
+                    TouchPhase::Ended | TouchPhase::Cancelled => {
+                        if let Some(f) = w.touches.iter_mut().find(|f| f.id == t.id) {
+                            f.pos = pos;
+                            f.lifted = true;
+                        }
+                        // Already seen by a frame: release now. Otherwise after one frame.
+                        w.touches.retain(|f| !(f.lifted && !f.fresh));
+                    }
+                }
+                w.input.pointer_kind = PointerKind::Touch;
+                // The dock follows the first finger in screen coordinates.
+                let down = w.touches.iter().any(|f| !f.lifted);
+                if let Some(f) = w.touches.first() {
+                    let screen = content_origin(&w.window) + f.pos * scale;
+                    self.dock.set_pointer(screen, down);
+                } else {
+                    self.dock.set_pointer_down(false);
+                }
+            }
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
                 let down = state == ElementState::Pressed;
                 if down && self.dock.is_dragging() {
                     // A press while "dragging" means we missed the release.
                     self.dock.cancel_drag();
                 }
-                w.input.mouse_down = down;
+                if down {
+                    w.pressed_since_frame = true;
+                    w.input.mouse_down = true;
+                } else if w.pressed_since_frame {
+                    // Click shorter than a frame: let one frame see it pressed.
+                    w.release_after_frame = true;
+                } else {
+                    w.input.mouse_down = false;
+                }
                 self.left_down = down;
                 self.dock.set_pointer_down(down);
                 if !down {
@@ -588,6 +770,14 @@ impl ApplicationHandler for App {
 fn main() {
     let event_loop = EventLoop::new().expect("event loop");
     let mut app = App::new();
+    // Tablets: floating panels live inside the app, and controls are touch-sized.
+    // LIBGUI_INAPP=1 tries the tablet docking model on desktop.
+    if IOS || std::env::var("LIBGUI_INAPP").is_ok_and(|v| v == "1") {
+        app.demo.dock_cfg.floating_mode = FloatingMode::InApp;
+    }
+    if IOS {
+        app.demo.density_choice = 3;
+    }
     // Optional startup look: LIBGUI_THEME=dark|midnight|light|unity|blender|custom,
     // LIBGUI_DENSITY=compact|regular|touch.
     if let Ok(name) = std::env::var("LIBGUI_THEME") {

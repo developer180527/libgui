@@ -176,7 +176,7 @@ impl Ui {
         let id = self.make_id(("text_input", key));
         let st_style = self.theme.text_input;
         let (size, h, pad) = (self.theme.metrics.font_size, st_style.height, st_style.padding_x);
-        let resp = self.interact(id);
+        let resp = self.interact_drag(id);
         if resp.hovered {
             self.cursor = Cursor::Text;
         }

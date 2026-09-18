@@ -194,6 +194,31 @@ Demo: the *Appearance* panel switches themes/density and shows reload status; or
 `LIBGUI_THEME=unity LIBGUI_DENSITY=touch cargo run --release -p libgui_demo`, then edit
 `themes/custom.toml` (select *Custom*) and save to see it update live.
 
+## iPad / touch
+
+libgui runs on iPadOS with the same code: winit + wgpu (Metal) + the core.
+
+```bash
+./scripts/ios-sim.sh                                   # build target/ios-sim/libgui.app
+xcrun simctl install booted target/ios-sim/libgui.app
+xcrun simctl launch booted com.libgui.demo
+```
+
+- **Touch input:** set `Input::pointer_kind = Touch` and fill `Input::touches`. libgui derives the primary
+  pointer, has no hover on touch, and tells taps from scrolls: moving past `ui.touch_slop` (8 px) on
+  anything that isn't a drag widget scrolls the innermost scroll area instead, cancelling the tap.
+  Flings coast with `ui.scroll_friction`. Drag widgets (sliders, splitters, viewport, tabs, text
+  selection) use `interact_drag` and keep the finger.
+- **Gestures:** two fingers give `ui.gesture()` (pan + zoom); widgets under them get
+  `Response::pinch` / `pan2`. A second finger cancels a pending tap.
+- **Docking on tablets:** `DockConfig::floating_mode = FloatingMode::InApp` turns torn-off tabs into
+  floating panels inside the app (grip to move, corner to resize, x to close). Tab bars and edges
+  dock; a pane's middle leaves the panel floating. Try it on desktop with `LIBGUI_INAPP=1`.
+- **Host notes (see the demo):** size the swapchain from `outer_size` on iOS (`inner_size` is the safe
+  area), pad the UI by the safe-area insets, don't request a window size on iOS, keep taps that start and
+  end between two frames down for one frame, and call `set_ime_allowed(ui.wants_keyboard())` to show
+  the on-screen keyboard (winit maps its Return to a newline insert: treat it as Enter).
+
 ## Integrating with your engine
 
 - Render your scene to a texture, `renderer.register_texture(&view)` (wgpu backend), then show it with
