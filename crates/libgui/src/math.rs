@@ -143,3 +143,55 @@ impl Color {
         [self.r, self.g, self.b, self.a]
     }
 }
+
+/// Pan and uniform zoom: the mapping between a canvas's own coordinates and
+/// the window. There is no rotation — the shader draws axis-aligned quads.
+///
+/// `window = canvas * zoom + pan`
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Transform {
+    pub pan: Vec2,
+    pub zoom: f32,
+}
+
+impl Default for Transform {
+    fn default() -> Self {
+        Self::IDENTITY
+    }
+}
+
+impl Transform {
+    pub const IDENTITY: Transform = Transform { pan: Vec2::ZERO, zoom: 1.0 };
+
+    pub fn new(pan: Vec2, zoom: f32) -> Self {
+        Self { pan, zoom: if zoom.is_finite() && zoom > 1e-6 { zoom } else { 1e-6 } }
+    }
+
+    pub fn is_identity(&self) -> bool {
+        self.zoom == 1.0 && self.pan == Vec2::ZERO
+    }
+
+    pub fn point(&self, p: Vec2) -> Vec2 {
+        Vec2::new(p.x * self.zoom + self.pan.x, p.y * self.zoom + self.pan.y)
+    }
+
+    pub fn inv_point(&self, p: Vec2) -> Vec2 {
+        Vec2::new((p.x - self.pan.x) / self.zoom, (p.y - self.pan.y) / self.zoom)
+    }
+
+    pub fn rect(&self, r: Rect) -> Rect {
+        Rect::new(r.x * self.zoom + self.pan.x, r.y * self.zoom + self.pan.y, r.w * self.zoom, r.h * self.zoom)
+    }
+
+    pub fn inv_rect(&self, r: Rect) -> Rect {
+        Rect::new((r.x - self.pan.x) / self.zoom, (r.y - self.pan.y) / self.zoom, r.w / self.zoom, r.h / self.zoom)
+    }
+
+    /// `self` then `outer`.
+    pub fn then(&self, outer: Transform) -> Transform {
+        Transform {
+            pan: Vec2::new(self.pan.x * outer.zoom + outer.pan.x, self.pan.y * outer.zoom + outer.pan.y),
+            zoom: self.zoom * outer.zoom,
+        }
+    }
+}

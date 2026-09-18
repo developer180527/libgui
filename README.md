@@ -1,6 +1,7 @@
 # libgui: hybrid immediate/retained UI
 
-A starting point for an engine/CAD/tools UI library that you own end to end.
+A UI library for professional tools — node graphs, editors, timelines, CAD, engines — that you own
+end to end.
 
 ```
 cargo run --release -p libgui_demo          # editor demo with a wgpu 3D viewport
@@ -157,6 +158,45 @@ ui.shortcut_label(Shortcut::command(Key::S));                             // "�
 
 `ui.key_pressed` / `key_down` stay raw and unrouted, for held-key state like a viewport's fly
 controls — gate those on `ui.wants_keyboard()`.
+
+## Canvases: pan and zoom
+
+An unbounded coordinate space for node graphs, timelines, piano rolls, curve editors — anything
+where the content has its own coordinates and the user moves a viewport over it.
+
+```rust
+ui.canvas("graph", &mut view, |ui, view| {
+    for node in graph.nodes_in(view.visible) {          // cull to what is on screen
+        let bar = ui.interact_drag(node.id);
+        if bar.active { node.pos += bar.drag_delta; }   // canvas units: right at any zoom
+        ui.layer_in(node.id, Layer::Window, node.rect, frame, |ui| {
+            ui.slider("Amount", &mut node.amount, 0.0, 1.0);   // ordinary widgets
+        });
+    }
+});
+```
+
+- **Ordinary widgets work inside it.** They lay out, hit-test and report `rect`, `mouse_pos` and
+  `drag_delta` in **canvas coordinates**, so app logic is identical at any zoom — no dividing drag
+  deltas by the zoom, no transforming the pointer yourself.
+- **Text is rasterised at the zoomed resolution**, not scaled up from a 1x bitmap, so a node's
+  labels stay crisp. The size is quantised so a continuous zoom does not re-rasterise every frame,
+  and `measure` is unaffected, so layout is identical at any zoom.
+- **The transform lives in `DrawList`,** so every primitive is mapped and nothing can draw
+  untransformed by accident. Corner radii, border widths and blurs scale with the zoom; divide by
+  `view.zoom` for hairlines that stay one pixel wide.
+- **Off-screen content is culled** by the existing clip test, and `view.visible` lets you skip
+  *building* what cannot be seen — the 2D equivalent of a virtualised list.
+- Wheel zooms toward the pointer, middle-drag or dragging empty canvas pans; set
+  `CanvasState::wheel_zooms = false` for a timeline. The state is the app's, so it can be saved or
+  animated. `ui.with_transform(id, t, body)` is the raw primitive.
+
+There is **no rotation**: the shader draws axis-aligned quads, so `Transform` is pan plus uniform
+zoom. Diagonal lines and curves (node wires, automation curves, waveforms) need a path primitive
+that does not exist yet — see the roadmap.
+
+The demo's *Node Graph* tab is a worked example: a zooming grid, nodes with sliders and toggles
+inside them, drag-to-move, and culling.
 
 ## Menus, popups and tooltips
 
@@ -438,11 +478,15 @@ these are the regression guards.
 2. ~~Scroll areas~~ ✅ ~~virtualised lists, variable row heights, trees~~ ✅ `ui.virtual_list`, `ui.virtual_rows`, `ui.tree_row`; next: horizontal scroll, keyboard PageUp/Down, multi-select and drag-to-reparent.
 3. ~~Keyboard/shortcut routing~~ ✅ ~~menus, popups/context menus, tooltips, z-order~~ ✅ `Layer`, `popup`, `menu_button`, `context_menu`, `tooltip`; next: checkable/icon menu items, keyboard navigation within a menu, "safe triangle" submenu tracking.
 4. ~~Docking + tabs + splitters~~ ✅ Unity-style with OS-window tear-off; next: layout save/load, tab close/context menu, maximize pane.
-5. **Real text shaping**: replace `text.rs` internals with `cosmic-text`/`swash` or HarfBuzz
+5. **Paths**: lines, polylines and beziers as a new `PrimitiveKind` (bump `CONTRACT_VERSION`).
+   Node-graph wires, automation and easing curves, waveforms, motion paths, line charts — none of
+   which can be drawn today, since the only shape is an axis-aligned rounded rect.
+6. **Horizontal and 2D scrolling**, then tables/data grids with resizable and frozen columns.
+7. **Real text shaping**: replace `text.rs` internals with `cosmic-text`/`swash` or HarfBuzz
    (ligatures, bidi, font fallback, CJK), multi-page atlas with LRU eviction.
-6. ~~Theme hot-reload~~ ✅ TOML themes, per-widget styles, density presets; next: multiple fonts (UI/mono/icons) in the theme, per-widget disabled states.
-7. **Accessibility** via AccessKit: emit a node per interactive widget from the same tree.
-8. **Perf**: skip layout/paint for unchanged subtrees, persistent GPU buffers,
+8. ~~Theme hot-reload~~ ✅ TOML themes, per-widget styles, density presets; next: multiple fonts (UI/mono/icons) in the theme, per-widget disabled states.
+9. **Accessibility** via AccessKit: emit a node per interactive widget from the same tree.
+10. **Perf**: skip layout/paint for unchanged subtrees, persistent GPU buffers,
    and a "sleep when idle" mode for tools (CAD) instead of redrawing continuously.
 
 ## Known scaffold limitations

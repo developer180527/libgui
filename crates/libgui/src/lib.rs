@@ -35,7 +35,7 @@ pub use input::{
     TouchPhase, VirtualCursor, WheelUnit,
 };
 pub use layout::{Align, Axis, Insets, Layout, Size};
-pub use math::{Color, Rect, Vec2};
+pub use math::{Color, Rect, Transform, Vec2};
 pub use painter::Painter;
 pub use text::{Atlas, FontError, FontId, Fonts};
 pub use theme::{
@@ -48,5 +48,5 @@ pub use theme_file::ThemeError;
 #[cfg(feature = "theme-watch")]
 pub use theme_watch::ThemeWatcher;
 pub use text_edit::TextResponse;
-pub use ui::{Frame, FrameOutput, Layer, LeafOptions, ListOptions, Response, ScrollOptions, Ui};
+pub use ui::{CanvasState, CanvasView, Frame, FrameOutput, Layer, LeafOptions, ListOptions, Response, ScrollOptions, Ui};
 pub use widgets::{Branch, TreeResponse};

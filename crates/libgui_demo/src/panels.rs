@@ -1,13 +1,14 @@
 //! App state and panel UI. Panels don't know which window they live in; the
 //! dock decides that.
 
-use libgui::{Axis, Branch, Color, DockConfig, DockNode, DockState, Insets, Key, ListOptions, Painter, Rect, ScrollOptions, Shortcut, Size, StateColors, TabViewer, TextureId, Ui, Vec2};
+use libgui::{Axis, Branch, CanvasState, Color, DockConfig, DockNode, DockState, Insets, Key, LeafOptions, ListOptions, Painter, Rect, ScrollOptions, Shortcut, Size, StateColors, TabViewer, TextureId, Ui, Vec2};
 use std::collections::{HashSet, VecDeque};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
     Viewport,
     Outliner,
+    Graph,
     Inspector,
     Console,
     Stats,
@@ -30,6 +31,7 @@ impl Tab {
         match self {
             Tab::Viewport => "Scene",
             Tab::Outliner => "Outliner",
+            Tab::Graph => "Node Graph",
             Tab::Inspector => "Inspector",
             Tab::Console => "Console",
             Tab::Stats => "Stats",
@@ -44,7 +46,7 @@ pub fn default_layout(dock: &mut DockState<Tab>) {
     let outliner = dock.leaf(vec![Tab::Outliner]);
     let inspector = dock.leaf(vec![Tab::Inspector]);
     let left = dock.split(Axis::Y, 0.45, outliner, inspector);
-    let scene = dock.leaf(vec![Tab::Viewport]);
+    let scene = dock.leaf(vec![Tab::Viewport, Tab::Graph]);
     let console = dock.leaf(vec![Tab::Console]);
     let center = dock.split(Axis::Y, 0.72, scene, console);
     let stats = dock.leaf(vec![Tab::Stats]);
@@ -61,6 +63,27 @@ fn scene_objects() -> Vec<String> {
     let kinds = ["Wall", "Beam", "Column", "Slab", "Door", "Window", "Duct", "Pipe"];
     v.extend((1..=55).map(|i| format!("{}_{i:03}", kinds[i % kinds.len()])));
     v
+}
+
+/// A node in the demo graph. Positions are in canvas coordinates, so they do
+/// not change when the view is panned or zoomed.
+pub struct GraphNode {
+    pub title: String,
+    pub pos: Vec2,
+    pub amount: f32,
+    pub enabled: bool,
+}
+
+fn graph_nodes() -> Vec<GraphNode> {
+    [("Texture", 40.0, 40.0), ("Noise", 300.0, 150.0), ("Blend", 560.0, 60.0), ("Output", 820.0, 200.0)]
+        .iter()
+        .map(|&(title, x, y)| GraphNode {
+            title: title.to_string(),
+            pos: Vec2::new(x, y),
+            amount: 0.5,
+            enabled: true,
+        })
+        .collect()
 }
 
 /// One visible line of the outliner tree.
@@ -112,6 +135,9 @@ pub struct Demo {
     pub selected: usize,
     /// Outliner groups the user has collapsed (by group name).
     pub collapsed: HashSet<String>,
+    /// Node graph: pan/zoom, and the nodes themselves.
+    pub graph_view: CanvasState,
+    pub nodes: Vec<GraphNode>,
     pub playing: bool,
     pub auto_rotate: bool,
     pub overlay: bool,
@@ -148,6 +174,8 @@ impl Default for Demo {
             command: String::new(),
             selected: 0,
             collapsed: HashSet::new(),
+            graph_view: CanvasState::default(),
+            nodes: graph_nodes(),
             playing: true,
             auto_rotate: true,
             overlay: true,
@@ -273,13 +301,13 @@ impl TabViewer for Panels<'_> {
     }
 
     fn scroll(&self, tab: &Tab) -> bool {
-        // The outliner scrolls itself, with a virtual list.
-        !matches!(tab, Tab::Viewport | Tab::Console | Tab::Outliner)
+        // The outliner scrolls itself, with a virtual list; the graph pans.
+        !matches!(tab, Tab::Viewport | Tab::Console | Tab::Outliner | Tab::Graph)
     }
 
     fn padding(&self, tab: &Tab) -> Insets {
         match tab {
-            Tab::Viewport => Insets::all(0.0),
+            Tab::Viewport | Tab::Graph => Insets::all(0.0),
             _ => Insets::all(12.0),
         }
     }
@@ -288,6 +316,7 @@ impl TabViewer for Panels<'_> {
         match tab {
             Tab::Viewport => self.viewport(ui),
             Tab::Outliner => self.outliner(ui),
+            Tab::Graph => self.graph(ui),
             Tab::Inspector => self.inspector(ui),
             Tab::Console => self.console(ui),
             Tab::Stats => self.stats(ui),
@@ -399,6 +428,91 @@ impl Panels<'_> {
             let name = d.objects[i].clone();
             d.log(format!("selected {name}"));
         }
+    }
+
+    /// A node graph: real widgets inside nodes, on a pan/zoom canvas. Wheel
+    /// zooms toward the pointer, middle-drag or dragging empty space pans.
+    fn graph(&mut self, ui: &mut Ui) {
+        let d = &mut *self.d;
+        let t = ui.theme.clone();
+        let mut view = d.graph_view;
+        let nodes = &mut d.nodes;
+        ui.canvas("graph", &mut view, |ui, view| {
+            // Grid, drawn in canvas coordinates so it pans and zooms with the
+            // content. Spacing steps up as you zoom out so it never turns into
+            // a solid block.
+            let vis = view.visible;
+            let zoom = view.zoom;
+            let mut step = 40.0f32;
+            while step * zoom < 12.0 {
+                step *= 4.0;
+            }
+            let (faint, line) = (t.palette.border, t.palette.border_strong);
+            let id = ui.make_id("grid");
+            ui.add_leaf_at(id, vis, LeafOptions::default(), move |p, r| {
+                let mut x = (r.x / step).floor() * step;
+                while x < r.right() {
+                    let major = (x / (step * 4.0)).fract().abs() < 1e-3;
+                    p.rect(Rect::new(x, r.y, 1.0 / zoom, r.h), if major { line } else { faint }, 0.0);
+                    x += step;
+                }
+                let mut y = (r.y / step).floor() * step;
+                while y < r.bottom() {
+                    let major = (y / (step * 4.0)).fract().abs() < 1e-3;
+                    p.rect(Rect::new(r.x, y, r.w, 1.0 / zoom), if major { line } else { faint }, 0.0);
+                    y += step;
+                }
+            });
+
+            for (i, node) in nodes.iter_mut().enumerate() {
+                let size = Vec2::new(190.0, 112.0);
+                let rect = Rect::new(node.pos.x, node.pos.y, size.x, size.y);
+                // Skip nodes that cannot be seen at all.
+                if rect.intersect(&vis).is_none() {
+                    continue;
+                }
+                let frame = libgui::Frame {
+                    fill: t.panel.fill,
+                    border: t.palette.border_strong,
+                    border_width: 1.0,
+                    radius: t.metrics.radius_large,
+                    shadow: true,
+                    clip: true,
+                };
+                let node_id = ui.make_id(("node", i));
+                // The title bar drags the node. Deltas are in canvas units, so
+                // a node keeps up with the pointer at any zoom.
+                let bar = ui.interact_drag(node_id.with("bar"));
+                if bar.active {
+                    node.pos += bar.drag_delta;
+                }
+                ui.layer_in(node_id, libgui::Layer::Window, rect, frame, |ui| {
+                    let head = t.palette.bg_inset;
+                    let title = node.title.clone();
+                    let fg = t.palette.text;
+                    let size = t.metrics.font_size;
+                    ui.add_leaf(
+                        node_id.with("bar"),
+                        libgui::Layout::leaf(Size::Grow(1.0), Size::Fixed(26.0)),
+                        Vec2::ZERO,
+                        true,
+                        move |p, r| {
+                            p.rect(r, head, 0.0);
+                            p.text_left(r.shrink(10.0, 0.0, 10.0, 0.0), size, fg, &title);
+                        },
+                    );
+                    ui.container(
+                        libgui::Layout::column().padding(Insets::all(10.0)).gap(6.0),
+                        libgui::Frame::none(),
+                        |ui| {
+                            ui.slider("Amount", &mut node.amount, 0.0, 1.0);
+                            ui.toggle("Enabled", &mut node.enabled);
+                        },
+                    );
+                });
+            }
+        });
+        d.graph_view = view;
     }
 
     fn inspector(&mut self, ui: &mut Ui) {

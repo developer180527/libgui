@@ -180,6 +180,9 @@ pub(crate) struct Node {
     pub absolute: Option<Rect>,
     /// Stacking order among absolute siblings. Ties keep build order.
     pub z: crate::Layer,
+    /// A canvas: children are laid out, hit-tested and reported in *canvas*
+    /// coordinates, and this maps those to the window.
+    pub xform: Option<crate::Transform>,
 }
 
 impl Node {
@@ -200,6 +203,7 @@ impl Node {
             content: 0.0,
             absolute: None,
             z: crate::Layer::Window,
+            xform: None,
         }
     }
 }
@@ -289,7 +293,12 @@ fn place(nodes: &mut [Node], i: usize, rect: Rect) {
     }
     let l = nodes[i].layout;
     let p = l.padding;
-    let inner = rect.shrink(p.left, p.top, p.right, p.bottom);
+    let mut inner = rect.shrink(p.left, p.top, p.right, p.bottom);
+    // A canvas's own rect is in its parent's space, but its children live in
+    // canvas space: hand them the region in the coordinates they use.
+    if let Some(t) = nodes[i].xform {
+        inner = t.inv_rect(inner);
+    }
     let (axis, cross_axis) = (l.axis, other(l.axis));
     let mut inner_main = get(inner.size(), axis);
     let inner_cross = get(inner.size(), cross_axis);

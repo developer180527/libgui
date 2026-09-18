@@ -100,6 +100,8 @@ pub struct Fonts {
     widths: RefCell<FxMap<(u16, u32), FxMap<String, f32>>>,
     atlas: Atlas,
     scale: f32,
+    /// Extra resolution for text inside a zoomed canvas.
+    zoom: f32,
 }
 
 impl Fonts {
@@ -111,6 +113,7 @@ impl Fonts {
             widths: RefCell::new(FxMap::default()),
             atlas: Atlas::new(2048),
             scale: 1.0,
+            zoom: 1.0,
         }
     }
 
@@ -131,9 +134,25 @@ impl Fonts {
         self.scale = scale.max(0.5);
     }
 
+    /// Rasterise text inside a zoomed canvas at that resolution, so it stays
+    /// crisp instead of being a scaled-up 1x bitmap.
+    ///
+    /// Quantised to quarter steps: a continuous zoom would otherwise rasterise
+    /// a new size every frame and thrash the atlas. It does not change what
+    /// [`Fonts::measure`] reports, so layout is identical at any zoom.
+    pub(crate) fn set_zoom(&mut self, zoom: f32) {
+        let q = if zoom >= 1.0 { (zoom * 4.0).round() / 4.0 } else { (zoom * 16.0).round() / 16.0 };
+        self.zoom = q.clamp(0.05, 16.0);
+    }
+
     /// Physical pixel size, rounded so the glyph cache stays small.
     fn px(&self, size: f32) -> f32 {
-        (size * self.scale).round().max(1.0)
+        (size * self.scale * self.zoom).round().max(1.0)
+    }
+
+    /// Physical pixels per logical pixel for the text being drawn now.
+    fn text_scale(&self) -> f32 {
+        self.scale * self.zoom
     }
 
     fn line(&self, font: FontId, px: f32) -> (f32, f32) {
@@ -180,7 +199,8 @@ impl Fonts {
         let px = self.px(size);
         let w = self.width_px(font, px, text);
         let (asc, desc) = self.line(font, px);
-        Vec2::new((w / self.scale).ceil(), ((asc - desc) / self.scale).ceil())
+        let s = self.text_scale();
+        Vec2::new((w / s).ceil(), ((asc - desc) / s).ceil())
     }
 
     /// Caret x positions (logical px from the text start) before each char and
@@ -203,7 +223,7 @@ impl Fonts {
                 x += f.horizontal_kern(p, ch, px).unwrap_or(0.0);
             }
             x += f.metrics(ch, px).advance_width;
-            out.push(x.round() / self.scale);
+            out.push(x.round() / self.text_scale());
             prev = Some(ch);
         }
         out
@@ -212,7 +232,7 @@ impl Fonts {
     /// Height of one line of text in logical px.
     pub fn line_height(&self, font: FontId, size: f32) -> f32 {
         let (asc, desc) = self.line(font, self.px(size));
-        ((asc - desc) / self.scale).ceil()
+        ((asc - desc) / self.text_scale()).ceil()
     }
 
     fn glyph(&mut self, font: FontId, ch: char, px: f32) -> Glyph {
@@ -279,7 +299,7 @@ impl Fonts {
     /// Draw one line of text with its top-left at `pos` (logical px). Glyphs
     /// are rasterised at physical resolution and pixel-snapped.
     pub fn draw(&mut self, dl: &mut DrawList, font: FontId, size: f32, pos: Vec2, color: Color, text: &str) {
-        let s = self.scale;
+        let s = self.text_scale();
         let px = self.px(size);
         let (asc, _) = self.line(font, px);
         let mut x = (pos.x * s).round();

@@ -3,7 +3,7 @@ use crate::text_edit::TextState;
 use crate::hash::{FxMap, FxSet};
 use crate::input::UiEvent;
 use crate::input_state::InputState;
-use crate::{Align, Atlas, Color, Cursor, DrawList, FontError, FontId, Fonts, FrameInfo, FrameInput, Gesture, Id, InputEvent, Insets, Key, Layout, Painter, PlatformOutput, PointerButton, PointerKind, Rect, Shortcut, Size, Theme, Vec2};
+use crate::{Align, Atlas, Color, Cursor, DrawList, FontError, FontId, Fonts, FrameInfo, FrameInput, Gesture, Id, InputEvent, Insets, Key, Layout, Painter, PlatformOutput, PointerButton, PointerKind, Rect, Shortcut, Size, Theme, Transform, Vec2};
 use std::hash::Hash;
 use std::ops::Range;
 
@@ -168,6 +168,65 @@ impl Heights<'_> {
     }
 }
 
+/// Pan/zoom state of a [`Ui::canvas`]. The app owns it, so it can be saved,
+/// animated, or driven from somewhere else entirely.
+#[derive(Clone, Copy, Debug)]
+pub struct CanvasState {
+    /// Offset of the canvas origin from the canvas widget's top-left, in
+    /// window pixels.
+    pub pan: Vec2,
+    pub zoom: f32,
+    pub min_zoom: f32,
+    pub max_zoom: f32,
+    /// Wheel zooms (node editors) rather than scrolls (timelines).
+    pub wheel_zooms: bool,
+    /// The part of the canvas on screen, in canvas coordinates. Written each
+    /// frame: use it to skip building what cannot be seen.
+    pub visible: Rect,
+}
+
+impl Default for CanvasState {
+    fn default() -> Self {
+        Self {
+            pan: Vec2::ZERO,
+            zoom: 1.0,
+            min_zoom: 0.1,
+            max_zoom: 8.0,
+            wheel_zooms: true,
+            visible: Rect::default(),
+        }
+    }
+}
+
+impl CanvasState {
+    /// Zoom by `factor`, keeping the canvas point under `window_pos` still.
+    pub fn zoom_at(&mut self, window_pos: Vec2, origin: Vec2, factor: f32) {
+        let before = self.zoom;
+        let after = (before * factor).clamp(self.min_zoom, self.max_zoom);
+        if after == before {
+            return;
+        }
+        // Solve for the pan that leaves the same canvas point under the cursor.
+        let local = window_pos - origin;
+        let canvas = Vec2::new((local.x - self.pan.x) / before, (local.y - self.pan.y) / before);
+        self.pan = Vec2::new(local.x - canvas.x * after, local.y - canvas.y * after);
+        self.zoom = after;
+    }
+}
+
+/// What a [`Ui::canvas`] body needs to know about the view it is drawing into.
+/// Passed in, because the canvas borrows its [`CanvasState`] for the call.
+#[derive(Clone, Copy, Debug)]
+pub struct CanvasView {
+    /// The part of the canvas on screen, in canvas coordinates: cull with it.
+    pub visible: Rect,
+    /// Canvas pixels to window pixels. Divide by it for hairlines that stay
+    /// one pixel wide however far you zoom in.
+    pub zoom: f32,
+    /// The full canvas-to-window mapping.
+    pub xform: Transform,
+}
+
 /// Options for [`Ui::virtual_list_with`].
 #[derive(Clone, Copy, Debug)]
 pub struct ListOptions {
@@ -266,6 +325,8 @@ pub struct Ui {
     sheet_done: bool,
     /// Popups currently being built, innermost last.
     popup_stack: Vec<Id>,
+    /// Canvases currently being built: the composed canvas-to-window transform.
+    xform_stack: Vec<Transform>,
     /// (widget, time the pointer arrived) for the tooltip delay.
     hover_since: Option<(Id, f64)>,
     /// Fitted size of each floating node, measured last frame. A popup sizes
@@ -365,6 +426,7 @@ impl Ui {
             open_anchors: FxMap::default(),
             sheet_done: false,
             popup_stack: Vec::new(),
+            xform_stack: Vec::new(),
             hover_since: None,
             layer_min: FxMap::default(),
             draw: DrawList::default(),
@@ -834,6 +896,7 @@ impl Ui {
         self.typing = self.focused.is_some();
         self.sheet_done = false;
         self.popup_stack.clear();
+        self.xform_stack.clear();
         let s = self.input.screen_size;
         let root = Node::new(Id::new("root"), Layout::column().width(Size::Fixed(s.x)).height(Size::Fixed(s.y)));
         self.nodes.push(root);
@@ -1014,6 +1077,11 @@ impl Ui {
         self.interact_sense(id, true)
     }
 
+    /// Canvas-to-window transform where the UI is currently being built.
+    pub fn xform(&self) -> Transform {
+        self.xform_stack.last().copied().unwrap_or(Transform::IDENTITY)
+    }
+
     fn interact_sense(&mut self, id: Id, drag: bool) -> Response {
         let rect = self.rects.get(&id).copied().unwrap_or_default();
         let hovered = self.hovered == Some(id) && (self.active.is_none() || self.active == Some(id));
@@ -1021,7 +1089,11 @@ impl Ui {
             self.active = Some(id);
             self.active_drag = drag;
         }
-        let over = self.gesture.active && rect.contains(self.gesture.center);
+        // A widget inside a canvas works in canvas coordinates: its rect, the
+        // pointer and its drag deltas are all in the space it was built in, so
+        // app logic is the same at any zoom.
+        let t = self.xform();
+        let over = self.gesture.active && rect.contains(t.inv_point(self.gesture.center));
         let active = self.active == Some(id);
         let over_now = self.hovered == Some(id);
         let delta = match (self.locked, self.input.raw_delta) {
@@ -1035,12 +1107,12 @@ impl Ui {
             active,
             pressed: hovered && self.pressed,
             clicked: active && hovered && self.released,
-            drag_delta: if active { delta } else { Vec2::ZERO },
+            drag_delta: if active { delta * (1.0 / t.zoom) } else { Vec2::ZERO },
             raw_delta: if active { self.input.raw_delta } else { None },
             secondary_pressed: over_now && self.input.buttons_pressed[PointerButton::Secondary.index()],
             middle_pressed: over_now && self.input.buttons_pressed[PointerButton::Middle.index()],
             scroll: if hovered { self.input.scroll } else { Vec2::ZERO },
-            mouse_pos: self.input.mouse_pos,
+            mouse_pos: t.inv_point(self.input.mouse_pos),
             pinch: if over { self.gesture.zoom - 1.0 } else { 0.0 },
             pan2: if over { self.gesture.pan } else { Vec2::ZERO },
         }
@@ -1434,6 +1506,92 @@ impl Ui {
         self.add_leaf(id, layout, Vec2::ZERO, false, |_, _| {});
     }
 
+    /// A pan/zoom canvas: an unbounded coordinate space for node graphs,
+    /// timelines, piano rolls, curve editors — anything where the content has
+    /// its own coordinates and the user moves a viewport over it.
+    ///
+    /// Ordinary widgets work inside it. They lay out, hit-test and report
+    /// their rect, the pointer and drag deltas in **canvas coordinates**, so
+    /// app logic is identical at any zoom, and text is rasterised at the zoomed
+    /// resolution rather than scaled up.
+    ///
+    /// ```ignore
+    /// ui.canvas("graph", &mut view, |ui, view| {
+    ///     for node in graph.nodes_in(view.visible) {        // cull with `visible`
+    ///         ui.node_panel(node.id, node.rect, |ui| { /* real widgets */ });
+    ///     }
+    /// });
+    /// ```
+    ///
+    /// Wheel zooms toward the pointer and the middle button pans, unless the
+    /// app drives [`CanvasState`] itself. Returns the background's response:
+    /// `clicked` there means "clicked empty canvas".
+    pub fn canvas<R>(&mut self, key: &str, st: &mut CanvasState, body: impl FnOnce(&mut Self, CanvasView) -> R) -> (Response, R) {
+        let id = self.make_id(("canvas", key));
+        let bg_id = id.with("bg");
+        // The canvas's own position is last frame's; pan and zoom are the app's
+        // and apply immediately. Position only moves when the layout does.
+        let area = self.rect_of(id).unwrap_or_default();
+        let origin = Vec2::new(area.x, area.y);
+
+        let bg = self.interact_drag(bg_id);
+        if bg.hovered {
+            let wheel = self.input.scroll;
+            if st.wheel_zooms {
+                if wheel.y != 0.0 {
+                    let pos = self.input.mouse_pos;
+                    st.zoom_at(pos, origin, (wheel.y * 0.0015).exp());
+                }
+            } else {
+                st.pan += wheel;
+            }
+        }
+        // Middle-drag pans; so does a primary drag on empty canvas.
+        if bg.active {
+            st.pan += bg.drag_delta * st.zoom;
+        }
+        if bg.hovered && self.input.buttons_down[PointerButton::Middle.index()] {
+            st.pan += self.mouse_delta;
+        }
+        st.zoom = st.zoom.clamp(st.min_zoom, st.max_zoom);
+
+        let t = Transform::new(origin + st.pan, st.zoom);
+        st.visible = t.inv_rect(area);
+        let view = CanvasView { visible: st.visible, zoom: st.zoom, xform: t };
+        let visible = st.visible;
+
+        self.seen.insert(id);
+        let mut n = Node::new(id, Layout::column().shrink());
+        n.clip = true;
+        n.xform = Some(t);
+        let idx = self.attach(n);
+        self.stack.push(idx);
+        self.xform_stack.push(t);
+        // Background first, so everything built after it wins the pointer.
+        let opts = LeafOptions { interactive: true, ..Default::default() };
+        self.add_leaf_at(bg_id, visible, opts, |_, _| {});
+        let r = body(self, view);
+        self.xform_stack.pop();
+        self.stack.pop();
+        (bg, r)
+    }
+
+    /// Draw and interact with `body` under an explicit [`Transform`]. The raw
+    /// primitive behind [`Ui::canvas`], for a viewport you drive yourself.
+    pub fn with_transform<R>(&mut self, id: Id, t: Transform, body: impl FnOnce(&mut Self) -> R) -> R {
+        self.seen.insert(id);
+        let mut n = Node::new(id, Layout::column().shrink());
+        n.clip = true;
+        n.xform = Some(t);
+        let idx = self.attach(n);
+        self.stack.push(idx);
+        self.xform_stack.push(t);
+        let r = body(self);
+        self.xform_stack.pop();
+        self.stack.pop();
+        r
+    }
+
     pub fn row<R>(&mut self, body: impl FnOnce(&mut Self) -> R) -> R {
         let gap = self.theme.metrics.space;
         self.container(Layout::row().gap(gap), Frame::none(), body)
@@ -1456,10 +1614,14 @@ fn paint(nodes: &mut [Node], i: usize, p: &mut Painter, sink: &mut HitSink) {
     let rect = nodes[i].rect;
     let id = nodes[i].id;
     sink.rects.insert(id, rect);
-    let visible = p.draw.clip().intersect(&rect);
+    // Hit rects are compared against the pointer, so they are stored in window
+    // space; `sink.rects` keeps the canvas-space rect a widget reports.
+    let t = p.draw.xform();
+    let win = t.rect(rect);
+    let visible = p.draw.clip().intersect(&win);
     if nodes[i].interactive {
-        let pad = nodes[i].hit_pad;
-        if let Some(r) = p.draw.clip().expand(pad).intersect(&rect.expand(pad)) {
+        let pad = nodes[i].hit_pad * t.zoom;
+        if let Some(r) = p.draw.clip().expand(pad).intersect(&win.expand(pad)) {
             if nodes[i].hit_top {
                 sink.top_hits.push((id, r));
             } else {
@@ -1476,6 +1638,12 @@ fn paint(nodes: &mut [Node], i: usize, p: &mut Painter, sink: &mut HitSink) {
     let clip = nodes[i].clip;
     if clip {
         p.draw.push_clip(rect);
+    }
+    // Enter the canvas *after* clipping to its own (untransformed) rect.
+    let xform = nodes[i].xform;
+    if let Some(t) = xform {
+        p.draw.push_xform(t);
+        p.fonts.set_zoom(p.draw.xform().zoom);
     }
     let children = std::mem::take(&mut nodes[i].children);
     // Flow children first, then absolute ones on top of them.
@@ -1494,6 +1662,10 @@ fn paint(nodes: &mut [Node], i: usize, p: &mut Painter, sink: &mut HitSink) {
         paint(nodes, c, p, sink);
     }
     nodes[i].children = children;
+    if xform.is_some() {
+        p.draw.pop_xform();
+        p.fonts.set_zoom(p.draw.xform().zoom);
+    }
     if let Some(sc) = nodes[i].scroll {
         scrollbar(p, sink, rect, nodes[i].content, sc);
     }
@@ -2100,6 +2272,127 @@ mod tests {
         frame(&mut ui, 0.016);
         frame(&mut ui, 0.016);
         assert!(ui.rect_of(id).is_none(), "the tooltip stayed up after the pointer left");
+    }
+
+    /// The whole point: a widget inside a zoomed, panned canvas is hit where it
+    /// *appears*, but reports its rect and the pointer in canvas coordinates,
+    /// so app logic does not change with the zoom.
+    #[test]
+    fn canvas_widgets_hit_on_screen_and_report_canvas_space() {
+        let mut ui = ui();
+        let node = Rect::new(200.0, 100.0, 120.0, 40.0);
+        let frame = |ui: &mut Ui, st: &mut CanvasState| -> Response {
+            ui.begin_frame(FrameInfo::default());
+            let mut inner = Response::default();
+            ui.canvas("graph", st, |ui, _| {
+                let id = ui.make_id("node");
+                let opts = LeafOptions { interactive: true, ..Default::default() };
+                ui.add_leaf_at(id, node, opts, |_, _| {});
+                inner = ui.interact(id);
+            });
+            let _ = ui.end_frame();
+            inner
+        };
+
+        let mut st = CanvasState { wheel_zooms: false, ..CanvasState::default() };
+        frame(&mut ui, &mut st);
+        frame(&mut ui, &mut st);
+
+        // Zoom 2x and pan; the node is drawn at 2*rect + pan.
+        st.zoom = 2.0;
+        st.pan = Vec2::new(-100.0, -50.0);
+        frame(&mut ui, &mut st);
+        // Aim at a point 10 canvas px inside the node, and work out where that
+        // lands on screen: canvas * zoom + pan.
+        let target = Vec2::new(node.x + 10.0, node.y + 10.0);
+        let on_screen = Vec2::new(target.x * 2.0 - 100.0, target.y * 2.0 - 50.0);
+
+        // The canvas coordinates themselves must NOT hit: the node has moved.
+        ui.push(InputEvent::PointerMoved { pos: target });
+        assert!(!frame(&mut ui, &mut st).hovered, "hit-testing ignored the canvas transform");
+
+        // Pointing where it is drawn must hit.
+        ui.push(InputEvent::PointerMoved { pos: on_screen });
+        let r = frame(&mut ui, &mut st);
+        assert!(r.hovered, "the widget was not hit where it is drawn");
+
+        // ...and what it reports is canvas space, not window space.
+        assert_eq!(r.rect, node, "rect should be in canvas coordinates");
+        assert!(
+            (r.mouse_pos.x - target.x).abs() < 0.01 && (r.mouse_pos.y - target.y).abs() < 0.01,
+            "pointer reported at {:?}, expected canvas coords near {target:?}",
+            r.mouse_pos
+        );
+    }
+
+    /// Dragging inside a canvas must move content by the same canvas distance
+    /// at any zoom, or nodes would fly away when zoomed in.
+    #[test]
+    fn canvas_drag_deltas_are_zoom_independent() {
+        let mut ui = ui();
+        let node = Rect::new(0.0, 0.0, 400.0, 400.0);
+        let drag = |ui: &mut Ui, zoom: f32| -> Vec2 {
+            let mut st = CanvasState { zoom, wheel_zooms: false, ..CanvasState::default() };
+            // Returns this frame's drag delta, in canvas units.
+            let frame = |ui: &mut Ui, st: &mut CanvasState| -> Vec2 {
+                let mut d = Vec2::ZERO;
+                ui.begin_frame(FrameInfo::default());
+                ui.canvas("graph", st, |ui, _| {
+                    let id = ui.make_id("node");
+                    let opts = LeafOptions { interactive: true, ..Default::default() };
+                    ui.add_leaf_at(id, node, opts, |_, _| {});
+                    d = ui.interact_drag(id).drag_delta;
+                });
+                let _ = ui.end_frame();
+                d
+            };
+            frame(ui, &mut st);
+            frame(ui, &mut st);
+            ui.push(InputEvent::PointerMoved { pos: Vec2::new(60.0, 60.0) });
+            ui.push(InputEvent::PointerButton { button: PointerButton::Primary, pressed: true });
+            frame(ui, &mut st);
+            // Drag 80 window px to the right.
+            ui.push(InputEvent::PointerMoved { pos: Vec2::new(140.0, 60.0) });
+            let moved = frame(ui, &mut st);
+            ui.push(InputEvent::PointerButton { button: PointerButton::Primary, pressed: false });
+            frame(ui, &mut st);
+            moved
+        };
+
+        let at_1x = drag(&mut ui, 1.0);
+        let mut fresh = self::tests::ui();
+        let at_2x = drag(&mut fresh, 2.0);
+        assert!((at_1x.x - 80.0).abs() < 0.01, "1x drag reported {:?}", at_1x);
+        assert!(
+            (at_2x.x - 40.0).abs() < 0.01,
+            "at 2x zoom, 80 window px should be 40 canvas px, got {:?}",
+            at_2x
+        );
+    }
+
+    /// Zooming with the wheel keeps the point under the cursor still, which is
+    /// what makes a canvas feel attached to the pointer.
+    #[test]
+    fn zoom_at_keeps_the_point_under_the_cursor() {
+        let mut st = CanvasState::default();
+        let origin = Vec2::new(30.0, 20.0);
+        let cursor = Vec2::new(430.0, 320.0);
+        let canvas_before = Vec2::new(
+            (cursor.x - origin.x - st.pan.x) / st.zoom,
+            (cursor.y - origin.y - st.pan.y) / st.zoom,
+        );
+        for f in [1.3f32, 1.3, 0.6, 2.2] {
+            st.zoom_at(cursor, origin, f);
+            let after = Vec2::new(
+                (cursor.x - origin.x - st.pan.x) / st.zoom,
+                (cursor.y - origin.y - st.pan.y) / st.zoom,
+            );
+            assert!(
+                (after.x - canvas_before.x).abs() < 0.01 && (after.y - canvas_before.y).abs() < 0.01,
+                "the canvas point under the cursor drifted to {after:?} from {canvas_before:?}"
+            );
+        }
+        assert!(st.zoom <= st.max_zoom && st.zoom >= st.min_zoom);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use crate::{Color, Rect};
+use crate::{Color, Rect, Transform};
 use std::ops::Range;
 
 /// Which texture an instance samples. `Atlas` is the glyph atlas (also bound
@@ -43,6 +43,10 @@ pub struct DrawList {
     pub instances: Vec<Instance>,
     pub batches: Vec<Batch>,
     clips: Vec<Rect>,
+    /// Canvas-to-window transforms, innermost last. Every rect and clip that
+    /// goes through here is mapped, so nothing can draw untransformed by
+    /// accident.
+    xforms: Vec<Transform>,
 }
 
 impl DrawList {
@@ -51,13 +55,32 @@ impl DrawList {
         self.batches.clear();
         self.clips.clear();
         self.clips.push(screen);
+        self.xforms.clear();
     }
 
     pub fn clip(&self) -> Rect {
         *self.clips.last().unwrap_or(&Rect::default())
     }
 
+    /// Transform from the current canvas's coordinates to the window.
+    pub fn xform(&self) -> Transform {
+        self.xforms.last().copied().unwrap_or(Transform::IDENTITY)
+    }
+
+    /// Enter a canvas. `t` maps the coordinates used inside it to the window,
+    /// and composes with any canvas already entered.
+    pub fn push_xform(&mut self, t: Transform) {
+        let composed = t.then(self.xform());
+        self.xforms.push(composed);
+    }
+
+    pub fn pop_xform(&mut self) {
+        self.xforms.pop();
+    }
+
+    /// `r` is in the current canvas's coordinates.
     pub fn push_clip(&mut self, r: Rect) {
+        let r = self.xform().rect(r);
         let c = self.clip().intersect(&r).unwrap_or_default();
         self.clips.push(c);
     }
@@ -82,8 +105,11 @@ impl DrawList {
         }
     }
 
-    /// Rounded rectangle with optional border.
+    /// Rounded rectangle with optional border. `r` is in the current canvas's
+    /// coordinates; corner radius and border width scale with its zoom.
     pub fn rect(&mut self, r: Rect, fill: Color, radius: f32, border: f32, border_color: Color) {
+        let t = self.xform();
+        let (r, radius, border) = (t.rect(r), radius * t.zoom, border * t.zoom);
         self.push(
             TextureId::Atlas,
             r.expand(1.0),
@@ -100,6 +126,8 @@ impl DrawList {
 
     /// Soft, blurred rounded rect, used for drop shadows and glows.
     pub fn shadow(&mut self, r: Rect, radius: f32, blur: f32, color: Color) {
+        let t = self.xform();
+        let (r, radius, blur) = (t.rect(r), radius * t.zoom, blur * t.zoom);
         self.push(
             TextureId::Atlas,
             r.expand(blur + 1.0),
@@ -115,6 +143,7 @@ impl DrawList {
     }
 
     pub(crate) fn glyph(&mut self, r: Rect, uv: [f32; 4], color: Color) {
+        let r = self.xform().rect(r);
         self.push(
             TextureId::Atlas,
             r,
@@ -131,6 +160,8 @@ impl DrawList {
 
     /// Textured quad with rounded-corner mask, e.g. an engine viewport.
     pub fn image(&mut self, r: Rect, texture: TextureId, radius: f32, tint: Color) {
+        let t = self.xform();
+        let (r, radius) = (t.rect(r), radius * t.zoom);
         self.push(
             texture,
             r,
