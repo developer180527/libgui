@@ -1,8 +1,8 @@
 //! App state and panel UI. Panels don't know which window they live in; the
 //! dock decides that.
 
-use libgui::{Axis, Color, DockConfig, DockNode, DockState, Insets, Painter, Rect, ScrollOptions, Size, StateColors, TabViewer, TextureId, Ui, Vec2};
-use std::collections::VecDeque;
+use libgui::{Axis, Branch, Color, DockConfig, DockNode, DockState, Insets, ListOptions, Painter, Rect, ScrollOptions, Size, StateColors, TabViewer, TextureId, Ui, Vec2};
+use std::collections::{HashSet, VecDeque};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
@@ -63,6 +63,46 @@ fn scene_objects() -> Vec<String> {
     v
 }
 
+/// One visible line of the outliner tree.
+enum Row {
+    Group { name: String, expanded: bool },
+    Object { index: usize, depth: usize },
+}
+
+/// Objects are named `Kind_001`; group them by that prefix. Anything without
+/// one (the camera, the sun) stays at the top level. While a filter is active
+/// the tree flattens to the matches, which is what you want when searching.
+fn outliner_rows(objects: &[String], collapsed: &HashSet<String>, filter: &str) -> Vec<Row> {
+    let hit = |name: &str| filter.is_empty() || name.to_lowercase().contains(filter);
+    if !filter.is_empty() {
+        return objects
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| hit(n))
+            .map(|(index, _)| Row::Object { index, depth: 0 })
+            .collect();
+    }
+    let mut rows = Vec::new();
+    let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+    for (i, name) in objects.iter().enumerate() {
+        match name.split_once('_') {
+            Some((kind, _)) => match groups.iter_mut().find(|(g, _)| g == kind) {
+                Some((_, members)) => members.push(i),
+                None => groups.push((kind.to_string(), vec![i])),
+            },
+            None => rows.push(Row::Object { index: i, depth: 0 }),
+        }
+    }
+    for (name, members) in groups {
+        let expanded = !collapsed.contains(&name);
+        rows.push(Row::Group { name, expanded });
+        if expanded {
+            rows.extend(members.into_iter().map(|index| Row::Object { index, depth: 1 }));
+        }
+    }
+    rows
+}
+
 /// Application state the UI edits. Owned by the app, not the UI.
 pub struct Demo {
     pub objects: Vec<String>,
@@ -70,6 +110,8 @@ pub struct Demo {
     pub console: Vec<String>,
     pub command: String,
     pub selected: usize,
+    /// Outliner groups the user has collapsed (by group name).
+    pub collapsed: HashSet<String>,
     pub playing: bool,
     pub auto_rotate: bool,
     pub overlay: bool,
@@ -105,6 +147,7 @@ impl Default for Demo {
             console: vec!["libgui console ready".into(), "type 'help' for commands".into()],
             command: String::new(),
             selected: 0,
+            collapsed: HashSet::new(),
             playing: true,
             auto_rotate: true,
             overlay: true,
@@ -293,29 +336,44 @@ impl Panels<'_> {
         let d = &mut *self.d;
         ui.text_input("search", &mut d.filter, "Search objects…");
         let filter = d.filter.to_lowercase();
-        // A virtual list addresses rows by index, so resolve the filter to a
-        // list of matching indices and virtualise over that. Filtering stays
-        // O(objects), but building stays O(visible rows).
-        let matches: Vec<usize> = d
-            .objects
-            .iter()
-            .enumerate()
-            .filter(|(_, name)| filter.is_empty() || name.to_lowercase().contains(&filter))
-            .map(|(i, _)| i)
-            .collect();
+
+        // libgui does not own the tree: flatten the visible rows here, then
+        // virtualise over them. Searching flattens to a plain list of hits,
+        // which is what you want while filtering.
+        let rows = outliner_rows(&d.objects, &d.collapsed, &filter);
+        let leaf_h = ui.theme.selectable.height;
+        let group_h = (leaf_h * 1.35).round();
 
         let mut picked = None;
+        let mut toggled = None;
         {
             let (objects, selected) = (&d.objects, d.selected);
-            let row_h = ui.theme.selectable.height;
-            ui.virtual_list("objects", matches.len(), row_h, |ui, row| {
-                let i = matches[row];
-                // Keyed by object index, not by row, so selection and hover
-                // follow the object when the filter changes.
-                if ui.selectable_keyed(i, &objects[i], selected == i).clicked {
-                    picked = Some(i);
+            let opts = ListOptions { gap: 1.0, ..ListOptions::new(0.0) };
+            let height = |r: usize| match rows[r] {
+                Row::Group { .. } => group_h,
+                Row::Object { .. } => leaf_h,
+            };
+            ui.virtual_rows_with("objects", rows.len(), opts, height, |ui, r| match &rows[r] {
+                Row::Group { name, expanded } => {
+                    let branch = if *expanded { Branch::Expanded } else { Branch::Collapsed };
+                    let resp = ui.tree_row(("g", name.as_str()), 0, branch, name, false);
+                    if resp.toggled || resp.response.clicked {
+                        toggled = Some(name.clone());
+                    }
+                }
+                Row::Object { index, depth } => {
+                    let i = *index;
+                    let r = ui.tree_row(("o", i), *depth, Branch::Leaf, &objects[i], selected == i);
+                    if r.response.clicked {
+                        picked = Some(i);
+                    }
                 }
             });
+        }
+        if let Some(name) = toggled {
+            if !d.collapsed.remove(&name) {
+                d.collapsed.insert(name);
+            }
         }
         if let Some(i) = picked {
             d.selected = i;

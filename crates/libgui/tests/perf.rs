@@ -223,6 +223,48 @@ fn a_virtual_list_does_not_care_how_long_it_is() {
     assert!(ratio < 2.0, "10_000x the rows cost {ratio:.1}x the time");
 }
 
+/// Variable row heights cost one height lookup per row to locate the window,
+/// so unlike the uniform case the frame is O(rows). Pin what that costs, and
+/// pin that *building* still only touches the visible rows.
+#[test]
+fn variable_height_rows_pay_only_for_locating() {
+    let mut ui = ui();
+    let names = names(64);
+    let h = |i: usize| [18.0f32, 40.0, 26.0][i % 3];
+    let mut run = |rows: usize| -> (usize, Duration) {
+        let mut built = 0;
+        let mut frame = |ui: &mut Ui| {
+            ui.begin_frame(FrameInfo::default());
+            built = ui
+                .virtual_rows("rows", rows, h, |ui, i| {
+                    let _ = ui.selectable_keyed(i, &names[i % 64], false);
+                })
+                .len();
+            let _ = ui.end_frame();
+        };
+        for _ in 0..20 {
+            frame(&mut ui);
+        }
+        let cost = fastest(30, || frame(&mut ui));
+        (built, cost)
+    };
+
+    let (small_built, small) = run(1_000);
+    let (big_built, big) = run(100_000);
+    println!("1k variable rows: {small_built} built, {small:?}");
+    println!("100k variable rows: {big_built} built, {big:?}");
+
+    // Building must not grow with the list, only the height scan does.
+    assert_eq!(small_built, big_built, "a longer list built more rows");
+    if cfg!(debug_assertions) {
+        return;
+    }
+    // 100k rows is far past what this path is meant for and it still has to
+    // stay well inside a frame; a regression to O(rows) *building* would be
+    // orders of magnitude worse than this.
+    assert!(big < Duration::from_millis(4), "100k variable rows took {big:?}");
+}
+
 /// The headline claim, as a number. A visible inspector must be a rounding
 /// error in a 60 fps frame. Asserted in release only: a debug build is ~10x
 /// slower and its timings say nothing about shipped code.

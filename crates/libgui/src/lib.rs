@@ -49,3 +49,4 @@ pub use theme_file::ThemeError;
 pub use theme_watch::ThemeWatcher;
 pub use text_edit::TextResponse;
 pub use ui::{Frame, FrameOutput, LeafOptions, ListOptions, Response, ScrollOptions, Ui};
+pub use widgets::{Branch, TreeResponse};

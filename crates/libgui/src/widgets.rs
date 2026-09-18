@@ -7,6 +7,26 @@
 use crate::{ButtonStyle, Color, Cursor, Insets, Layout, Painter, Rect, Response, Size, TextureId, Theme, Ui, Vec2};
 use std::hash::Hash;
 
+/// Whether a tree row can be expanded, and whether it is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Branch {
+    /// No children: no arrow, nothing to toggle.
+    #[default]
+    Leaf,
+    Collapsed,
+    Expanded,
+}
+
+/// Result of [`Ui::tree_row`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TreeResponse {
+    pub response: Response,
+    /// The disclosure arrow was clicked. Mutually exclusive with
+    /// `response.clicked`, so a toggle never also selects.
+    pub toggled: bool,
+}
+
+
 impl Ui {
     fn text_size(&self, size: f32, text: &str) -> Vec2 {
         self.fonts.measure(self.font, size, text)
@@ -240,6 +260,81 @@ impl Ui {
         resp
     }
 
+    /// One row of a tree: indentation, a disclosure arrow, and a label styled
+    /// like [`Ui::selectable`].
+    ///
+    /// libgui does not own your tree. You keep the nodes and the set of
+    /// expanded ones, flatten the visible nodes into a list each frame, and
+    /// feed that to [`Ui::virtual_list`] — so a tree costs only what is on
+    /// screen, however deep or wide it is:
+    ///
+    /// ```ignore
+    /// let rows = flatten(&tree, &expanded);            // Vec<(node, depth)>
+    /// ui.virtual_list("tree", rows.len(), row_h, |ui, i| {
+    ///     let (node, depth) = rows[i];
+    ///     let branch = if tree[node].children.is_empty() { Branch::Leaf }
+    ///                  else if expanded.contains(&node) { Branch::Expanded }
+    ///                  else { Branch::Collapsed };
+    ///     let r = ui.tree_row(node, depth, branch, &tree[node].name, node == selected);
+    ///     if r.toggled { toggle(&mut expanded, node); }
+    ///     if r.response.clicked { selected = node; }
+    /// });
+    /// ```
+    ///
+    /// Clicking the arrow toggles and does *not* select: `toggled` and
+    /// `response.clicked` are never both true.
+    pub fn tree_row(&mut self, key: impl Hash, depth: usize, branch: Branch, label: &str, selected: bool) -> TreeResponse {
+        let s = self.theme.selectable;
+        let indent = self.theme.metrics.indent;
+        let size = self.theme.metrics.font_size;
+        let faint = self.theme.palette.text_faint;
+        let id = self.make_id(("tree_row", key));
+        let m = self.text_size(size, label);
+        let mut resp = self.interact(id);
+
+        // The arrow is a region of the row rather than its own widget: one hit
+        // rect, and the row still highlights as a whole under the pointer.
+        let arrow_x = resp.rect.x + s.padding_x + depth as f32 * indent;
+        let on_arrow = branch != Branch::Leaf
+            && resp.mouse_pos.x >= arrow_x
+            && resp.mouse_pos.x < arrow_x + indent;
+        let toggled = resp.clicked && on_arrow;
+        if toggled {
+            resp.clicked = false;
+        }
+        if resp.hovered {
+            self.cursor = Cursor::Pointer;
+        }
+        let hover = self.animate_bool(id, 0, resp.hovered);
+        let sel = self.animate_bool(id, 1, selected);
+        let arrow_hot = self.animate_bool(id, 2, resp.hovered && on_arrow);
+
+        let label = label.to_string();
+        let text_x = s.padding_x + depth as f32 * indent + indent;
+        let content = Vec2::new(text_x + m.x, m.y);
+        let layout = Layout::leaf(Size::Grow(1.0), Size::Fixed(s.height));
+        self.add_leaf(id, layout, content, true, move |p, r| {
+            let bg = s.fill_hover.with_alpha(s.fill_hover.a * hover).lerp(s.fill_selected, sel);
+            p.rect(r, bg, s.radius);
+            if sel > 0.01 && s.indicator_width > 0.0 {
+                let bar_h = (r.h * 0.55) * sel;
+                let w = s.indicator_width;
+                p.rect(Rect::new(r.x + 3.0, r.center().y - bar_h * 0.5, w, bar_h), s.indicator, w * 0.5);
+            }
+            let fg = s.text.lerp(s.text_hover, hover).lerp(s.text_selected, sel);
+            // The shader has no triangle, so the arrow is a glyph. Switched,
+            // not cross-faded: two overlapping triangles read as a smudge.
+            if branch != Branch::Leaf {
+                let glyph = if branch == Branch::Expanded { "\u{25BE}" } else { "\u{25B8}" };
+                let c = faint.lerp(fg, arrow_hot.max(sel));
+                let a = Rect::new(r.x + s.padding_x + depth as f32 * indent, r.y, indent, r.h);
+                p.text_centered(a, size, c, glyph);
+            }
+            p.text_left(r.shrink(text_x, 0.0, s.padding_x, 0.0), size, fg, &label);
+        });
+        TreeResponse { response: resp, toggled }
+    }
+
     /// One-of-N picker (density, tool modes, view modes).
     pub fn segmented(&mut self, key: &str, selected: &mut usize, options: &[&str]) -> Response {
         let s = self.theme.segmented;
@@ -340,5 +435,102 @@ impl Ui {
             p.rect_bordered(r, Color::TRANSPARENT, s.radius, 1.0, s.border.lerp(s.border_hover, focus));
         });
         resp
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::*;
+
+    fn ui() -> Ui {
+        Ui::new(Theme::dark(), include_bytes!("../../../assets/Inter.ttf")).unwrap()
+    }
+
+    fn click_at(ui: &mut Ui, x: f32, y: f32, down: bool) {
+        ui.push(InputEvent::PointerMoved { pos: Vec2::new(x, y) });
+        ui.push(InputEvent::PointerButton { button: PointerButton::Primary, pressed: down });
+    }
+
+    /// The arrow toggles, the rest of the row selects, and the two never fire
+    /// together — otherwise expanding a node would also change the selection.
+    #[test]
+    fn tree_row_separates_the_arrow_from_the_row() {
+        let mut ui = ui();
+        let indent = ui.theme.metrics.indent;
+        let pad = ui.theme.selectable.padding_x;
+        let row_h = ui.theme.selectable.height;
+
+        let frame = |ui: &mut Ui| -> Vec<TreeResponse> {
+            let mut out = Vec::new();
+            ui.begin_frame(FrameInfo::default());
+            // depth 0 branch, depth 1 leaf.
+            out.push(ui.tree_row(0u32, 0, Branch::Collapsed, "Group", false));
+            out.push(ui.tree_row(1u32, 1, Branch::Leaf, "Child", false));
+            let _ = ui.end_frame();
+            out
+        };
+        frame(&mut ui);
+        frame(&mut ui);
+
+        // Click the arrow of row 0 (depth 0, so it sits at pad..pad+indent).
+        let arrow_x = pad + indent * 0.5;
+        let row0_y = row_h * 0.5;
+        click_at(&mut ui, arrow_x, row0_y, true);
+        frame(&mut ui);
+        click_at(&mut ui, arrow_x, row0_y, false);
+        let r = frame(&mut ui);
+        assert!(r[0].toggled, "clicking the arrow did not toggle");
+        assert!(!r[0].response.clicked, "clicking the arrow also selected the row");
+
+        // Click the label area of row 0.
+        let label_x = pad + indent * 3.0;
+        click_at(&mut ui, label_x, row0_y, true);
+        frame(&mut ui);
+        click_at(&mut ui, label_x, row0_y, false);
+        let r = frame(&mut ui);
+        assert!(r[0].response.clicked, "clicking the label did not select");
+        assert!(!r[0].toggled, "clicking the label also toggled");
+
+        // A leaf has no arrow: a click where its arrow would be still selects.
+        let leaf_arrow_x = pad + indent * 1.5;
+        let row1_y = row_h * 1.5;
+        click_at(&mut ui, leaf_arrow_x, row1_y, true);
+        frame(&mut ui);
+        click_at(&mut ui, leaf_arrow_x, row1_y, false);
+        let r = frame(&mut ui);
+        assert!(!r[1].toggled, "a leaf toggled");
+        assert!(r[1].response.clicked, "a leaf did not select");
+    }
+
+    /// Depth must move the arrow, so a click lands on the right node's arrow
+    /// rather than on an ancestor's indentation.
+    #[test]
+    fn tree_row_arrow_follows_depth() {
+        let mut ui = ui();
+        let indent = ui.theme.metrics.indent;
+        let pad = ui.theme.selectable.padding_x;
+        let row_h = ui.theme.selectable.height;
+        let frame = |ui: &mut Ui| -> TreeResponse {
+            ui.begin_frame(FrameInfo::default());
+            let r = ui.tree_row(0u32, 2, Branch::Expanded, "Deep", false);
+            let _ = ui.end_frame();
+            r
+        };
+        frame(&mut ui);
+        frame(&mut ui);
+
+        // Where a depth-0 arrow would be: that is indentation now, so it selects.
+        click_at(&mut ui, pad + indent * 0.5, row_h * 0.5, true);
+        frame(&mut ui);
+        click_at(&mut ui, pad + indent * 0.5, row_h * 0.5, false);
+        let r = frame(&mut ui);
+        assert!(!r.toggled && r.response.clicked, "indentation behaved like an arrow");
+
+        // The depth-2 arrow does toggle.
+        click_at(&mut ui, pad + indent * 2.5, row_h * 0.5, true);
+        frame(&mut ui);
+        click_at(&mut ui, pad + indent * 2.5, row_h * 0.5, false);
+        let r = frame(&mut ui);
+        assert!(r.toggled && !r.response.clicked, "the depth-2 arrow did not toggle");
     }
 }

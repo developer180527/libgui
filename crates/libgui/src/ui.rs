@@ -76,6 +76,98 @@ impl ScrollOptions {
     }
 }
 
+/// Where a virtual list's row heights come from.
+enum Heights<'a> {
+    /// Every row the same: locating a row is arithmetic, O(1) for any length.
+    Uniform(f32),
+    /// Per row: locating a row means summing the ones above it, O(rows).
+    PerRow(&'a dyn Fn(usize) -> f32),
+}
+
+/// The visible window of a virtual list, in rows and in pixels.
+struct Span {
+    first: usize,
+    /// Top of row `first`, i.e. the space the rows above it occupy.
+    first_y: f32,
+    end: usize,
+    /// Top of row `end`.
+    end_y: f32,
+    /// Sum over every row of `height + gap` (so one trailing gap too many).
+    stride_total: f32,
+}
+
+/// Overscan is bounded so the backward search can use a fixed-size ring.
+const MAX_OVERSCAN: usize = 8;
+
+impl Heights<'_> {
+    fn at(&self, i: usize) -> f32 {
+        match self {
+            Heights::Uniform(h) => *h,
+            Heights::PerRow(f) => f(i).max(0.0),
+        }
+    }
+
+    fn locate(&self, rows: usize, gap: f32, offset: f32, viewport: f32, overscan: usize) -> Span {
+        let overscan = overscan.min(MAX_OVERSCAN);
+        match *self {
+            Heights::Uniform(h) => {
+                let pitch = (h + gap).max(0.5);
+                let first = (offset / pitch).floor().max(0.0) as usize;
+                let first = first.saturating_sub(overscan).min(rows);
+                let span = (viewport / pitch).ceil() as usize + 1 + 2 * overscan;
+                let end = first.saturating_add(span).min(rows);
+                Span {
+                    first,
+                    first_y: first as f32 * pitch,
+                    end,
+                    end_y: end as f32 * pitch,
+                    stride_total: rows as f32 * pitch,
+                }
+            }
+            Heights::PerRow(f) => {
+                // One pass over the heights. Rows above the viewport are added
+                // up, never built; `ring` remembers the last few tops so the
+                // overscan can step back without a second pass.
+                let bottom = offset + viewport;
+                let mut ring = [0.0f32; MAX_OVERSCAN + 1];
+                let (mut first, mut first_y) = (usize::MAX, 0.0);
+                let (mut want_end, mut end, mut end_y) = (usize::MAX, usize::MAX, 0.0);
+                let mut y = 0.0f32;
+                for i in 0..rows {
+                    ring[i % ring.len()] = y;
+                    if i == want_end {
+                        end = i;
+                        end_y = y;
+                    }
+                    let h = f(i).max(0.0);
+                    if first == usize::MAX && y + h > offset {
+                        first = i.saturating_sub(overscan);
+                        first_y = ring[first % ring.len()];
+                    }
+                    if want_end == usize::MAX && first != usize::MAX && y >= bottom {
+                        want_end = (i + overscan).min(rows);
+                        if i == want_end {
+                            end = i;
+                            end_y = y;
+                        }
+                    }
+                    y += h + gap;
+                }
+                // Scrolled past the end, or the list never filled the viewport.
+                if first == usize::MAX {
+                    first = rows;
+                    first_y = y;
+                }
+                if end == usize::MAX {
+                    end = rows;
+                    end_y = y;
+                }
+                Span { first, first_y, end, end_y, stride_total: y }
+            }
+        }
+    }
+}
+
 /// Options for [`Ui::virtual_list_with`].
 #[derive(Clone, Copy, Debug)]
 pub struct ListOptions {
@@ -895,17 +987,18 @@ impl Ui {
     /// Cost is proportional to the *visible* rows, not to `rows`, so a list of
     /// a million items costs the same as a list of fifty. The price is that
     /// every row must be exactly `row_height` tall: that is what lets the
-    /// library place row `n` without having built rows `0..n`.
+    /// library place row `n` without having built rows `0..n`. For rows that
+    /// differ in height, see [`Ui::virtual_rows`].
     ///
     /// ```ignore
     /// ui.virtual_list("objects", scene.len(), 24.0, |ui, i| {
-    ///     if ui.selectable(&scene[i].name, i == selected).clicked { selected = i; }
+    ///     if ui.selectable_keyed(i, &scene[i].name, i == selected).clicked { selected = i; }
     /// });
     /// ```
     ///
     /// Returns the range that was built. Rows are identified by index, so if
-    /// your list can reorder or filter, wrap the body in
-    /// [`Ui::with_key`] with something stable from the item itself.
+    /// your list can reorder or filter, wrap the body in [`Ui::with_key`] with
+    /// something stable from the item itself.
     pub fn virtual_list(&mut self, key: &str, rows: usize, row_height: f32, row: impl FnMut(&mut Self, usize)) -> Range<usize> {
         self.virtual_list_with(key, rows, ListOptions::new(row_height), row)
     }
@@ -918,8 +1011,50 @@ impl Ui {
         opts: ListOptions,
         mut row: impl FnMut(&mut Self, usize),
     ) -> Range<usize> {
+        let h = opts.row_height;
+        self.virtual_impl(key, rows, opts, &Heights::Uniform(h), &mut row)
+    }
+
+    /// [`Ui::virtual_list`] for rows that differ in height.
+    ///
+    /// `height(i)` must return the same value for the same `i` within a frame,
+    /// and must not depend on whether the row was built. Unlike the uniform
+    /// case, locating the first visible row costs one `height` call per row
+    /// (**O(rows) per frame**, though only the visible rows are *built*): fine
+    /// into the tens of thousands, but prefer [`Ui::virtual_list`] when the
+    /// rows really are uniform and the list is huge.
+    pub fn virtual_rows(
+        &mut self,
+        key: &str,
+        rows: usize,
+        height: impl Fn(usize) -> f32,
+        row: impl FnMut(&mut Self, usize),
+    ) -> Range<usize> {
+        self.virtual_rows_with(key, rows, ListOptions::new(0.0), height, row)
+    }
+
+    /// [`Ui::virtual_rows`] with explicit options. `ListOptions::row_height` is
+    /// ignored here: `height` supplies it.
+    pub fn virtual_rows_with(
+        &mut self,
+        key: &str,
+        rows: usize,
+        opts: ListOptions,
+        height: impl Fn(usize) -> f32,
+        mut row: impl FnMut(&mut Self, usize),
+    ) -> Range<usize> {
+        self.virtual_impl(key, rows, opts, &Heights::PerRow(&height), &mut row)
+    }
+
+    fn virtual_impl(
+        &mut self,
+        key: &str,
+        rows: usize,
+        opts: ListOptions,
+        heights: &Heights<'_>,
+        row: &mut dyn FnMut(&mut Self, usize),
+    ) -> Range<usize> {
         let id = self.make_id(("scroll", key));
-        let pitch = (opts.row_height + opts.gap).max(0.5);
         let fallback_viewport = self.input.screen_size.y;
         let scroll = ScrollOptions {
             height: opts.height,
@@ -935,18 +1070,15 @@ impl Ui {
             // The viewport is measured at the end of a frame, so it is 0 on the
             // first one: fall back to the window rather than building nothing.
             let viewport = if st.viewport > 1.0 { st.viewport } else { fallback_viewport };
-            let first = (st.offset / pitch).floor().max(0.0) as usize;
-            let first = first.saturating_sub(opts.overscan).min(rows);
-            let span = (viewport / pitch).ceil() as usize + 1 + 2 * opts.overscan;
-            let end = first.saturating_add(span).min(rows);
-            built = first..end;
+            let span = heights.locate(rows, opts.gap, st.offset, viewport, opts.overscan);
+            built = span.first..span.end;
 
             // Spacers stand in for the rows that were not built, so layout, the
             // scrollbar and the scroll maths still see the whole list. A row
-            // contributes `row_height + gap`; the spacer replaces `n` of them
-            // and the gap that follows it supplies the last one.
-            if first > 0 {
-                ui.list_spacer(0, first as f32 * pitch - opts.gap);
+            // occupies `height + gap`; the spacer replaces `n` of those and the
+            // gap that follows it supplies the last one.
+            if span.first > 0 {
+                ui.list_spacer(0, span.first_y - opts.gap);
             }
             for i in built.clone() {
                 // Keyed by index, not by position among the built rows, so a
@@ -954,14 +1086,13 @@ impl Ui {
                 let row_id = ui.make_id(("vlist_row", i));
                 let layout = Layout::row()
                     .width(Size::Grow(1.0))
-                    .height(Size::Fixed(opts.row_height))
+                    .height(Size::Fixed(heights.at(i)))
                     .align(Align::Start, Align::Center)
                     .shrink();
                 ui.container_id(row_id, layout, Frame { clip: true, ..Frame::none() }, |ui| row(ui, i));
             }
-            let after = rows - end;
-            if after > 0 {
-                ui.list_spacer(1, after as f32 * pitch - opts.gap);
+            if span.end < rows {
+                ui.list_spacer(1, span.stride_total - span.end_y - opts.gap);
             }
         });
         built
@@ -1328,6 +1459,69 @@ mod tests {
         let (_, rects) = last;
         assert_eq!(rects[0].0, 0);
         assert!(rects[0].1.y.abs() < 0.01, "back at the top, row 0 is at {}", rects[0].1.y);
+    }
+
+    /// Variable row heights: rows must land at their true cumulative offsets,
+    /// the content height must be honest, and the last row must be reachable.
+    #[test]
+    fn virtual_rows_place_variable_heights_correctly() {
+        const ROWS: usize = 2_000;
+        const VIEW: f32 = 300.0;
+        const GAP: f32 = 3.0;
+        // Heights cycle so the pattern is irregular but exactly predictable.
+        let h = |i: usize| -> f32 { [18.0, 40.0, 26.0, 60.0][i % 4] };
+        let top_of = |n: usize| -> f32 { (0..n).map(|i| h(i) + GAP).sum::<f32>() };
+
+        let opts = ListOptions { gap: GAP, height: Size::Fixed(VIEW), ..ListOptions::new(0.0) };
+        let mut ui = ui();
+        let frame = |ui: &mut Ui| -> (Range<usize>, Vec<(usize, Rect)>) {
+            let mut rects = Vec::new();
+            ui.begin_frame(FrameInfo::default());
+            let built = ui.virtual_rows_with("rows", ROWS, opts, h, |ui, i| {
+                let id = ui.make_id("cell");
+                ui.add_leaf(id, Layout::leaf(Size::Grow(1.0), Size::Fixed(h(i))), Vec2::ZERO, true, |_, _| {});
+                if let Some(r) = ui.rect_of(id) {
+                    rects.push((i, r));
+                }
+            });
+            let _ = ui.end_frame();
+            (built, rects)
+        };
+        frame(&mut ui);
+        let (built, rects) = frame(&mut ui);
+        assert!(built.len() < 30, "built {} rows for a {VIEW}px viewport", built.len());
+        for (i, r) in &rects {
+            assert!((r.y - top_of(*i)).abs() < 0.01, "row {i} at {} not {}", r.y, top_of(*i));
+            assert!((r.h - h(*i)).abs() < 0.01, "row {i} is {} tall not {}", r.h, h(*i));
+        }
+
+        // To the bottom: the last row must be the last item, flush with the edge.
+        let mut last = (built, rects);
+        for _ in 0..400 {
+            wheel(&mut ui, -1000.0);
+            last = frame(&mut ui);
+        }
+        for _ in 0..30 {
+            last = frame(&mut ui);
+        }
+        let (built, rects) = last;
+        let (last_i, last_r) = *rects.last().unwrap();
+        assert_eq!(last_i, ROWS - 1, "could not reach the end");
+        assert!((last_r.bottom() - VIEW).abs() < 1.0, "last row ends at {} not {VIEW}", last_r.bottom());
+        assert!(built.len() < 30, "still only a screenful at the bottom: {}", built.len());
+
+        // Mid-list: the rows shown must be the ones actually under the window.
+        for _ in 0..200 {
+            wheel(&mut ui, 1000.0);
+            frame(&mut ui);
+        }
+        for _ in 0..30 {
+            frame(&mut ui);
+        }
+        let (built, rects) = frame(&mut ui);
+        let (i0, r0) = rects[0];
+        assert!(built.contains(&i0));
+        assert!((r0.y - top_of(i0)).abs() < 0.01, "mid-list row {i0} at {} not {}", r0.y, top_of(i0));
     }
 
     /// Rows must keep their identity as the window slides over them, or a hover

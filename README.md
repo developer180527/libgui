@@ -160,10 +160,38 @@ row *n* without having built rows `0..n`. Rows are clipped to it. `ListOptions` 
 `padding`, `overscan` (rows built beyond the viewport, so a fast fling shows no gap) and
 `stick_to_end`.
 
+**Rows of different heights** use `ui.virtual_rows(key, rows, |i| height_of(i), |ui, i| …)`. Only the
+visible rows are *built*, but locating the first one costs a `height` call per row, so the frame is
+O(rows) rather than O(1): about 2 ns per row (100 000 rows ≈ 210 µs). Good into the tens of
+thousands; use `virtual_list` when the rows really are uniform and the list is huge.
+
 Rows are addressed by index. For a filtered or sorted view, resolve to a list of indices first and
-virtualise over that, keying rows by the underlying item so selection follows it
-(`libgui_demo/src/panels.rs::outliner` does exactly this). Trees and variable-height rows are not
-covered yet: both need a height-per-row model rather than one constant.
+virtualise over that, keying rows by the underlying item so selection follows it.
+
+## Trees
+
+libgui does not own your tree. You keep the nodes and which are expanded, flatten the visible ones
+each frame, and virtualise over that list — so a tree costs only what is on screen, however deep or
+wide:
+
+```rust
+let rows = flatten(&tree, &expanded);                  // Vec<(node, depth)>
+ui.virtual_list("tree", rows.len(), row_h, |ui, i| {
+    let (node, depth) = rows[i];
+    let r = ui.tree_row(node, depth, branch_of(node), &tree[node].name, node == selected);
+    if r.toggled { toggle(&mut expanded, node); }      // the arrow
+    if r.response.clicked { selected = node; }         // the row
+});
+```
+
+`tree_row` draws the indentation, a disclosure arrow and a label styled like `selectable`.
+`toggled` and `response.clicked` are never both true, so expanding a node never also selects it.
+Indent width is `theme.metrics.indent`. The arrow is a glyph (`▸`/`▾`) because the shader has no
+triangle primitive.
+
+The demo's outliner is a worked example of all of it: a variable-height tree (group headers are
+taller than leaves), virtualised, that flattens to a plain list of hits while the search box is in
+use — see `libgui_demo/src/panels.rs::outliner_rows`.
 
 ## Docking (Unity-style, multi-window)
 
@@ -329,7 +357,8 @@ enforced by tests rather than left to a benchmark nobody runs
 | Allocations per widget per frame | **2.00** (170 bytes) |
 | Allocations in an empty frame | **0** |
 | Draw instances for offscreen widgets | **0** (15x the rows, same instance count) |
-| A 1,000,000-row virtual list vs a 100-row one | **identical** — 39 rows built, 203 instances, ~18 µs |
+| A 1,000,000-row virtual list vs a 100-row one | **identical** — 39 rows built, 203 instances, ~13 µs |
+| 100,000 variable-height rows | ~210 µs (locating is O(rows); building is not) |
 | Glyph rasterisation in a steady frame | **none** (atlas version unchanged) |
 | An idle UI | `repaint_after: None` — the host sleeps |
 
@@ -343,7 +372,7 @@ these are the regression guards.
 ## Roadmap (roughly in order)
 
 1. ~~Text input~~ ✅ single-line; next: multi-line editor, IME preedit, double-click word select, undo.
-2. ~~Scroll areas~~ ✅ ~~virtualised lists~~ ✅ `ui.virtual_list`; next: variable row heights and trees, horizontal scroll, keyboard PageUp/Down.
+2. ~~Scroll areas~~ ✅ ~~virtualised lists, variable row heights, trees~~ ✅ `ui.virtual_list`, `ui.virtual_rows`, `ui.tree_row`; next: horizontal scroll, keyboard PageUp/Down, multi-select and drag-to-reparent.
 3. **Keyboard/shortcut routing**, menus, popups/context menus, tooltips (needs a layer/z-order stack).
 4. ~~Docking + tabs + splitters~~ ✅ Unity-style with OS-window tear-off; next: layout save/load, tab close/context menu, maximize pane.
 5. **Real text shaping**: replace `text.rs` internals with `cosmic-text`/`swash` or HarfBuzz
