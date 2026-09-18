@@ -142,6 +142,29 @@ ui.scroll_area_with("console", opts, |ui| { /* log lines */ });
 - Clipped hit-testing: widgets scrolled out of view can't be hovered or clicked.
 - `stick_to_end` keeps logs/consoles pinned to the newest line while at the bottom.
 
+## Virtualised lists
+
+```rust
+ui.virtual_list("objects", scene.len(), 24.0, |ui, i| {
+    if ui.selectable_keyed(i, &scene[i].name, i == selected).clicked { selected = i; }
+});
+```
+
+Only the visible rows are built, so a list of a million items costs the same as a list of fifty
+(measured: 39 rows built, 203 draw instances, ~18 µs either way). Rows that were not built are
+replaced by spacers of the right height, so layout, the scrollbar and the scroll maths still see the
+whole list.
+
+The contract is that every row is exactly `row_height` tall — that is what lets the library place
+row *n* without having built rows `0..n`. Rows are clipped to it. `ListOptions` adds `gap`,
+`padding`, `overscan` (rows built beyond the viewport, so a fast fling shows no gap) and
+`stick_to_end`.
+
+Rows are addressed by index. For a filtered or sorted view, resolve to a list of indices first and
+virtualise over that, keying rows by the underlying item so selection follows it
+(`libgui_demo/src/panels.rs::outliner` does exactly this). Trees and variable-height rows are not
+covered yet: both need a height-per-row model rather than one constant.
+
 ## Docking (Unity-style, multi-window)
 
 ```rust
@@ -306,6 +329,7 @@ enforced by tests rather than left to a benchmark nobody runs
 | Allocations per widget per frame | **2.00** (170 bytes) |
 | Allocations in an empty frame | **0** |
 | Draw instances for offscreen widgets | **0** (15x the rows, same instance count) |
+| A 1,000,000-row virtual list vs a 100-row one | **identical** — 39 rows built, 203 instances, ~18 µs |
 | Glyph rasterisation in a steady frame | **none** (atlas version unchanged) |
 | An idle UI | `repaint_after: None` — the host sleeps |
 
@@ -319,7 +343,7 @@ these are the regression guards.
 ## Roadmap (roughly in order)
 
 1. ~~Text input~~ ✅ single-line; next: multi-line editor, IME preedit, double-click word select, undo.
-2. ~~Scroll areas~~ ✅; next: virtualised lists/trees (only build visible rows), horizontal scroll, keyboard PageUp/Down.
+2. ~~Scroll areas~~ ✅ ~~virtualised lists~~ ✅ `ui.virtual_list`; next: variable row heights and trees, horizontal scroll, keyboard PageUp/Down.
 3. **Keyboard/shortcut routing**, menus, popups/context menus, tooltips (needs a layer/z-order stack).
 4. ~~Docking + tabs + splitters~~ ✅ Unity-style with OS-window tear-off; next: layout save/load, tab close/context menu, maximize pane.
 5. **Real text shaping**: replace `text.rs` internals with `cosmic-text`/`swash` or HarfBuzz

@@ -230,7 +230,8 @@ impl TabViewer for Panels<'_> {
     }
 
     fn scroll(&self, tab: &Tab) -> bool {
-        !matches!(tab, Tab::Viewport | Tab::Console)
+        // The outliner scrolls itself, with a virtual list.
+        !matches!(tab, Tab::Viewport | Tab::Console | Tab::Outliner)
     }
 
     fn padding(&self, tab: &Tab) -> Insets {
@@ -292,11 +293,29 @@ impl Panels<'_> {
         let d = &mut *self.d;
         ui.text_input("search", &mut d.filter, "Search objects…");
         let filter = d.filter.to_lowercase();
+        // A virtual list addresses rows by index, so resolve the filter to a
+        // list of matching indices and virtualise over that. Filtering stays
+        // O(objects), but building stays O(visible rows).
+        let matches: Vec<usize> = d
+            .objects
+            .iter()
+            .enumerate()
+            .filter(|(_, name)| filter.is_empty() || name.to_lowercase().contains(&filter))
+            .map(|(i, _)| i)
+            .collect();
+
         let mut picked = None;
-        for (i, name) in d.objects.iter().enumerate() {
-            if (filter.is_empty() || name.to_lowercase().contains(&filter)) && ui.selectable(name, d.selected == i).clicked {
-                picked = Some(i);
-            }
+        {
+            let (objects, selected) = (&d.objects, d.selected);
+            let row_h = ui.theme.selectable.height;
+            ui.virtual_list("objects", matches.len(), row_h, |ui, row| {
+                let i = matches[row];
+                // Keyed by object index, not by row, so selection and hover
+                // follow the object when the filter changes.
+                if ui.selectable_keyed(i, &objects[i], selected == i).clicked {
+                    picked = Some(i);
+                }
+            });
         }
         if let Some(i) = picked {
             d.selected = i;

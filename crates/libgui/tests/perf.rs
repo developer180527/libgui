@@ -183,6 +183,46 @@ fn repeated_keys_stay_linear() {
     assert!(ratio < 7.0, "repeated keys cost {ratio:.1}x for 4x the widgets");
 }
 
+/// The point of a virtual list: cost tracks what is *visible*, not what the
+/// list contains. A scene outliner with a million objects must cost the same
+/// as one with fifty, in draw work and in time.
+#[test]
+fn a_virtual_list_does_not_care_how_long_it_is() {
+    let mut ui = ui();
+    let names = names(64);
+    let mut run = |rows: usize| -> (usize, usize, Duration) {
+        let mut built = 0;
+        let mut frame = |ui: &mut Ui| {
+            ui.begin_frame(FrameInfo::default());
+            built = ui
+                .virtual_list("objects", rows, 24.0, |ui, i| {
+                    let _ = ui.selectable(&names[i % 64], false);
+                })
+                .len();
+            ui.end_frame().draw.instances.len()
+        };
+        for _ in 0..30 {
+            frame(&mut ui);
+        }
+        let instances = frame(&mut ui);
+        let cost = fastest(40, || {
+            frame(&mut ui);
+        });
+        (built, instances, cost)
+    };
+
+    let (small_built, small_inst, small_cost) = run(100);
+    let (big_built, big_inst, big_cost) = run(1_000_000);
+    let ratio = big_cost.as_secs_f64() / small_cost.as_secs_f64().max(1e-9);
+    println!(
+        "100 rows: {small_built} built, {small_inst} instances, {small_cost:?}\n         1_000_000 rows: {big_built} built, {big_inst} instances, {big_cost:?}  (ratio {ratio:.2})"
+    );
+
+    assert_eq!(small_built, big_built, "a longer list built more rows");
+    assert_eq!(small_inst, big_inst, "a longer list produced more draw work");
+    assert!(ratio < 2.0, "10_000x the rows cost {ratio:.1}x the time");
+}
+
 /// The headline claim, as a number. A visible inspector must be a rounding
 /// error in a 60 fps frame. Asserted in release only: a debug build is ~10x
 /// slower and its timings say nothing about shipped code.

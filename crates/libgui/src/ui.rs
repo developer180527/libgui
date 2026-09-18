@@ -3,8 +3,9 @@ use crate::text_edit::TextState;
 use crate::hash::{FxMap, FxSet};
 use crate::input::UiEvent;
 use crate::input_state::InputState;
-use crate::{Atlas, Color, Cursor, DrawList, FontError, FontId, Fonts, FrameInfo, FrameInput, Gesture, Id, InputEvent, Insets, Key, Layout, Painter, PlatformOutput, PointerButton, PointerKind, Rect, Size, Theme, Vec2};
+use crate::{Align, Atlas, Color, Cursor, DrawList, FontError, FontId, Fonts, FrameInfo, FrameInput, Gesture, Id, InputEvent, Insets, Key, Layout, Painter, PlatformOutput, PointerButton, PointerKind, Rect, Size, Theme, Vec2};
 use std::hash::Hash;
+use std::ops::Range;
 
 /// Result of an interactive widget for this frame.
 #[derive(Clone, Copy, Debug, Default)]
@@ -72,6 +73,37 @@ pub struct ScrollOptions {
 impl ScrollOptions {
     pub fn new(height: Size) -> Self {
         Self { height, gap: 0.0, padding: Insets::all(0.0), stick_to_end: false }
+    }
+}
+
+/// Options for [`Ui::virtual_list_with`].
+#[derive(Clone, Copy, Debug)]
+pub struct ListOptions {
+    /// Height of the list area itself (not of the content).
+    pub height: Size,
+    /// Every row is exactly this tall. Rows are clipped to it, so the library
+    /// can know where row `n` is without building rows `0..n`.
+    pub row_height: f32,
+    /// Vertical space between rows.
+    pub gap: f32,
+    pub padding: Insets,
+    /// Rows built above and below the viewport. The viewport is measured one
+    /// frame late, so a little slack keeps a fast fling from showing a gap.
+    pub overscan: usize,
+    /// Keep following the end while scrolled to the bottom (logs, consoles).
+    pub stick_to_end: bool,
+}
+
+impl ListOptions {
+    pub fn new(row_height: f32) -> Self {
+        Self {
+            height: Size::Grow(1.0),
+            row_height,
+            gap: 0.0,
+            padding: Insets::all(0.0),
+            overscan: 2,
+            stick_to_end: false,
+        }
     }
 }
 
@@ -767,6 +799,12 @@ impl Ui {
     /// mouse; the scrollbar thumb can be dragged, and clicking the track jumps.
     pub fn scroll_area_with<R>(&mut self, key: &str, opts: ScrollOptions, body: impl FnOnce(&mut Self) -> R) -> R {
         let id = self.make_id(("scroll", key));
+        self.scroll_area_id(id, opts, body)
+    }
+
+    /// A scroll area with an id the caller already made (so it can read the
+    /// area's retained state first, as [`Ui::virtual_list_with`] does).
+    fn scroll_area_id<R>(&mut self, id: Id, opts: ScrollOptions, body: impl FnOnce(&mut Self) -> R) -> R {
         let bar_id = id.with("bar");
         self.seen.insert(bar_id);
         let mut st = self.scroll_states.get(&id).copied().unwrap_or_default();
@@ -850,6 +888,90 @@ impl Ui {
         let r = body(self);
         self.stack.pop();
         r
+    }
+
+    /// Scrolling list that only builds the rows you can see.
+    ///
+    /// Cost is proportional to the *visible* rows, not to `rows`, so a list of
+    /// a million items costs the same as a list of fifty. The price is that
+    /// every row must be exactly `row_height` tall: that is what lets the
+    /// library place row `n` without having built rows `0..n`.
+    ///
+    /// ```ignore
+    /// ui.virtual_list("objects", scene.len(), 24.0, |ui, i| {
+    ///     if ui.selectable(&scene[i].name, i == selected).clicked { selected = i; }
+    /// });
+    /// ```
+    ///
+    /// Returns the range that was built. Rows are identified by index, so if
+    /// your list can reorder or filter, wrap the body in
+    /// [`Ui::with_key`] with something stable from the item itself.
+    pub fn virtual_list(&mut self, key: &str, rows: usize, row_height: f32, row: impl FnMut(&mut Self, usize)) -> Range<usize> {
+        self.virtual_list_with(key, rows, ListOptions::new(row_height), row)
+    }
+
+    /// [`Ui::virtual_list`] with explicit options.
+    pub fn virtual_list_with(
+        &mut self,
+        key: &str,
+        rows: usize,
+        opts: ListOptions,
+        mut row: impl FnMut(&mut Self, usize),
+    ) -> Range<usize> {
+        let id = self.make_id(("scroll", key));
+        let pitch = (opts.row_height + opts.gap).max(0.5);
+        let fallback_viewport = self.input.screen_size.y;
+        let scroll = ScrollOptions {
+            height: opts.height,
+            gap: opts.gap,
+            padding: opts.padding,
+            stick_to_end: opts.stick_to_end,
+        };
+        let mut built = 0..0;
+        self.scroll_area_id(id, scroll, |ui| {
+            // Read the state *inside*, so the range comes from this frame's
+            // offset (the one layout will use) rather than last frame's.
+            let st = ui.scroll_states.get(&id).copied().unwrap_or_default();
+            // The viewport is measured at the end of a frame, so it is 0 on the
+            // first one: fall back to the window rather than building nothing.
+            let viewport = if st.viewport > 1.0 { st.viewport } else { fallback_viewport };
+            let first = (st.offset / pitch).floor().max(0.0) as usize;
+            let first = first.saturating_sub(opts.overscan).min(rows);
+            let span = (viewport / pitch).ceil() as usize + 1 + 2 * opts.overscan;
+            let end = first.saturating_add(span).min(rows);
+            built = first..end;
+
+            // Spacers stand in for the rows that were not built, so layout, the
+            // scrollbar and the scroll maths still see the whole list. A row
+            // contributes `row_height + gap`; the spacer replaces `n` of them
+            // and the gap that follows it supplies the last one.
+            if first > 0 {
+                ui.list_spacer(0, first as f32 * pitch - opts.gap);
+            }
+            for i in built.clone() {
+                // Keyed by index, not by position among the built rows, so a
+                // row keeps its identity as the window slides over it.
+                let row_id = ui.make_id(("vlist_row", i));
+                let layout = Layout::row()
+                    .width(Size::Grow(1.0))
+                    .height(Size::Fixed(opts.row_height))
+                    .align(Align::Start, Align::Center)
+                    .shrink();
+                ui.container_id(row_id, layout, Frame { clip: true, ..Frame::none() }, |ui| row(ui, i));
+            }
+            let after = rows - end;
+            if after > 0 {
+                ui.list_spacer(1, after as f32 * pitch - opts.gap);
+            }
+        });
+        built
+    }
+
+    /// Invisible stand-in for the rows a virtual list did not build.
+    fn list_spacer(&mut self, slot: u8, height: f32) {
+        let id = self.make_id(("vlist_pad", slot));
+        let layout = Layout::leaf(Size::Grow(1.0), Size::Fixed(height.max(0.0)));
+        self.add_leaf(id, layout, Vec2::ZERO, false, |_, _| {});
     }
 
     pub fn row<R>(&mut self, body: impl FnOnce(&mut Self) -> R) -> R {
@@ -1133,6 +1255,113 @@ mod tests {
         let again = ui.button("Plain").id;
         let _ = ui.end_frame();
         assert_eq!(outside, again);
+    }
+
+    /// One frame of a virtual list: the range it built and where each built
+    /// row landed.
+    fn list_frame(ui: &mut Ui, rows: usize, opts: ListOptions, view: f32) -> (Range<usize>, Vec<(usize, Rect)>) {
+        let mut rects = Vec::new();
+        let h = opts.row_height;
+        ui.begin_frame(FrameInfo::default());
+        let opts = ListOptions { height: Size::Fixed(view), ..opts };
+        let built = ui.virtual_list_with("objects", rows, opts, |ui, i| {
+            let id = ui.make_id("cell");
+            ui.add_leaf(id, Layout::leaf(Size::Grow(1.0), Size::Fixed(h)), Vec2::ZERO, true, |_, _| {});
+            if let Some(r) = ui.rect_of(id) {
+                rects.push((i, r));
+            }
+        });
+        let _ = ui.end_frame();
+        (built, rects)
+    }
+
+    fn wheel(ui: &mut Ui, dy: f32) {
+        ui.push(InputEvent::PointerMoved { pos: Vec2::new(20.0, 100.0) });
+        ui.push(InputEvent::Wheel { delta: Vec2::new(0.0, dy), unit: crate::WheelUnit::Pixel });
+    }
+
+    /// A virtual list must be indistinguishable from a fully built one: rows on
+    /// the same pitch, an honest content height (so the scrollbar is right),
+    /// and the last row reachable and flush with the bottom.
+    #[test]
+    fn virtual_list_places_rows_like_a_full_list() {
+        const ROWS: usize = 5_000;
+        const VIEW: f32 = 400.0;
+        let opts = ListOptions { gap: 4.0, ..ListOptions::new(20.0) };
+        let pitch = opts.row_height + opts.gap;
+        let mut ui = ui();
+        list_frame(&mut ui, ROWS, opts, VIEW);
+        let (built, rects) = list_frame(&mut ui, ROWS, opts, VIEW);
+
+        assert!(built.len() < 40, "built {} rows for a {VIEW}px viewport", built.len());
+        assert_eq!(built.start, 0, "at the top, the first built row is row 0");
+        assert_eq!(rects[0].0, 0);
+        assert!(rects[0].1.y.abs() < 0.01, "row 0 starts at {}", rects[0].1.y);
+        let step = rects[1].1.y - rects[0].1.y;
+        assert!((step - pitch).abs() < 0.01, "row pitch is {step}, expected {pitch}");
+
+        // Run to the very bottom (content is ROWS * pitch tall), then let the
+        // scroll smoothing settle.
+        let mut last = (built, rects);
+        for _ in 0..300 {
+            wheel(&mut ui, -1000.0);
+            last = list_frame(&mut ui, ROWS, opts, VIEW);
+        }
+        for _ in 0..30 {
+            last = list_frame(&mut ui, ROWS, opts, VIEW);
+        }
+        let (built, rects) = last;
+        let (last_i, last_r) = *rects.last().unwrap();
+        assert_eq!(last_i, ROWS - 1, "could not reach the end of the list");
+        assert!((last_r.bottom() - VIEW).abs() < 1.0, "last row ends at {} not {VIEW}", last_r.bottom());
+        assert!(built.len() < 40, "still only a screenful at the bottom: {}", built.len());
+
+        // ...and back to the top, landing exactly on row 0.
+        let mut last = (built, rects);
+        for _ in 0..300 {
+            wheel(&mut ui, 1000.0);
+            last = list_frame(&mut ui, ROWS, opts, VIEW);
+        }
+        for _ in 0..30 {
+            last = list_frame(&mut ui, ROWS, opts, VIEW);
+        }
+        let (_, rects) = last;
+        assert_eq!(rects[0].0, 0);
+        assert!(rects[0].1.y.abs() < 0.01, "back at the top, row 0 is at {}", rects[0].1.y);
+    }
+
+    /// Rows must keep their identity as the window slides over them, or a hover
+    /// or drag would jump to a neighbour mid-scroll.
+    #[test]
+    fn virtual_rows_keep_their_identity_while_scrolling() {
+        let opts = ListOptions::new(20.0);
+        let mut ui = ui();
+        let ids = |ui: &mut Ui| -> Vec<(usize, Id)> {
+            let mut out = Vec::new();
+            ui.begin_frame(FrameInfo::default());
+            let o = ListOptions { height: Size::Fixed(200.0), ..opts };
+            ui.virtual_list_with("rows", 1000, o, |ui, i| {
+                out.push((i, ui.make_id("cell")));
+            });
+            let _ = ui.end_frame();
+            out
+        };
+        ids(&mut ui);
+        let before = ids(&mut ui);
+        for _ in 0..40 {
+            wheel(&mut ui, -2.0);
+            ids(&mut ui);
+        }
+        let after = ids(&mut ui);
+
+        let mut checked = 0;
+        for (i, id) in &after {
+            if let Some((_, was)) = before.iter().find(|(j, _)| j == i) {
+                assert_eq!(id, was, "row {i} changed identity while scrolling");
+                checked += 1;
+            }
+        }
+        assert!(checked > 3, "only {checked} rows overlapped; the test proves nothing");
     }
 
     #[test]

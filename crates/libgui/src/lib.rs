@@ -48,4 +48,4 @@ pub use theme_file::ThemeError;
 #[cfg(feature = "theme-watch")]
 pub use theme_watch::ThemeWatcher;
 pub use text_edit::TextResponse;
-pub use ui::{Frame, FrameOutput, LeafOptions, Response, ScrollOptions, Ui};
+pub use ui::{Frame, FrameOutput, LeafOptions, ListOptions, Response, ScrollOptions, Ui};
