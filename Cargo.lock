@@ -771,11 +771,19 @@ dependencies = [
  "arboard",
  "bytemuck",
  "libgui",
+ "libgui_nodes",
  "libgui_wgpu",
  "libgui_winit",
  "pollster",
  "wgpu",
  "winit",
+]
+
+[[package]]
+name = "libgui_nodes"
+version = "0.1.0"
+dependencies = [
+ "libgui",
 ]
 
 [[package]]

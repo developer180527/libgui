@@ -16,6 +16,7 @@ cargo run -p libgui_shaders -- shaders_out   # export HLSL/MSL/GLSL/SPIR-V/WGSL
 | `crates/libgui` | Core. **No GPU code.** IDs, retained state, layout, input, theme, text, draw list, widgets, and the `Backend` trait. |
 | `crates/libgui_shaders` | The one UI shader. Authored in WGSL, validated + cross-compiled by naga at build time to HLSL (SM 5.1), MSL 2.0, GLSL 4.50, SPIR-V. |
 | `crates/libgui_wgpu` | `Backend` implementation for wgpu. Also the reference for writing your own. |
+| `crates/libgui_nodes` | Node-graph editing: nodes, ports, links, selection, routing. Built *on* libgui, not in it. |
 | `crates/libgui_demo` | winit host + editor layout + an "engine" scene rendered offscreen and shown via `ui.viewport`. |
 
 ## Frame lifecycle
@@ -223,6 +224,42 @@ This bumped `CONTRACT_VERSION` to 2, but **not** the instance layout: a segment'
 `uv`, which untextured primitives do not use, so the 96-byte stride and the six attributes a backend
 binds are unchanged. Curves are flattened on the CPU by their size *on screen*, so they stay smooth
 zoomed in without wasting instances zoomed out.
+
+## Node graphs (`libgui_nodes`)
+
+A separate crate, because node editing is a domain with its own opinions and libgui stays general.
+It never stores your graph: you declare it each frame, it lays out, draws and runs the interactions,
+and hands back edits to apply.
+
+```rust
+let (events, ()) = libgui_nodes::graph(ui, "shader", &mut state, &style, |g| {
+    for n in &mut doc.nodes {
+        let cfg = NodeConfig::new(&n.title).inputs(&["A", "B"]).outputs(&["Out"]);
+        g.node(n.id, n.pos, &cfg, |ui| {            // ordinary libgui widgets
+            ui.slider("Amount", &mut n.amount, 0.0, 1.0);
+        });
+    }
+    for l in &doc.links { g.link(l.from, l.to); }
+});
+for e in events { doc.apply(e); }                   // one place owns every edit
+```
+
+- **Edits are events, not mutations** (`NodeMoved`, `LinkCreated`, `LinkRemoved`, `SelectionChanged`,
+  …), so undo, validation and collaboration have exactly one place to live.
+- **Drag a port to link.** The loose end eases into any compatible port within `snap_px` — measured
+  on screen, so it feels the same at any zoom. Dragging an input that already has a link picks that
+  link up and re-routes it, which arrives as a `LinkRemoved` then a `LinkCreated`.
+- **Links are pickable along their curve**, not by a bounding box, so crossing wires behave.
+- **Selection**: click, shift/cmd-click to add, drag the selection as a group, click empty canvas to
+  clear. Selected nodes rise above their neighbours.
+- **`GraphStyle` is the whole look** — node fill, header, stripe, port size and grab radius, wire
+  width and colours, snap distance and speed, routing (`Bezier` / `Orthogonal` / `Straight`).
+  `GraphStyle::from_theme` derives it so a graph matches the app by default.
+- Interaction state (`GraphState`) is yours: save it, inspect it, or drive it. `frame_bounds` fits
+  the view to a rect.
+
+Not there yet: marquee select, undo helpers, reroute nodes, comment/group boxes, a minimap, and
+keyboard navigation.
 
 ## Menus, popups and tooltips
 

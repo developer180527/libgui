@@ -767,6 +767,12 @@ impl Ui {
         self.input.buttons_down[button.index()]
     }
 
+    /// `button` went down this frame. Raw and unrouted, like
+    /// [`Ui::key_pressed`].
+    pub fn button_pressed(&self, button: PointerButton) -> bool {
+        self.input.buttons_pressed[button.index()]
+    }
+
     /// Ask for relative pointer mode this frame (hide + lock the cursor; drags
     /// use raw deltas). Typically while a viewport is being orbited.
     pub fn request_pointer_lock(&mut self) {
@@ -1110,6 +1116,7 @@ impl Ui {
         let t = self.xform();
         let over = self.gesture.active && rect.contains(t.inv_point(self.gesture.center));
         let active = self.active == Some(id);
+        let started = active && self.pressed;
         let over_now = self.hovered == Some(id);
         let delta = match (self.locked, self.input.raw_delta) {
             (true, Some(raw)) => raw,
@@ -1122,7 +1129,10 @@ impl Ui {
             active,
             pressed: hovered && self.pressed,
             clicked: active && hovered && self.released,
-            drag_delta: if active { delta * (1.0 / t.zoom) } else { Vec2::ZERO },
+            // Zero on the frame the drag starts: the pointer movement that
+            // brought it onto the widget happened *before* the press, and with
+            // a teleporting pointer (a pen, synthetic input) that jump is large.
+            drag_delta: if active && !started { delta * (1.0 / t.zoom) } else { Vec2::ZERO },
             raw_delta: if active { self.input.raw_delta } else { None },
             secondary_pressed: over_now && self.input.buttons_pressed[PointerButton::Secondary.index()],
             middle_pressed: over_now && self.input.buttons_pressed[PointerButton::Middle.index()],

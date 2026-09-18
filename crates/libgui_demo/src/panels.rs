@@ -1,7 +1,7 @@
 //! App state and panel UI. Panels don't know which window they live in; the
 //! dock decides that.
 
-use libgui::{Axis, Branch, CanvasState, Color, DockConfig, DockNode, DockState, Insets, Key, LeafOptions, ListOptions, Painter, Rect, ScrollOptions, Shortcut, Size, StateColors, TabViewer, TextureId, Ui, Vec2};
+use libgui::{Axis, Branch, Color, DockConfig, DockNode, DockState, Insets, Key, ListOptions, Painter, Rect, ScrollOptions, Shortcut, Size, StateColors, TabViewer, TextureId, Ui, Vec2};
 use std::collections::{HashSet, VecDeque};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,6 +68,7 @@ fn scene_objects() -> Vec<String> {
 /// A node in the demo graph. Positions are in canvas coordinates, so they do
 /// not change when the view is panned or zoomed.
 pub struct GraphNode {
+    pub id: u64,
     pub title: String,
     pub pos: Vec2,
     pub amount: f32,
@@ -75,15 +76,26 @@ pub struct GraphNode {
 }
 
 fn graph_nodes() -> Vec<GraphNode> {
-    [("Texture", 40.0, 40.0), ("Noise", 300.0, 150.0), ("Blend", 560.0, 60.0), ("Output", 820.0, 200.0)]
+    [("Texture", 40.0, 40.0), ("Noise", 60.0, 250.0), ("Blend", 360.0, 120.0), ("Output", 660.0, 160.0)]
         .iter()
-        .map(|&(title, x, y)| GraphNode {
+        .enumerate()
+        .map(|(i, &(title, x, y))| GraphNode {
+            id: i as u64 + 1,
             title: title.to_string(),
             pos: Vec2::new(x, y),
             amount: 0.5,
             enabled: true,
         })
         .collect()
+}
+
+fn graph_links() -> Vec<libgui_nodes::Link> {
+    use libgui_nodes::{Link, PortId};
+    vec![
+        Link { from: PortId::output(1, 0), to: PortId::input(3, 0) },
+        Link { from: PortId::output(2, 0), to: PortId::input(3, 1) },
+        Link { from: PortId::output(3, 0), to: PortId::input(4, 0) },
+    ]
 }
 
 /// One visible line of the outliner tree.
@@ -135,9 +147,10 @@ pub struct Demo {
     pub selected: usize,
     /// Outliner groups the user has collapsed (by group name).
     pub collapsed: HashSet<String>,
-    /// Node graph: pan/zoom, and the nodes themselves.
-    pub graph_view: CanvasState,
+    /// Node graph: interaction state, and the graph itself.
+    pub graph: libgui_nodes::GraphState,
     pub nodes: Vec<GraphNode>,
+    pub links: Vec<libgui_nodes::Link>,
     pub playing: bool,
     pub auto_rotate: bool,
     pub overlay: bool,
@@ -174,8 +187,9 @@ impl Default for Demo {
             command: String::new(),
             selected: 0,
             collapsed: HashSet::new(),
-            graph_view: CanvasState::default(),
+            graph: libgui_nodes::GraphState::new(),
             nodes: graph_nodes(),
+            links: graph_links(),
             playing: true,
             auto_rotate: true,
             overlay: true,
@@ -430,124 +444,53 @@ impl Panels<'_> {
         }
     }
 
-    /// A node graph: real widgets inside nodes, on a pan/zoom canvas. Wheel
-    /// zooms toward the pointer, middle-drag or dragging empty space pans.
+    /// A node graph, through `libgui_nodes`. The crate owns the interaction;
+    /// this owns the graph and applies the events it reports.
     fn graph(&mut self, ui: &mut Ui) {
+        use libgui_nodes::{GraphEvent, GraphStyle, NodeConfig};
         let d = &mut *self.d;
-        let t = ui.theme.clone();
-        let mut view = d.graph_view;
+        let style = GraphStyle::from_theme(&ui.theme);
         let nodes = &mut d.nodes;
-        ui.canvas("graph", &mut view, |ui, view| {
-            // Grid, drawn in canvas coordinates so it pans and zooms with the
-            // content. Spacing steps up as you zoom out so it never turns into
-            // a solid block.
-            let vis = view.visible;
-            let zoom = view.zoom;
-            let mut step = 40.0f32;
-            while step * zoom < 12.0 {
-                step *= 4.0;
-            }
-            let (faint, line) = (t.palette.border, t.palette.border_strong);
-            let id = ui.make_id("grid");
-            ui.add_leaf_at(id, vis, LeafOptions::default(), move |p, r| {
-                let mut x = (r.x / step).floor() * step;
-                while x < r.right() {
-                    let major = (x / (step * 4.0)).fract().abs() < 1e-3;
-                    p.rect(Rect::new(x, r.y, 1.0 / zoom, r.h), if major { line } else { faint }, 0.0);
-                    x += step;
-                }
-                let mut y = (r.y / step).floor() * step;
-                while y < r.bottom() {
-                    let major = (y / (step * 4.0)).fract().abs() < 1e-3;
-                    p.rect(Rect::new(r.x, y, r.w, 1.0 / zoom), if major { line } else { faint }, 0.0);
-                    y += step;
-                }
-            });
+        let links = &d.links;
 
-            // Wires, drawn under the nodes. Ports sit on the node edges, so
-            // the curve is in canvas coordinates like everything else.
-            // Title bar follows the font, so it grows with density. A node's
-            // height is its title plus whatever its body laid out to last frame,
-            // so it fits any theme, density or widget mix without tuning.
-            let width = 190.0;
-            let header = (t.metrics.font_size * 2.0).round();
-            let body_ids: Vec<libgui::Id> = (0..nodes.len()).map(|i| ui.make_id(("node_body", i))).collect();
-            let heights: Vec<f32> = body_ids
-                .iter()
-                .map(|&id| header + ui.rect_of(id).map_or(t.metrics.control_height * 3.0, |r| r.h))
-                .collect();
-            let links: Vec<(Vec2, Vec2)> = (0..nodes.len().saturating_sub(1))
-                .map(|i| {
-                    let a = nodes[i].pos;
-                    let b = nodes[i + 1].pos;
-                    (Vec2::new(a.x + width, a.y + header), Vec2::new(b.x, b.y + header))
-                })
-                .collect();
-            let accent = t.palette.accent;
-            let wire_id = ui.make_id("wires");
-            ui.add_leaf_at(wire_id, vis, LeafOptions::default(), move |p, _| {
-                for (from, to) in &links {
-                    // A hairline would vanish when zoomed out, so give the wire
-                    // a real canvas width and a minimum on screen.
-                    p.wire(*from, *to, (2.0f32).max(1.5 / zoom), accent);
-                    p.rect(Rect::new(from.x - 4.0, from.y - 4.0, 8.0, 8.0), accent, 4.0);
-                    p.rect(Rect::new(to.x - 4.0, to.y - 4.0, 8.0, 8.0), accent, 4.0);
-                }
-            });
-
-            for (i, node) in nodes.iter_mut().enumerate() {
-                let rect = Rect::new(node.pos.x, node.pos.y, width, heights[i]);
-                // Skip nodes that cannot be seen at all.
-                if rect.intersect(&vis).is_none() {
-                    continue;
-                }
-                let frame = libgui::Frame {
-                    fill: t.panel.fill,
-                    border: t.palette.border_strong,
-                    border_width: 1.0,
-                    radius: t.metrics.radius_large,
-                    shadow: true,
-                    clip: true,
+        let (events, ()) = libgui_nodes::graph(ui, "shader", &mut d.graph, &style, |g| {
+            for n in nodes.iter_mut() {
+                let ins: &[&str] = match n.title.as_str() {
+                    "Blend" => &["A", "B"],
+                    "Output" => &["Colour"],
+                    _ => &[],
                 };
-                let node_id = ui.make_id(("node", i));
-                // The title bar drags the node. Deltas are in canvas units, so
-                // a node keeps up with the pointer at any zoom.
-                let bar = ui.interact_drag(node_id.with("bar"));
-                if bar.active {
-                    node.pos += bar.drag_delta;
-                }
-                // `container_at`, not `layer_in`: a layer hangs off the root and
-                // would ignore the canvas transform and its clip.
-                ui.container_at(node_id, rect, frame, |ui| {
-                    let head = t.palette.bg_inset;
-                    let title = node.title.clone();
-                    let fg = t.palette.text;
-                    let size = t.metrics.font_size;
-                    ui.add_leaf(
-                        node_id.with("bar"),
-                        libgui::Layout::leaf(Size::Grow(1.0), Size::Fixed(header)),
-                        Vec2::ZERO,
-                        true,
-                        move |p, r| {
-                            p.rect(r, head, 0.0);
-                            p.text_left(r.shrink(10.0, 0.0, 10.0, 0.0), size, fg, &title);
-                        },
-                    );
-                    // Fit height: its laid-out rect is the content's height,
-                    // which sizes the node next frame.
-                    ui.container_id(
-                        body_ids[i],
-                        libgui::Layout::column().height(Size::Fit).padding(Insets::all(10.0)).gap(6.0),
-                        libgui::Frame::none(),
-                        |ui| {
-                            ui.slider("Amount", &mut node.amount, 0.0, 1.0);
-                            ui.toggle("Enabled", &mut node.enabled);
-                        },
-                    );
+                let outs: &[&str] = if n.title == "Output" { &[] } else { &["Out"] };
+                let cfg = NodeConfig::new(&n.title).inputs(ins).outputs(outs);
+                g.node(n.id, n.pos, &cfg, |ui| {
+                    ui.slider("Amount", &mut n.amount, 0.0, 1.0);
+                    ui.toggle("Enabled", &mut n.enabled);
                 });
             }
+            for l in links {
+                g.link(l.from, l.to);
+            }
         });
-        d.graph_view = view;
+
+        // Every edit arrives as an event, so one place applies them all.
+        for e in events {
+            match e {
+                GraphEvent::NodeMoved { node, delta } => {
+                    if let Some(n) = d.nodes.iter_mut().find(|n| n.id == node) {
+                        n.pos += delta;
+                    }
+                }
+                GraphEvent::LinkCreated { link } => {
+                    // One link per input, like most editors.
+                    d.links.retain(|l| l.to != link.to);
+                    d.links.push(link);
+                    d.log(format!("connected {} -> {}", link.from.node, link.to.node));
+                }
+                GraphEvent::LinkRemoved { link } => d.links.retain(|l| *l != link),
+                GraphEvent::NodeActivated { node } => d.log(format!("activated node {node}")),
+                _ => {}
+            }
+        }
     }
 
     fn inspector(&mut self, ui: &mut Ui) {
