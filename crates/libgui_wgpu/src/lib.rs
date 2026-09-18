@@ -3,6 +3,9 @@
 //! buffer, one instance buffer and a texture per `TextureId`.
 
 use libgui::{Backend, FrameOutput, TextureId, INSTANCE_STRIDE, VERTICES_PER_INSTANCE};
+
+// The shaders must have been generated for the contract this crate is built against.
+const _: () = assert!(libgui_shaders::CONTRACT_VERSION == libgui::render_contract::CONTRACT_VERSION);
 use std::collections::HashMap;
 use std::ops::Range;
 

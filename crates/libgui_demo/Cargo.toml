@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-libgui = { path = "../libgui" }
+libgui = { path = "../libgui", features = ["theme-watch"] }
 libgui_wgpu = { path = "../libgui_wgpu" }
 libgui_winit = { path = "../libgui_winit" }
 wgpu.workspace = true

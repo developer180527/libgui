@@ -1,4 +1,5 @@
-//! The contract between libgui and a GPU API.
+//! The contract between libgui and a GPU API. The exact data layout, bindings
+//! and pixel rules are in [`crate::render_contract`].
 //!
 //! libgui never talks to a GPU. Each frame it produces a [`FrameOutput`]:
 //! a list of POD [`Instance`]s grouped into [`Batch`]es by texture, a glyph
@@ -23,11 +24,7 @@
 use crate::{Atlas, Batch, FrameOutput, Instance, TextureId};
 use std::ops::Range;
 
-/// Vertices emitted per instance (two triangles, generated in the vertex shader).
-pub const VERTICES_PER_INSTANCE: u32 = 6;
-
-/// Byte size of one [`Instance`]; also the instance buffer stride.
-pub const INSTANCE_STRIDE: usize = std::mem::size_of::<Instance>();
+pub use crate::render_contract::{INSTANCE_STRIDE, VERTICES_PER_INSTANCE};
 
 /// Uniform block at group 0, binding 0.
 #[repr(C)]

@@ -782,6 +782,7 @@ dependencies = [
 name = "libgui_shaders"
 version = "0.1.0"
 dependencies = [
+ "libgui",
  "naga",
 ]
 

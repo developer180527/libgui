@@ -38,6 +38,9 @@ pub const SPIRV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ui.spv"));
 pub const VERTEX_ENTRY: &str = "vs_main";
 pub const FRAGMENT_ENTRY: &str = "fs_main";
 
+/// `libgui::render_contract::CONTRACT_VERSION` these shaders were generated for.
+pub const CONTRACT_VERSION: u32 = include!(concat!(env!("OUT_DIR"), "/contract_version.rs"));
+
 /// Every generated file as `(file name, bytes)`, for exporting into a C/C++
 /// engine's shader pipeline.
 pub fn files() -> [(&'static str, &'static [u8]); 6] {

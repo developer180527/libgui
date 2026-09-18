@@ -224,6 +224,21 @@ xcrun simctl launch booted com.libgui.demo
   end between two frames down for one frame, and call `set_ime_allowed(ui.wants_keyboard())` to show
   the on-screen keyboard (winit maps its Return to a newline insert: treat it as Enter).
 
+## Architecture boundaries
+
+- **`libgui` does UI work only:** layout, widgets, input timing, text layout/rasterisation into a CPU
+  atlas, theming, docking. No windowing, GPU, clipboard, threads or clocks; the host supplies `dt`.
+  With default features it does no I/O at all.
+- **Renderer contract (`libgui::render_contract`):** primitive kinds, instance layout, bindings, entry
+  points, blending, texel formats and colour space, with a `CONTRACT_VERSION`. `libgui_shaders`
+  generates the shader's constants from it and checks the shader's inputs and bindings against it at
+  build time (naga), so a mismatch fails the build rather than rendering wrongly. Hand-written
+  backends (e.g. a C++ RHI with its own HLSL) should use the same values and check the version.
+- **Stable ids:** widget ids use libgui's own SipHash-1-3 (`StableHasher`), pinned by tests, so they are
+  identical across Rust releases, 32/64-bit and endianness: safe to persist and to pass over FFI.
+- **Features:** `theme-toml` (default) parses/exports themes, pure data; `theme-watch` (opt-in) adds
+  `ThemeWatcher`, the only filesystem access in the crate.
+
 ## Hosts and input providers
 
 libgui talks to a host through two small types, so any windowing layer or input device can drive it:

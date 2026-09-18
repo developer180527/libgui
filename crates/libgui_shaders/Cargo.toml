@@ -5,4 +5,7 @@ edition = "2021"
 description = "libgui's UI shader: WGSL source plus naga-generated HLSL, MSL, GLSL and SPIR-V."
 
 [build-dependencies]
+# The render contract is the single source of truth for the shader's constants,
+# bindings and instance layout.
+libgui = { path = "../libgui", default-features = false }
 naga = { workspace = true, features = ["wgsl-in", "hlsl-out", "msl-out", "glsl-out", "spv-out"] }

@@ -15,10 +15,13 @@ mod input_state;
 mod layout;
 mod math;
 mod painter;
+pub mod render_contract;
 mod text;
 mod theme;
 #[cfg(feature = "theme-toml")]
 mod theme_file;
+#[cfg(feature = "theme-watch")]
+mod theme_watch;
 mod ui;
 mod text_edit;
 mod widgets;
@@ -26,7 +29,7 @@ mod widgets;
 pub use backend::{Backend, Globals, INSTANCE_STRIDE, VERTICES_PER_INSTANCE};
 pub use dock::{DockConfig, FloatingMode, DockNode, DockState, DropKind, DropTarget, Side, Surface, SurfaceId, TabViewer};
 pub use draw::{Batch, DrawList, Instance, TextureId};
-pub use id::Id;
+pub use id::{Id, StableHasher};
 pub use input::{
     Cursor, FrameInfo, FrameInput, Gesture, InputEvent, Key, Modifiers, PlatformOutput, PointerButton, PointerKind, Touch,
     TouchPhase, VirtualCursor, WheelUnit,
@@ -41,6 +44,8 @@ pub use theme::{
     ViewportStyle,
 };
 #[cfg(feature = "theme-toml")]
-pub use theme_file::{ThemeError, ThemeWatcher};
+pub use theme_file::ThemeError;
+#[cfg(feature = "theme-watch")]
+pub use theme_watch::ThemeWatcher;
 pub use text_edit::TextResponse;
 pub use ui::{Frame, FrameOutput, LeafOptions, Response, ScrollOptions, Ui};

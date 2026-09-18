@@ -1,8 +1,12 @@
-// One shader for the whole UI. Each instance is a quad:
-//   kind 0: rounded-rect SDF (fills, borders, soft shadows)
-//   kind 1: glyph (coverage from the R8 atlas)
-//   kind 2: image with rounded-corner mask (e.g. engine viewport)
+// One shader for the whole UI. Each instance is a quad whose kind is
+// Instance.params.w (see libgui::render_contract::PrimitiveKind):
+//   KIND_SHAPE: rounded-rect SDF (fills, borders, soft shadows)
+//   KIND_GLYPH: glyph (coverage from the R8 atlas)
+//   KIND_IMAGE: image with rounded-corner mask (e.g. engine viewport)
 // Output is premultiplied alpha.
+//
+// CONTRACT_VERSION and the KIND_* constants are generated from
+// libgui::render_contract and prepended by build.rs; do not declare them here.
 //
 // No sampler objects: texels are fetched with textureLoad and filtered
 // manually, so every RHI only binds one uniform buffer and one texture.
@@ -45,7 +49,7 @@ fn vs_main(@builtin(vertex_index) vi: u32, i: Inst) -> VOut {
     );
     let c = corners[vi];
     var pad = 0.0;
-    if (i.params.w < 0.5) {
+    if (u32(round(i.params.w)) == KIND_SHAPE) {
         pad = i.params.z + 1.0; // room for softness + AA
     }
     let half_size = i.rect.zw * 0.5;
@@ -95,18 +99,18 @@ fn fs_main(v: VOut) -> @location(0) vec4<f32> {
     if (v.world.x < v.clip.x || v.world.y < v.clip.y || v.world.x > v.clip.z || v.world.y > v.clip.w) {
         discard;
     }
-    let kind = v.params.w;
+    let kind = u32(round(v.params.w));
     let aa = 1.0 / g.scale;
 
     // Sample only in the branches that need it: shapes are the bulk of UI
     // fragments and never read the texture.
-    if (kind > 1.5) {
+    if (kind == KIND_IMAGE) {
         let r = min(v.params.x, min(v.half_size.x, v.half_size.y));
         let d = sd_round_rect(v.local, v.half_size, r);
         let m = clamp(0.5 - d / aa, 0.0, 1.0);
         return vec4(sample_bilinear(v.uv).rgb, 1.0) * v.color * m;
     }
-    if (kind > 0.5) {
+    if (kind == KIND_GLYPH) {
         return premul(v.color) * sample_bilinear(v.uv).r;
     }
 

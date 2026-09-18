@@ -9,9 +9,11 @@ pub enum TextureId {
     User(u32),
 }
 
-pub(crate) const KIND_SHAPE: f32 = 0.0;
-pub(crate) const KIND_GLYPH: f32 = 1.0;
-pub(crate) const KIND_IMAGE: f32 = 2.0;
+use crate::render_contract::PrimitiveKind;
+
+const KIND_SHAPE: f32 = PrimitiveKind::Shape.code();
+const KIND_GLYPH: f32 = PrimitiveKind::Glyph.code();
+const KIND_IMAGE: f32 = PrimitiveKind::Image.code();
 
 /// One GPU instance = one quad. Shapes are rounded rects evaluated as an SDF
 /// in the fragment shader, so fills, borders, and shadows are crisp at any DPI.

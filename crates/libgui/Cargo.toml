@@ -5,8 +5,10 @@ edition = "2021"
 
 [features]
 default = ["theme-toml"]
-# Load/save/hot-reload themes from TOML files.
+# Parse and export TOML themes (pure data, no I/O).
 theme-toml = ["dep:serde", "dep:toml"]
+# Hot-reload a theme file by polling it: the only filesystem access in libgui.
+theme-watch = ["theme-toml"]
 
 [dependencies]
 fontdue.workspace = true
