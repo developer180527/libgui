@@ -168,6 +168,25 @@ impl DrawList {
         let t = self.xform();
         let (a, b) = (t.point(a), t.point(b));
         let hw = (width * t.zoom * 0.5).max(0.05);
+        // A segment's quad is its bounding box, which for a long diagonal is
+        // enormous next to the line itself: an 800x600 diagonal rasterises
+        // ~480k fragments to draw a 2px line, nearly all of them discarded.
+        // Splitting it into k pieces divides that area by k, and the extra
+        // instances cost far less than the fragments they save.
+        let (dx, dy) = ((a.x - b.x).abs(), (a.y - b.y).abs());
+        let length = dx.hypot(dy);
+        let useful = (length * hw * 2.0).max(1.0);
+        let k = ((dx * dy) / (4.0 * useful)).ceil().clamp(1.0, 32.0) as usize;
+        for i in 0..k {
+            let (t0, t1) = (i as f32 / k as f32, (i + 1) as f32 / k as f32);
+            let p0 = Vec2::new(a.x + (b.x - a.x) * t0, a.y + (b.y - a.y) * t0);
+            let p1 = Vec2::new(a.x + (b.x - a.x) * t1, a.y + (b.y - a.y) * t1);
+            self.segment(p0, p1, hw, color);
+        }
+    }
+
+    /// One capsule instance, already in window coordinates.
+    fn segment(&mut self, a: Vec2, b: Vec2, hw: f32, color: Color) {
         // Bounding box grown for the width and for anti-aliasing, so the
         // vertex shader needs no padding of its own.
         let pad = hw + 2.0;

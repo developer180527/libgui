@@ -1,0 +1,134 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    name: test · ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x86_64,   os: ubuntu-latest }
+          - { name: linux-aarch64,  os: ubuntu-24.04-arm }
+          - { name: windows-x86_64, os: windows-latest }
+          - { name: macos-aarch64,  os: macos-latest }
+          - { name: macos-x86_64,   os: macos-13 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The demo links winit and wgpu, so the X11/Wayland headers must be present
+      # even though CI never opens a window.
+      - name: Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libxcursor-dev libxrandr-dev libxi-dev
+      - run: cargo build --workspace --all-targets
+      - run: cargo test --workspace
+      # The performance guards only assert their wall-clock budget in release;
+      # a debug build is an order of magnitude slower and says nothing.
+      - run: cargo test --workspace --release
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: clippy }
+      - uses: Swatinem/rust-cache@v2
+      - name: Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libx11-dev libxkbcommon-dev libwayland-dev libxcursor-dev libxrandr-dev libxi-dev
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  docs:
+    name: docs · intra-doc links
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --workspace --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings -D rustdoc::broken_intra_doc_links
+
+  msrv:
+    name: msrv · 1.87
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.87
+      - uses: Swatinem/rust-cache@v2
+      - name: Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libx11-dev libxkbcommon-dev libwayland-dev libxcursor-dev libxrandr-dev libxi-dev
+      - run: cargo check --workspace --all-targets
+
+  features:
+    name: feature combinations
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The core is meant to build with no features at all: no I/O, no font
+      # backend, no TOML. Each of these catches a missing cfg.
+      - run: cargo check -p libgui --no-default-features
+      - run: cargo check -p libgui --no-default-features --features fontdue
+      - run: cargo check -p libgui --no-default-features --features theme-toml
+      - run: cargo check -p libgui --no-default-features --features theme-toml,theme-watch
+      - run: cargo check -p libgui --all-features
+      - run: cargo test -p libgui --all-features
+
+  cross-build:
+    name: builds for · ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: wasm32-unknown-unknown,  os: ubuntu-latest }
+          - { target: aarch64-linux-android,   os: ubuntu-latest }
+          - { target: i686-unknown-linux-gnu,  os: ubuntu-latest }
+          - { target: aarch64-apple-ios,       os: macos-latest }
+          - { target: aarch64-apple-ios-sim,   os: macos-latest }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: "${{ matrix.target }}" }
+      - uses: Swatinem/rust-cache@v2
+      # The core and the node editor are portable; the winit/wgpu hosts are not
+      # checked here because each needs its own platform SDK.
+      - run: cargo check -p libgui --target ${{ matrix.target }} --all-features
+      - run: cargo check -p libgui_nodes --target ${{ matrix.target }}
+
+  portability:
+    name: 32-bit and big-endian
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cross --locked
+      # `Id` promises the same value on every target, which is what makes a
+      # saved layout portable. These run the pinned-id tests under emulation on
+      # a 32-bit target and a big-endian one, which is the only real check of it.
+      - run: cross test -p libgui --no-default-features --features fontdue --target i686-unknown-linux-gnu
+      - run: cross test -p libgui --no-default-features --features fontdue --target powerpc64-unknown-linux-gnu

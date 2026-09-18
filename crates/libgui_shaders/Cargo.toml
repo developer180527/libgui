@@ -1,7 +1,8 @@
 [package]
 name = "libgui_shaders"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
+rust-version.workspace = true
 description = "libgui's UI shader: WGSL source plus naga-generated HLSL, MSL, GLSL and SPIR-V."
 
 [build-dependencies]

@@ -1,0 +1,7 @@
+# The codebase is written to a wider line than rustfmt's default 100, which
+# suits the layout/paint call sites. Declared so everyone formats the same way.
+#
+# `cargo fmt --check` is not enforced in CI yet: turning it on needs a one-time
+# reformat of the whole tree, which is a decision rather than a fix.
+max_width = 120
+use_small_heuristics = "Max"

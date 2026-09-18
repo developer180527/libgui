@@ -2,6 +2,12 @@
 resolver = "2"
 members = ["crates/libgui", "crates/libgui_winit", "crates/libgui_shaders", "crates/libgui_wgpu", "crates/libgui_demo", "crates/libgui_bench", "crates/libgui_nodes"]
 
+[workspace.package]
+edition = "2021"
+# Set by naga (a build-dependency of libgui_shaders), not by our own code.
+# `libgui` alone with --no-default-features builds on 1.82.
+rust-version = "1.87"
+
 [workspace.dependencies]
 wgpu = "30"
 winit = "0.30"

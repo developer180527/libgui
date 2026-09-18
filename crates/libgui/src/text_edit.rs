@@ -428,6 +428,8 @@ mod tests {
         assert!(!ra.focused && rb.focused);
         let (_, rb, out) = frame(&mut ui, vec![key(Key::Enter, true)]);
         assert!(rb.submitted && !out.wants_keyboard);
+        // Ends the closure's mutable borrow of `a` so it can be read.
+        #[allow(clippy::drop_non_drop)]
         drop(frame);
         assert_eq!(a, "pasted");
     }

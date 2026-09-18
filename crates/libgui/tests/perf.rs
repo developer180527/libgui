@@ -265,6 +265,45 @@ fn variable_height_rows_pay_only_for_locating() {
     assert!(big < Duration::from_millis(4), "100k variable rows took {big:?}");
 }
 
+/// A line's quad is its bounding box, so a long diagonal would rasterise its
+/// whole box to draw a thin line. Pin that the emitted quads stay close to the
+/// area the line actually covers.
+#[test]
+fn a_long_diagonal_does_not_rasterise_its_bounding_box() {
+    use libgui::render_contract::PrimitiveKind;
+    let mut ui = ui();
+    let (a, b) = (Vec2::new(0.0, 0.0), Vec2::new(800.0, 600.0));
+    let width = 2.0;
+
+    ui.begin_frame(FrameInfo { screen_size: Vec2::new(1600.0, 1200.0), ..FrameInfo::default() });
+    let id = ui.make_id("l");
+    ui.add_leaf(id, Layout::leaf(Size::Grow(1.0), Size::Grow(1.0)), Vec2::ZERO, false, move |p, _| {
+        p.line(a, b, width, Color::WHITE);
+    });
+    let out = ui.end_frame();
+
+    let quads: f32 = out
+        .draw
+        .instances
+        .iter()
+        .filter(|i| PrimitiveKind::from_code(i.params[3]) == Some(PrimitiveKind::Line))
+        .map(|i| i.rect[2] * i.rect[3])
+        .sum();
+    let covered = (b.x - a.x).hypot(b.y - a.y) * width;
+    let whole_box = (b.x - a.x) * (b.y - a.y);
+    let ratio = quads / covered;
+    println!(
+        "diagonal: {quads:.0}px of quad for {covered:.0}px of line ({ratio:.1}x); \
+         whole box would be {whole_box:.0}px ({:.0}x saved)",
+        whole_box / quads
+    );
+    // Each piece carries an anti-aliasing pad, so splitting cannot drive this
+    // to 1: past a point the pad, not the box, is the cost. What matters is
+    // that it no longer scales with the bounding box.
+    assert!(ratio < 15.0, "rasterising {ratio:.0}x the line's own area");
+    assert!(quads < whole_box * 0.1, "barely better than the whole bounding box");
+}
+
 /// The headline claim, as a number. A visible inspector must be a rounding
 /// error in a 60 fps frame. Asserted in release only: a debug build is ~10x
 /// slower and its timings say nothing about shipped code.

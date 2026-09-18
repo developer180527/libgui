@@ -9,6 +9,20 @@ cargo test -p libgui                         # layout + backend-contract tests
 cargo run -p libgui_shaders -- shaders_out   # export HLSL/MSL/GLSL/SPIR-V/WGSL
 ```
 
+## Status
+
+| | |
+|---|---|
+| CI | build, test, clippy and docs on Linux (x86_64 + ARM), Windows, macOS (Intel + ARM) |
+| Also builds for | wasm32, Android (aarch64), iOS + simulator, 32-bit x86 |
+| Portability | `Id` values checked under emulation on a 32-bit and a big-endian target |
+| Rust | 1.87 (set by `naga`; `libgui` alone with `--no-default-features` builds on 1.82) |
+| Licence | **not yet chosen** — see `LICENSING.md` |
+| Version | 0.1.0, pre-1.0: the API still changes between releases |
+
+Not yet: multi-line text, font fallback, IME composition display, accessibility, tables, colour
+picker, drag-to-edit number fields, layout persistence. See the roadmap.
+
 ## Crates
 
 | crate | role |

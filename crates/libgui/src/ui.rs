@@ -1031,7 +1031,7 @@ impl Ui {
     /// one key (`space`, `flex`, `separator`, or a list of equal labels)
     /// quadratic: 2000 spacers cost 25 ms/frame.
     pub fn make_id(&mut self, src: impl Hash) -> Id {
-        let parent = self.nodes[*self.stack.last().unwrap()].id;
+        let parent = self.nodes[*self.stack.last().expect("libgui: widget built outside begin_frame/end_frame")].id;
         // A `with_key` scope salts the widgets built directly inside it. Nested
         // containers inherit it through their own (already salted) id, so the
         // salt is mixed in exactly once.
@@ -1198,7 +1198,7 @@ impl Ui {
     fn attach(&mut self, node: Node) -> usize {
         let idx = self.nodes.len();
         self.nodes.push(node);
-        let parent = *self.stack.last().unwrap();
+        let parent = *self.stack.last().expect("libgui: widget built outside begin_frame/end_frame");
         self.nodes[parent].children.push(idx);
         idx
     }
@@ -1237,7 +1237,7 @@ impl Ui {
 
     /// Generic container. Children added inside `body` are laid out by `layout`.
     pub fn container<R>(&mut self, layout: Layout, frame: Frame, body: impl FnOnce(&mut Self) -> R) -> R {
-        let idx = self.nodes[*self.stack.last().unwrap()].children.len();
+        let idx = self.nodes[*self.stack.last().expect("libgui: widget built outside begin_frame/end_frame")].children.len();
         let id = self.make_id(("container", idx));
         self.container_id(id, layout, frame, body)
     }
@@ -2504,7 +2504,16 @@ mod tests {
             p.line(Vec2::new(10.0, 20.0), Vec2::new(110.0, 220.0), 2.0, Color::WHITE);
         });
         let out = ui.end_frame();
-        assert_eq!(seg(&out), vec![[10.0, 20.0, 110.0, 220.0]], "endpoints are not in the instance");
+        // A long diagonal is split to keep each quad tight (see DrawList::line),
+        // so check the chain runs end to end rather than counting instances.
+        let segs = seg(&out);
+        assert!(!segs.is_empty(), "no line instance emitted");
+        assert_eq!([segs[0][0], segs[0][1]], [10.0, 20.0], "chain does not start at the line's start");
+        let last = segs.last().unwrap();
+        assert_eq!([last[2], last[3]], [110.0, 220.0], "chain does not end at the line's end");
+        for w in segs.windows(2) {
+            assert_eq!([w[0][2], w[0][3]], [w[1][0], w[1][1]], "a gap between split segments");
+        }
 
         // Inside a 2x canvas panned by (30, 40): endpoints map to the window.
         let mut st = CanvasState { zoom: 2.0, pan: Vec2::new(30.0, 40.0), wheel_zooms: false, ..CanvasState::default() };
@@ -2521,7 +2530,9 @@ mod tests {
         };
         run(&mut ui, &mut st);
         let got = run(&mut ui, &mut st);
-        assert_eq!(got, vec![[10.0 * 2.0 + 30.0, 20.0 * 2.0 + 40.0, 110.0 * 2.0 + 30.0, 220.0 * 2.0 + 40.0]]);
+        assert_eq!([got[0][0], got[0][1]], [10.0 * 2.0 + 30.0, 20.0 * 2.0 + 40.0]);
+        let last = got.last().unwrap();
+        assert_eq!([last[2], last[3]], [110.0 * 2.0 + 30.0, 220.0 * 2.0 + 40.0]);
 
         // Far off screen: culled, like any other primitive.
         ui.begin_frame(FrameInfo::default());
