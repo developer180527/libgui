@@ -31,6 +31,7 @@ pub enum Align {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[cfg_attr(feature = "theme-toml", derive(serde::Serialize, serde::Deserialize), serde(deny_unknown_fields))]
 pub struct Insets {
     pub left: f32,
     pub top: f32,
@@ -177,6 +178,8 @@ pub(crate) struct Node {
     /// Positioned at this rect (window coordinates), outside the parent's flow;
     /// painted and hit-tested above its flow siblings.
     pub absolute: Option<Rect>,
+    /// Stacking order among absolute siblings. Ties keep build order.
+    pub z: crate::Layer,
 }
 
 impl Node {
@@ -196,6 +199,7 @@ impl Node {
             scroll: None,
             content: 0.0,
             absolute: None,
+            z: crate::Layer::Window,
         }
     }
 }

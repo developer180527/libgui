@@ -527,12 +527,43 @@ fn top_bar(ui: &mut Ui, d: &mut Demo) {
             p.rect(r.shrink(5.0, 5.0, 5.0, 5.0), Color::WHITE.with_alpha(0.9), 2.0);
         });
         ui.heading("libgui");
+        ui.menu_button("View", |ui| {
+            if ui.menu_item_shortcut("Reset layout", Shortcut::command(Key::R).shift()).clicked {
+                d.reset_layout = true;
+            }
+            if ui.menu_item("Reset view").clicked {
+                d.reset_view();
+            }
+            ui.menu_separator();
+            let play = if d.playing { "Pause" } else { "Play" };
+            if ui.menu_item_shortcut(play, Shortcut::plain(Key::Space)).clicked {
+                d.playing = !d.playing;
+            }
+            if ui.menu_item_ex("Auto-rotate", None, d.playing).clicked {
+                d.auto_rotate = !d.auto_rotate;
+            }
+            ui.menu_separator();
+            ui.submenu("Density", |ui| {
+                for (i, name) in ["Theme default", "Compact", "Regular", "Touch"].iter().enumerate() {
+                    if ui.menu_item(name).clicked {
+                        d.density_choice = i;
+                    }
+                }
+            });
+            if ui.menu_item("Export theme").clicked {
+                d.export_theme = true;
+            }
+        });
         ui.label_muted("drag any tab out of its bar to tear it off");
         ui.flex();
-        if ui.button("Reset layout").clicked {
+        let r = ui.button("Reset layout");
+        ui.tooltip(&r, "Rebuild the default dock layout");
+        if r.clicked {
             d.reset_layout = true;
         }
-        if ui.button("Reset view").clicked {
+        let r = ui.button("Reset view");
+        ui.tooltip(&r, "Recentre the camera on the scene");
+        if r.clicked {
             d.reset_view();
         }
         let play = if d.playing { "Pause" } else { "Play" };

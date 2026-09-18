@@ -4,7 +4,7 @@
 //!   4. copy its style from `self.theme` (so `with_style` scopes work)
 //!   5. `add_leaf` with a layout + a paint closure that runs after layout.
 
-use crate::{ButtonStyle, Color, Cursor, Insets, Layout, Painter, Rect, Response, Size, TextureId, Theme, Ui, Vec2};
+use crate::{ButtonStyle, Color, Cursor, Insets, Layout, Painter, Rect, Response, Shortcut, Size, TextureId, Theme, Ui, Vec2};
 use std::hash::Hash;
 
 /// Whether a tree row can be expanded, and whether it is.
@@ -335,6 +335,174 @@ impl Ui {
         TreeResponse { response: resp, toggled }
     }
 
+    // ---- menus -----------------------------------------------------------
+
+    /// A menu bar button. Click to open its menu; while any menu on the bar is
+    /// open, moving across the others opens them, as a menu bar should.
+    ///
+    /// ```ignore
+    /// ui.row(|ui| {
+    ///     ui.menu_button("File", |ui| {
+    ///         if ui.menu_item_shortcut("Save", Shortcut::command(Key::S)).clicked { save(); }
+    ///         ui.menu_separator();
+    ///         if ui.menu_item("Quit").clicked { quit(); }
+    ///     });
+    /// });
+    /// ```
+    pub fn menu_button<R>(&mut self, label: &str, body: impl FnOnce(&mut Ui) -> R) -> Option<R> {
+        let id = self.make_id(("menu_button", label));
+        let menu_id = id.with("menu");
+        let s = self.theme.menu;
+        let size = self.theme.metrics.font_size;
+        let m = self.text_size(size, label);
+        let resp = self.interact(id);
+        let open = self.popup_open(menu_id);
+
+        // While a menu is open the sheet swallows the pointer, so hovering is
+        // judged against this button's own rect: that is what lets you slide
+        // from one menu to the next.
+        let sliding = self.any_popup_open() && resp.rect.contains(self.input().mouse_pos);
+        if sliding && !open {
+            let anchor = resp.rect;
+            self.open_popup(menu_id, anchor);
+        } else if resp.clicked {
+            if open {
+                self.close_popups();
+            } else {
+                let anchor = resp.rect;
+                self.open_popup(menu_id, anchor);
+            }
+        }
+        if resp.hovered {
+            self.cursor = Cursor::Pointer;
+        }
+        let hot = self.animate_bool(id, 0, resp.hovered || sliding || open);
+        let label = label.to_string();
+        let layout = Layout::leaf(Size::Fit, Size::Fixed(s.item_height)).padding(Insets::xy(s.item_padding_x, 0.0));
+        self.add_leaf(id, layout, m, true, move |p, r| {
+            p.rect(r, s.item_fill_hover.with_alpha(s.item_fill_hover.a * hot), s.item_radius);
+            p.text_centered(r, size, s.text, &label);
+        });
+
+        self.popup(menu_id, 160.0, body)
+    }
+
+    /// One row of a menu. Returns a [`Response`]; check `clicked`.
+    pub fn menu_item(&mut self, label: &str) -> Response {
+        self.menu_item_ex(label, None, true)
+    }
+
+    /// A menu row showing the shortcut that also triggers it, right-aligned and
+    /// spelled for this platform (`⌘S` / `Ctrl+S`). Declaring the shortcut here
+    /// does not bind it: handle it with [`Ui::consume_shortcut`] as usual.
+    pub fn menu_item_shortcut(&mut self, label: &str, sc: Shortcut) -> Response {
+        self.menu_item_ex(label, Some(sc), true)
+    }
+
+    /// A menu row that can be greyed out.
+    pub fn menu_item_ex(&mut self, label: &str, sc: Option<Shortcut>, enabled: bool) -> Response {
+        let s = self.theme.menu;
+        let size = self.theme.metrics.font_size;
+        let id = self.make_id(("menu_item", label));
+        let m = self.text_size(size, label);
+        let hint = sc.map(|sc| self.shortcut_label(sc)).unwrap_or_default();
+        let hint_w = if hint.is_empty() { 0.0 } else { self.text_size(size, &hint).x + s.item_padding_x };
+        let mut resp = self.interact(id);
+        if !enabled {
+            resp.clicked = false;
+            resp.hovered = false;
+        }
+        if resp.clicked {
+            // Choosing an item dismisses the whole chain, submenus included.
+            self.close_popups();
+        }
+        if resp.hovered {
+            self.cursor = Cursor::Pointer;
+            // Moving onto a plain item closes any submenu the pointer left.
+            self.close_sibling_submenus(id);
+        }
+        let hot = self.animate_bool(id, 0, resp.hovered);
+        let label = label.to_string();
+        let content = Vec2::new(s.gutter + m.x + hint_w + s.item_padding_x, m.y);
+        let layout = Layout::leaf(Size::Grow(1.0), Size::Fixed(s.item_height)).padding(Insets::xy(s.item_padding_x, 0.0));
+        self.add_leaf(id, layout, content, enabled, move |p, r| {
+            if hot > 0.01 {
+                p.rect(r, s.item_fill_hover.with_alpha(s.item_fill_hover.a * hot), s.item_radius);
+            }
+            let fg = if enabled { s.text.lerp(s.text_hover, hot) } else { s.text_disabled };
+            p.text_left(r.shrink(s.gutter, 0.0, 0.0, 0.0), size, fg, &label);
+            if !hint.is_empty() {
+                p.text_right(r, size, s.shortcut, &hint);
+            }
+        });
+        resp
+    }
+
+    /// A horizontal rule between groups of menu items.
+    pub fn menu_separator(&mut self) {
+        let s = self.theme.menu;
+        let id = self.make_id("menu_sep");
+        let layout = Layout::leaf(Size::Grow(1.0), Size::Fixed(s.separator_height));
+        self.add_leaf(id, layout, Vec2::ZERO, false, move |p, r| {
+            let y = r.center().y.round();
+            p.rect(Rect::new(r.x, y, r.w, 1.0), s.separator, 0.0);
+        });
+    }
+
+    /// A menu row that opens a further menu beside it, on hover.
+    pub fn submenu<R>(&mut self, label: &str, body: impl FnOnce(&mut Ui) -> R) -> Option<R> {
+        let s = self.theme.menu;
+        let size = self.theme.metrics.font_size;
+        let id = self.make_id(("submenu", label));
+        let child = id.with("menu");
+        let m = self.text_size(size, label);
+        let resp = self.interact(id);
+        let open = self.popup_open(child);
+        if resp.hovered && !open {
+            // Anchored to the row's right edge, so the child sits beside it.
+            let a = resp.rect;
+            let anchor = Rect::new(a.right() - 4.0, a.y - s.padding.top - 1.0, 0.0, 0.0);
+            if let Some(parent) = self.enclosing_popup() {
+                self.open_child_popup(parent, child, anchor);
+            }
+        }
+        if resp.hovered {
+            self.cursor = Cursor::Pointer;
+        }
+        let hot = self.animate_bool(id, 0, resp.hovered || open);
+        let label = label.to_string();
+        let arrow_w = s.item_padding_x * 1.5;
+        let content = Vec2::new(s.gutter + m.x + arrow_w + s.item_padding_x, m.y);
+        let layout = Layout::leaf(Size::Grow(1.0), Size::Fixed(s.item_height)).padding(Insets::xy(s.item_padding_x, 0.0));
+        self.add_leaf(id, layout, content, true, move |p, r| {
+            if hot > 0.01 {
+                p.rect(r, s.item_fill_hover.with_alpha(s.item_fill_hover.a * hot), s.item_radius);
+            }
+            let fg = s.text.lerp(s.text_hover, hot);
+            p.text_left(r.shrink(s.gutter, 0.0, 0.0, 0.0), size, fg, &label);
+            p.text_right(r, size, s.shortcut, "\u{25B8}");
+        });
+        self.popup(child, 140.0, body)
+    }
+
+    /// Right-click menu for the widget `resp` came from.
+    ///
+    /// ```ignore
+    /// let r = ui.selectable(&name, selected);
+    /// ui.context_menu(&r, |ui| {
+    ///     if ui.menu_item("Rename").clicked { rename(); }
+    /// });
+    /// ```
+    pub fn context_menu<R>(&mut self, resp: &Response, body: impl FnOnce(&mut Ui) -> R) -> Option<R> {
+        let id = resp.id.with("context_menu");
+        if resp.secondary_pressed {
+            // Anchored to the pointer, so it opens where you clicked.
+            let p = resp.mouse_pos;
+            self.open_popup(id, Rect::new(p.x, p.y, 0.0, 0.0));
+        }
+        self.popup(id, 160.0, body)
+    }
+
     /// One-of-N picker (density, tool modes, view modes).
     pub fn segmented(&mut self, key: &str, selected: &mut usize, options: &[&str]) -> Response {
         let s = self.theme.segmented;
@@ -443,12 +611,163 @@ mod tests {
     use crate::*;
 
     fn ui() -> Ui {
-        Ui::new(Theme::dark(), include_bytes!("../../../assets/Inter.ttf")).unwrap()
+        let mut ui = Ui::new(Theme::dark(), include_bytes!("../../../assets/Inter.ttf")).unwrap();
+        ui.set_mac_shortcuts(false);
+        ui
     }
 
     fn click_at(ui: &mut Ui, x: f32, y: f32, down: bool) {
         ui.push(InputEvent::PointerMoved { pos: Vec2::new(x, y) });
         ui.push(InputEvent::PointerButton { button: PointerButton::Primary, pressed: down });
+    }
+
+    /// The core of a menu: it opens on a click, sizes itself to its items,
+    /// sits above the content, and stops that content being clicked through.
+    #[test]
+    fn a_menu_opens_sizes_itself_and_blocks_what_is_under_it() {
+        let mut ui = ui();
+        // (menu button response, a button under where the menu will appear)
+        let frame = |ui: &mut Ui| -> (bool, Response, Vec<&'static str>) {
+            let mut chosen = Vec::new();
+            ui.begin_frame(FrameInfo::default());
+            ui.menu_button("File", |ui| {
+                if ui.menu_item("Open").clicked {
+                    chosen.push("Open");
+                }
+                ui.menu_separator();
+                if ui.menu_item("Save As Something Rather Long").clicked {
+                    chosen.push("Save");
+                }
+            });
+            let under = ui.button("Underneath");
+            let open = ui.any_popup_open();
+            let _ = ui.end_frame();
+            (open, under, chosen)
+        };
+        frame(&mut ui);
+        frame(&mut ui);
+        assert!(!frame(&mut ui).0, "a menu should start closed");
+
+        // Click the File button: press then release.
+        click_at(&mut ui, 20.0, 10.0, true);
+        frame(&mut ui);
+        click_at(&mut ui, 20.0, 10.0, false);
+        assert!(frame(&mut ui).0, "clicking the menu button did not open it");
+
+        // It must size itself to its widest item rather than collapsing.
+        frame(&mut ui);
+        let rect = ui.rect_of(Id::new("root").with(("menu_button", "File")).with("menu")).expect("no popup rect");
+        assert!(rect.h > 40.0, "the menu is {}px tall: it did not fit its items", rect.h);
+        assert!(rect.w > 160.0, "the menu is {}px wide: it did not fit its widest item", rect.w);
+
+        // The button underneath the open menu must not be hoverable.
+        ui.push(InputEvent::PointerMoved { pos: Vec2::new(rect.x + 20.0, rect.y + 20.0) });
+        let (_, under, _) = frame(&mut ui);
+        assert!(!under.hovered, "a widget under an open menu was still hovered");
+    }
+
+    /// Choosing an item reports the click and dismisses the menu; clicking away
+    /// dismisses without choosing anything.
+    #[test]
+    fn a_menu_item_reports_its_click_and_closes() {
+        let mut ui = ui();
+        let frame = |ui: &mut Ui| -> (bool, Vec<&'static str>) {
+            let mut chosen = Vec::new();
+            ui.begin_frame(FrameInfo::default());
+            ui.menu_button("File", |ui| {
+                if ui.menu_item("Open").clicked {
+                    chosen.push("Open");
+                }
+                if ui.menu_item("Quit").clicked {
+                    chosen.push("Quit");
+                }
+            });
+            let open = ui.any_popup_open();
+            let _ = ui.end_frame();
+            (open, chosen)
+        };
+        let open_menu = |ui: &mut Ui, frame: &dyn Fn(&mut Ui) -> (bool, Vec<&'static str>)| {
+            click_at(ui, 20.0, 10.0, true);
+            frame(ui);
+            click_at(ui, 20.0, 10.0, false);
+            frame(ui);
+            frame(ui);
+        };
+        frame(&mut ui);
+        open_menu(&mut ui, &frame);
+        let menu = ui.rect_of(Id::new("root").with(("menu_button", "File")).with("menu")).unwrap();
+
+        // Click the first item.
+        let item_y = menu.y + 14.0;
+        click_at(&mut ui, menu.x + 30.0, item_y, true);
+        frame(&mut ui);
+        click_at(&mut ui, menu.x + 30.0, item_y, false);
+        let (open, chosen) = frame(&mut ui);
+        assert_eq!(chosen, vec!["Open"], "the item did not report its click");
+        assert!(!open, "choosing an item left the menu open");
+
+        // Reopen, then press far away: dismissed, nothing chosen.
+        open_menu(&mut ui, &frame);
+        click_at(&mut ui, 600.0, 500.0, true);
+        let (open, chosen) = frame(&mut ui);
+        assert!(chosen.is_empty(), "clicking away chose an item");
+        assert!(!open, "clicking away left the menu open");
+    }
+
+    /// Right-click opens a menu where the pointer is, not where the widget is.
+    #[test]
+    fn a_context_menu_opens_at_the_pointer() {
+        let mut ui = ui();
+        let frame = |ui: &mut Ui| -> bool {
+            ui.begin_frame(FrameInfo::default());
+            let r = ui.selectable("Object", false);
+            ui.context_menu(&r, |ui| {
+                let _ = ui.menu_item("Rename");
+                let _ = ui.menu_item("Delete");
+            });
+            let open = ui.any_popup_open();
+            let _ = ui.end_frame();
+            open
+        };
+        frame(&mut ui);
+        frame(&mut ui);
+        assert!(!frame(&mut ui));
+
+        let (px, py) = (120.0, 12.0);
+        ui.push(InputEvent::PointerMoved { pos: Vec2::new(px, py) });
+        ui.push(InputEvent::PointerButton { button: PointerButton::Secondary, pressed: true });
+        assert!(frame(&mut ui), "right-click did not open a context menu");
+        ui.push(InputEvent::PointerButton { button: PointerButton::Secondary, pressed: false });
+        frame(&mut ui);
+        frame(&mut ui);
+
+        let id = Id::new("root").with(("selectable", "Object")).with("context_menu");
+        let r = ui.rect_of(id).expect("no context menu rect");
+        assert!((r.x - px).abs() < 8.0, "menu at x {} but the pointer was at {px}", r.x);
+        assert!(r.y >= py, "menu at y {} should be at or below the pointer {py}", r.y);
+    }
+
+    /// Escape backs out of a menu.
+    #[test]
+    fn escape_closes_a_menu() {
+        let mut ui = ui();
+        let frame = |ui: &mut Ui| -> bool {
+            ui.begin_frame(FrameInfo::default());
+            ui.menu_button("File", |ui| {
+                let _ = ui.menu_item("Open");
+            });
+            let open = ui.any_popup_open();
+            let _ = ui.end_frame();
+            open
+        };
+        frame(&mut ui);
+        click_at(&mut ui, 20.0, 10.0, true);
+        frame(&mut ui);
+        click_at(&mut ui, 20.0, 10.0, false);
+        assert!(frame(&mut ui));
+
+        ui.push(InputEvent::Key { key: Key::Escape, pressed: true, repeat: false });
+        assert!(!frame(&mut ui), "Escape did not close the menu");
     }
 
     /// The arrow toggles, the rest of the row selects, and the two never fire

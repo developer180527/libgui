@@ -11,7 +11,7 @@
 //! TOML (`theme_file` module), and any subtree can be restyled with
 //! [`crate::Ui::with_style`]. Behaviour ("feel") lives elsewhere, e.g. `DockConfig`.
 
-use crate::Color;
+use crate::{Color, Insets};
 
 #[cfg(feature = "theme-toml")]
 macro_rules! serde_struct {
@@ -238,6 +238,48 @@ pub struct SelectableStyle {
 }
 
 serde_struct! {
+/// Menus, popups and context menus, and their items.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MenuStyle {
+    pub fill: Color,
+    pub border: Color,
+    pub radius: f32,
+    /// Inset of the items from the panel edge.
+    pub padding: Insets,
+    /// Space between items.
+    pub gap: f32,
+    pub item_height: f32,
+    pub item_padding_x: f32,
+    pub item_radius: f32,
+    pub item_fill_hover: Color,
+    pub text: Color,
+    pub text_hover: Color,
+    /// Items that cannot be chosen right now.
+    pub text_disabled: Color,
+    /// The shortcut printed on the right of an item.
+    pub shortcut: Color,
+    pub separator: Color,
+    /// Space a separator takes, including the line.
+    pub separator_height: f32,
+    /// Width reserved on the left for a check mark or submenu state.
+    pub gutter: f32,
+}
+}
+
+serde_struct! {
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TooltipStyle {
+    pub fill: Color,
+    pub border: Color,
+    pub text: Color,
+    pub radius: f32,
+    pub padding: Insets,
+    /// Seconds of hover before it appears.
+    pub delay: f32,
+}
+}
+
+serde_struct! {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TextInputStyle {
     pub fill: Color,
@@ -358,6 +400,8 @@ pub struct Theme {
     pub toggle: ToggleStyle,
     pub slider: SliderStyle,
     pub selectable: SelectableStyle,
+    pub menu: MenuStyle,
+    pub tooltip: TooltipStyle,
     pub text_input: TextInputStyle,
     pub segmented: SegmentedStyle,
     pub scrollbar: ScrollbarStyle,
@@ -441,6 +485,32 @@ impl Theme {
                 indicator_width: 3.0,
                 height: m.row_height,
                 padding_x: m.space * 1.25,
+            },
+            menu: MenuStyle {
+                fill: p.bg_panel,
+                border: p.border_strong,
+                radius: m.radius_large,
+                padding: Insets::all(m.space * 0.5),
+                gap: 1.0,
+                item_height: m.row_height,
+                item_padding_x: m.space,
+                item_radius: m.radius,
+                item_fill_hover: p.accent.with_alpha(0.18),
+                text: p.text,
+                text_hover: p.text,
+                text_disabled: p.text_faint,
+                shortcut: p.text_faint,
+                separator: p.border,
+                separator_height: m.space,
+                gutter: m.space * 1.5,
+            },
+            tooltip: TooltipStyle {
+                fill: p.bg_app.lerp(p.text, 0.08),
+                border: p.border_strong,
+                text: p.text,
+                radius: m.radius,
+                padding: Insets::xy(m.space * 0.75, m.space * 0.4),
+                delay: 0.5,
             },
             text_input: TextInputStyle {
                 fill: p.bg_inset,

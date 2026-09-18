@@ -336,11 +336,7 @@ impl Panels<'_> {
         let d = &mut *self.d;
         // Panel-scoped: Delete only reaches here while the outliner has focus,
         // and never while the search box below is being typed into.
-        if ui.consume_shortcut(Shortcut::plain(Key::Delete)) && d.objects.len() > 1 {
-            let name = d.objects.remove(d.selected);
-            d.selected = d.selected.min(d.objects.len() - 1);
-            d.log(format!("deleted {name}"));
-        }
+        let delete_selected = ui.consume_shortcut(Shortcut::plain(Key::Delete));
         ui.text_input("search", &mut d.filter, "Search objects…");
         let filter = d.filter.to_lowercase();
 
@@ -353,6 +349,7 @@ impl Panels<'_> {
 
         let mut picked = None;
         let mut toggled = None;
+        let mut remove = None;
         {
             let (objects, selected) = (&d.objects, d.selected);
             let opts = ListOptions { gap: 1.0, ..ListOptions::new(0.0) };
@@ -371,6 +368,15 @@ impl Panels<'_> {
                 Row::Object { index, depth } => {
                     let i = *index;
                     let r = ui.tree_row(("o", i), *depth, Branch::Leaf, &objects[i], selected == i);
+                    ui.context_menu(&r.response, |ui| {
+                        if ui.menu_item("Select").clicked {
+                            picked = Some(i);
+                        }
+                        ui.menu_separator();
+                        if ui.menu_item_shortcut("Delete", Shortcut::plain(Key::Delete)).clicked {
+                            remove = Some(i);
+                        }
+                    });
                     if r.response.clicked {
                         picked = Some(i);
                     }
@@ -382,7 +388,13 @@ impl Panels<'_> {
                 d.collapsed.insert(name);
             }
         }
-        if let Some(i) = picked {
+        if let Some(i) = remove.or(delete_selected.then_some(d.selected)) {
+            if d.objects.len() > 1 {
+                let name = d.objects.remove(i);
+                d.selected = d.selected.min(d.objects.len() - 1);
+                d.log(format!("deleted {name}"));
+            }
+        } else if let Some(i) = picked {
             d.selected = i;
             let name = d.objects[i].clone();
             d.log(format!("selected {name}"));

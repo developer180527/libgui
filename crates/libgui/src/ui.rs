@@ -258,6 +258,20 @@ pub struct Ui {
     consumed_keys: Vec<Key>,
     /// A text field had focus when the frame began: its editing keys are its own.
     typing: bool,
+    /// The open popup chain: a root menu, then its submenus. Retained.
+    open_chain: Vec<Id>,
+    /// Anchor rect each open popup was opened against (pointer or widget).
+    open_anchors: FxMap<Id, Rect>,
+    /// The click-away sheet has been emitted this frame.
+    sheet_done: bool,
+    /// Popups currently being built, innermost last.
+    popup_stack: Vec<Id>,
+    /// (widget, time the pointer arrived) for the tooltip delay.
+    hover_since: Option<(Id, f64)>,
+    /// Fitted size of each floating node, measured last frame. A popup sizes
+    /// itself to its content, but its rect is also what positions it, so the
+    /// content size has to come from the previous frame's measure.
+    layer_min: FxMap<Id, Vec2>,
     draw: DrawList,
     pub(crate) time: f64,
     // Keyboard focus
@@ -286,6 +300,21 @@ pub struct Ui {
     multi_lock: bool,
     prev_two: Option<(Vec2, f32)>,
     gesture: Gesture,
+}
+
+/// Stacking order for floating content. Within one layer, build order decides.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Layer {
+    /// In-app floating windows and torn-off dock panels.
+    #[default]
+    Window,
+    /// Menus, popups and context menus, and the invisible sheet that closes
+    /// them when you click away.
+    Popup,
+    /// Tooltips: above popups, and never interactive.
+    Tooltip,
+    /// Drag previews: above everything.
+    Drag,
 }
 
 /// Options for [`Ui::add_leaf_ex`].
@@ -332,6 +361,12 @@ impl Ui {
             shortcut_scopes: Vec::new(),
             consumed_keys: Vec::new(),
             typing: false,
+            open_chain: Vec::new(),
+            open_anchors: FxMap::default(),
+            sheet_done: false,
+            popup_stack: Vec::new(),
+            hover_since: None,
+            layer_min: FxMap::default(),
             draw: DrawList::default(),
             time: 0.0,
             focused: None,
@@ -413,6 +448,205 @@ impl Ui {
         }
         self.consumed_keys.push(sc.key);
         true
+    }
+
+    // ---- popups ----------------------------------------------------------
+
+    /// Open `id` as a root popup, anchored to `anchor` (a widget's rect, or a
+    /// zero-size rect at the pointer for a context menu). Closes any other.
+    pub fn open_popup(&mut self, id: Id, anchor: Rect) {
+        self.open_chain.clear();
+        self.open_chain.push(id);
+        self.open_anchors.insert(id, anchor);
+    }
+
+    /// Open `id` as a child of `parent`, keeping `parent` open (a submenu).
+    pub fn open_child_popup(&mut self, parent: Id, id: Id, anchor: Rect) {
+        match self.open_chain.iter().position(|&p| p == parent) {
+            Some(i) => self.open_chain.truncate(i + 1),
+            None => return,
+        }
+        self.open_chain.push(id);
+        self.open_anchors.insert(id, anchor);
+    }
+
+    pub fn popup_open(&self, id: Id) -> bool {
+        self.open_chain.contains(&id)
+    }
+
+    /// True while any popup is open.
+    pub fn any_popup_open(&self) -> bool {
+        !self.open_chain.is_empty()
+    }
+
+    /// Close every open popup.
+    pub fn close_popups(&mut self) {
+        self.open_chain.clear();
+    }
+
+    /// Close `id` and anything it opened.
+    pub fn close_popup(&mut self, id: Id) {
+        if let Some(i) = self.open_chain.iter().position(|&p| p == id) {
+            self.open_chain.truncate(i);
+        }
+    }
+
+    /// The invisible full-window sheet under the open popups: it stops clicks
+    /// reaching the UI behind them, and a press on it closes them. Emitted once
+    /// per frame, by whichever popup is shown first.
+    fn popup_sheet(&mut self) {
+        if self.sheet_done || self.open_chain.is_empty() {
+            return;
+        }
+        self.sheet_done = true;
+        let id = Id::new("popup_sheet");
+        self.seen.insert(id);
+        let s = self.input.screen_size;
+        let rect = Rect::new(0.0, 0.0, s.x, s.y);
+        let resp = self.interact(id);
+        // A press, not a click: the release that opened the popup must not also
+        // close it, and pressing away should dismiss immediately.
+        if resp.pressed || self.input.buttons_pressed[PointerButton::Secondary.index()] && resp.hovered {
+            self.close_popups();
+        }
+        let mut n = Node::new(id, Layout::leaf(Size::Fixed(rect.w), Size::Fixed(rect.h)));
+        n.absolute = Some(rect);
+        n.z = Layer::Popup;
+        n.interactive = true;
+        n.paint = Some(Box::new(|_: &mut Painter, _: Rect| {}) as crate::layout::PaintFn);
+        let idx = self.nodes.len();
+        self.nodes.push(n);
+        self.nodes[0].children.push(idx);
+    }
+
+    /// Show `body` in a popup panel if `id` is open, positioned near its anchor
+    /// and kept on screen. Returns whether it was shown.
+    ///
+    /// Open it with [`Ui::open_popup`]; it closes on a click outside, on Escape,
+    /// or when you call [`Ui::close_popups`] (what a menu item does).
+    pub fn popup<R>(&mut self, id: Id, min_width: f32, body: impl FnOnce(&mut Self) -> R) -> Option<R> {
+        if !self.popup_open(id) {
+            return None;
+        }
+        self.popup_sheet();
+        if self.input.keys_pressed.contains(&Key::Escape) {
+            // Innermost first: Escape backs out one level.
+            if self.open_chain.last() == Some(&id) {
+                self.open_chain.pop();
+                return None;
+            }
+        }
+        let anchor = self.open_anchors.get(&id).copied().unwrap_or_default();
+        // The panel sizes itself to its content, but its rect is also what
+        // positions it, so the content size comes from last frame's measure.
+        // On the first frame it opens at `min_width` and settles on the next,
+        // the same one-frame rule as `Response::rect`.
+        let fitted = self.layer_min.get(&id).copied().unwrap_or(Vec2::new(min_width, 0.0));
+        let rect = self.place_popup(anchor, Vec2::new(fitted.x.max(min_width), fitted.y));
+        let s = self.theme.menu;
+        let (pad, gap) = (s.padding, s.gap);
+
+        self.seen.insert(id);
+        let layout = Layout::column().width(Size::Fit).height(Size::Fit).padding(pad).gap(gap);
+        let mut n = Node::new(id, layout);
+        n.absolute = Some(rect);
+        n.z = Layer::Popup;
+        n.clip = true;
+        n.paint = Some(Box::new(move |p: &mut Painter, r: Rect| {
+            p.shadow(r.translate(0.0, 6.0), s.radius, 24.0, p.theme.palette.shadow);
+            p.rect_bordered(r, s.fill, s.radius, 1.0, s.border);
+        }) as crate::layout::PaintFn);
+        let idx = self.nodes.len();
+        self.nodes.push(n);
+        self.nodes[0].children.push(idx);
+
+        self.popup_stack.push(id);
+        self.stack.push(idx);
+        let r = body(self);
+        self.stack.pop();
+        self.popup_stack.pop();
+        Some(r)
+    }
+
+    /// How long the pointer has rested on `id`, in seconds. 0 if it is not there.
+    pub fn hover_time(&self, id: Id) -> f32 {
+        match self.hover_since {
+            Some((h, t)) if h == id => (self.time - t) as f32,
+            _ => 0.0,
+        }
+    }
+
+    /// Show `text` beside the pointer once it has rested on `resp`'s widget.
+    ///
+    /// Tooltips sit above popups and are never interactive, so they cannot
+    /// swallow the click they are describing. Nothing is shown while a menu is
+    /// open, or while a drag is in progress.
+    pub fn tooltip(&mut self, resp: &Response, text: &str) {
+        if text.is_empty() || !resp.hovered || self.any_popup_open() || self.active.is_some() {
+            return;
+        }
+        let s = self.theme.tooltip;
+        if self.hover_time(resp.id) < s.delay {
+            // Ask for the frame that will cross the delay, or an idle UI would
+            // never wake up to show it.
+            self.request_repaint();
+            return;
+        }
+        let size = self.theme.metrics.font_size;
+        let m = self.fonts.measure(self.font, size, text);
+        let pad = s.padding;
+        let w = m.x + pad.left + pad.right;
+        let h = m.y + pad.top + pad.bottom;
+        let screen = self.input.screen_size;
+        let p = self.input.mouse_pos;
+        // Below-right of the pointer, flipped and clamped to stay on screen.
+        let x = (p.x + 14.0).min(screen.x - w - 4.0).max(4.0);
+        let below = p.y + 20.0;
+        let y = if below + h + 4.0 <= screen.y { below } else { (p.y - h - 8.0).max(4.0) };
+        let rect = Rect::new(x, y, w, h);
+
+        let id = resp.id.with("tooltip");
+        self.seen.insert(id);
+        let text = text.to_string();
+        let mut n = Node::new(id, Layout::leaf(Size::Fixed(w), Size::Fixed(h)));
+        n.absolute = Some(rect);
+        n.z = Layer::Tooltip;
+        n.paint = Some(Box::new(move |p: &mut Painter, r: Rect| {
+            p.shadow(r.translate(0.0, 3.0), s.radius, 12.0, p.theme.palette.shadow);
+            p.rect_bordered(r, s.fill, s.radius, 1.0, s.border);
+            p.text_left(r.shrink(pad.left, 0.0, pad.right, 0.0), size, s.text, &text);
+        }) as crate::layout::PaintFn);
+        let idx = self.nodes.len();
+        self.nodes.push(n);
+        self.nodes[0].children.push(idx);
+    }
+
+    /// The popup whose body is being built, if any. A submenu opens as a child
+    /// of this one, so the parent stays open.
+    pub fn enclosing_popup(&self) -> Option<Id> {
+        self.popup_stack.last().copied()
+    }
+
+    /// Moving onto a plain item closes any submenu opened from the same menu,
+    /// which is what makes a menu feel right when the pointer slides down it.
+    pub(crate) fn close_sibling_submenus(&mut self, _item: Id) {
+        let Some(parent) = self.enclosing_popup() else { return };
+        if let Some(i) = self.open_chain.iter().position(|&p| p == parent) {
+            self.open_chain.truncate(i + 1);
+        }
+    }
+
+    /// Put a popup of `size` next to `anchor`, flipping and clamping so it stays
+    /// on screen: below the anchor if it fits, otherwise above.
+    fn place_popup(&self, anchor: Rect, size: Vec2) -> Rect {
+        let screen = self.input.screen_size;
+        let m = 4.0;
+        let below = anchor.bottom() + 1.0;
+        let above = anchor.y - size.y - 1.0;
+        let y = if below + size.y + m <= screen.y || above < m { below } else { above };
+        let x = anchor.x.min(screen.x - size.x - m).max(m);
+        let y = y.min(screen.y - size.y - m).max(m);
+        Rect::new(x, y, size.x, size.y)
     }
 
     /// Limit the shortcuts declared inside `body` to when `active` is true.
@@ -545,6 +779,13 @@ impl Ui {
         } else {
             None
         };
+        // Dwell time for tooltips: reset whenever the pointer moves to something else.
+        let now = self.time;
+        match (self.hovered, self.hover_since) {
+            (Some(h), Some((prev, _))) if prev == h => {}
+            (Some(h), _) => self.hover_since = Some((h, now)),
+            (None, _) => self.hover_since = None,
+        }
         // Clicking anywhere drops focus; a text field re-takes it if it was the target.
         if self.pressed {
             self.focused = None;
@@ -591,6 +832,8 @@ impl Ui {
         // Focus is resolved during a frame, so this is last frame's answer —
         // the same one-frame-late rule the rest of the input model uses.
         self.typing = self.focused.is_some();
+        self.sheet_done = false;
+        self.popup_stack.clear();
         let s = self.input.screen_size;
         let root = Node::new(Id::new("root"), Layout::column().width(Size::Fixed(s.x)).height(Size::Fixed(s.y)));
         self.nodes.push(root);
@@ -602,6 +845,14 @@ impl Ui {
         let s = self.input.screen_size;
         let screen = Rect::new(0.0, 0.0, s.x, s.y);
         layout::solve(&mut self.nodes, 0, screen);
+        // Floating nodes size themselves from their content, which `measure`
+        // has just worked out; keep it for next frame's placement.
+        self.layer_min.clear();
+        for n in &self.nodes {
+            if n.absolute.is_some() {
+                self.layer_min.insert(n.id, n.min);
+            }
+        }
 
         self.draw.clear(screen);
         self.hits.clear();
@@ -918,9 +1169,15 @@ impl Ui {
     /// A floating layer at `rect` (window coordinates), drawn and hit-tested
     /// above everything built before it: in-app windows, popovers, palettes.
     pub fn layer<R>(&mut self, id: Id, rect: Rect, frame: Frame, body: impl FnOnce(&mut Self) -> R) -> R {
+        self.layer_in(id, Layer::Window, rect, frame, body)
+    }
+
+    /// [`Ui::layer`] in an explicit stacking [`Layer`].
+    pub fn layer_in<R>(&mut self, id: Id, z: Layer, rect: Rect, frame: Frame, body: impl FnOnce(&mut Self) -> R) -> R {
         self.seen.insert(id);
         let mut n = Node::new(id, Layout::column().shrink());
         n.absolute = Some(rect);
+        n.z = z;
         n.clip = frame.clip;
         if frame.fill.a > 0.0 || frame.border_width > 0.0 || frame.shadow {
             n.paint = Some(Box::new(move |p: &mut Painter, r: Rect| {
@@ -1221,13 +1478,20 @@ fn paint(nodes: &mut [Node], i: usize, p: &mut Painter, sink: &mut HitSink) {
         p.draw.push_clip(rect);
     }
     let children = std::mem::take(&mut nodes[i].children);
-    // Flow children first, then absolute ones on top.
-    for pass in [false, true] {
-        for &c in &children {
-            if nodes[c].absolute.is_some() == pass {
-                paint(nodes, c, p, sink);
-            }
+    // Flow children first, then absolute ones on top of them.
+    for &c in &children {
+        if nodes[c].absolute.is_none() {
+            paint(nodes, c, p, sink);
         }
+    }
+    // Absolute children stack by layer, and by build order within a layer, so a
+    // menu is above a floating panel however early the panel was built.
+    let mut floating: Vec<usize> = children.iter().copied().filter(|&c| nodes[c].absolute.is_some()).collect();
+    if floating.len() > 1 {
+        floating.sort_by_key(|&c| nodes[c].z);
+    }
+    for c in floating {
+        paint(nodes, c, p, sink);
     }
     nodes[i].children = children;
     if let Some(sc) = nodes[i].scroll {
@@ -1771,6 +2035,71 @@ mod tests {
         press(&mut ui, Key::F2, &[]);
         assert_eq!(run(&mut ui, false, false), (false, false, true), "outside every scope it is still available");
         release(&mut ui, Key::F2, &[]);
+    }
+
+    /// Stacking is by layer, not by build order: a popup built first still
+    /// wins the pointer against a window built after it.
+    #[test]
+    fn layers_stack_by_rank_not_build_order() {
+        let mut ui = ui();
+        let (popup_id, window_id) = (Id::new("pop"), Id::new("win"));
+        let overlap = Rect::new(50.0, 50.0, 200.0, 200.0);
+        let frame = |ui: &mut Ui| -> (bool, bool) {
+            ui.begin_frame(FrameInfo::default());
+            // Built first, but in the higher layer.
+            let mut on_popup = false;
+            ui.layer_in(popup_id, Layer::Popup, overlap, Frame::none(), |ui| {
+                let id = ui.make_id("pop_hit");
+                ui.add_leaf(id, Layout::leaf(Size::Fixed(200.0), Size::Fixed(200.0)), Vec2::ZERO, true, |_, _| {});
+                on_popup = ui.interact(id).hovered;
+            });
+            let mut on_window = false;
+            ui.layer_in(window_id, Layer::Window, overlap, Frame::none(), |ui| {
+                let id = ui.make_id("win_hit");
+                ui.add_leaf(id, Layout::leaf(Size::Fixed(200.0), Size::Fixed(200.0)), Vec2::ZERO, true, |_, _| {});
+                on_window = ui.interact(id).hovered;
+            });
+            let _ = ui.end_frame();
+            (on_popup, on_window)
+        };
+        frame(&mut ui);
+        ui.push(InputEvent::PointerMoved { pos: Vec2::new(100.0, 100.0) });
+        frame(&mut ui);
+        let (on_popup, on_window) = frame(&mut ui);
+        assert!(on_popup, "the popup layer did not get the pointer");
+        assert!(!on_window, "the window layer took the pointer from the popup above it");
+    }
+
+    /// A tooltip waits for the pointer to settle, and never appears while a
+    /// menu is open — it must not cover what you are about to click.
+    #[test]
+    fn a_tooltip_waits_for_the_delay() {
+        let mut ui = ui();
+        let delay = ui.theme.tooltip.delay;
+        let tip_id = Id::new("root").with(("button", "Save")).with("tooltip");
+        let frame = |ui: &mut Ui, dt: f32| {
+            ui.begin_frame(FrameInfo { dt, ..FrameInfo::default() });
+            let r = ui.button("Save");
+            ui.tooltip(&r, "Save the scene");
+            let _ = ui.end_frame();
+        };
+        frame(&mut ui, 0.016);
+        ui.push(InputEvent::PointerMoved { pos: Vec2::new(20.0, 10.0) });
+        frame(&mut ui, 0.016);
+        let id = tip_id;
+        assert!(ui.rect_of(id).is_none(), "the tooltip appeared immediately");
+
+        // Rest on it past the delay.
+        for _ in 0..4 {
+            frame(&mut ui, delay * 0.5);
+        }
+        assert!(ui.rect_of(id).is_some(), "the tooltip never appeared after {delay}s");
+
+        // Moving away takes it down again.
+        ui.push(InputEvent::PointerMoved { pos: Vec2::new(600.0, 400.0) });
+        frame(&mut ui, 0.016);
+        frame(&mut ui, 0.016);
+        assert!(ui.rect_of(id).is_none(), "the tooltip stayed up after the pointer left");
     }
 
     #[test]

@@ -158,6 +158,40 @@ ui.shortcut_label(Shortcut::command(Key::S));                             // "�
 `ui.key_pressed` / `key_down` stay raw and unrouted, for held-key state like a viewport's fly
 controls — gate those on `ui.wants_keyboard()`.
 
+## Menus, popups and tooltips
+
+Floating content stacks by `Layer` (`Window` < `Popup` < `Tooltip` < `Drag`) rather than by build
+order, so a menu is above a torn-off panel however early the panel was built.
+
+```rust
+ui.menu_button("File", |ui| {
+    if ui.menu_item_shortcut("Save", Shortcut::command(Key::S)).clicked { save(); }
+    ui.menu_item_ex("Undo", None, can_undo);            // greyed out when it cannot run
+    ui.menu_separator();
+    ui.submenu("Export", |ui| { /* … */ });
+});
+
+let r = ui.selectable(&name, selected);
+ui.context_menu(&r, |ui| { if ui.menu_item("Rename").clicked { rename(); } });
+ui.tooltip(&r, "Double-click to rename");
+```
+
+- **A menu blocks what is under it.** An open popup puts an invisible full-window sheet in the
+  `Popup` layer beneath its panels, so content behind cannot be hovered or clicked through, and a
+  press on it dismisses. Choosing an item dismisses too; Escape backs out one level.
+- **Menu bars behave like menu bars:** with one menu open, moving across the other buttons opens
+  them.
+- **Shortcuts shown in a menu are only labels.** `menu_item_shortcut` prints `⌘S` or `Ctrl+S` from
+  the same `Shortcut` you handle with `consume_shortcut`; declaring it in the menu does not bind it.
+- **A popup sizes itself to its content**, flips above its anchor when there is no room below, and
+  is clamped on screen. It is measured a frame late, like `Response::rect`, so it settles on the
+  frame after it opens.
+- **Tooltips** wait `theme.tooltip.delay`, sit above popups, are never interactive, and never appear
+  while a menu is open or a drag is in progress. An idle UI wakes itself to show one.
+
+`ui.popup(id, min_width, body)` is the primitive underneath, with `open_popup`, `close_popups` and
+`popup_open` if you want to drive one yourself. Look is themed via `theme.menu` and `theme.tooltip`.
+
 ## Scroll areas
 
 ```rust
@@ -402,7 +436,7 @@ these are the regression guards.
 
 1. ~~Text input~~ ✅ single-line; next: multi-line editor, IME preedit, double-click word select, undo.
 2. ~~Scroll areas~~ ✅ ~~virtualised lists, variable row heights, trees~~ ✅ `ui.virtual_list`, `ui.virtual_rows`, `ui.tree_row`; next: horizontal scroll, keyboard PageUp/Down, multi-select and drag-to-reparent.
-3. ~~Keyboard/shortcut routing~~ ✅ `Shortcut`, `consume_shortcut`, focus scopes; next: menus, popups/context menus, tooltips (needs a layer/z-order stack).
+3. ~~Keyboard/shortcut routing~~ ✅ ~~menus, popups/context menus, tooltips, z-order~~ ✅ `Layer`, `popup`, `menu_button`, `context_menu`, `tooltip`; next: checkable/icon menu items, keyboard navigation within a menu, "safe triangle" submenu tracking.
 4. ~~Docking + tabs + splitters~~ ✅ Unity-style with OS-window tear-off; next: layout save/load, tab close/context menu, maximize pane.
 5. **Real text shaping**: replace `text.rs` internals with `cosmic-text`/`swash` or HarfBuzz
    (ligatures, bidi, font fallback, CJK), multi-page atlas with LRU eviction.
@@ -415,7 +449,6 @@ these are the regression guards.
 
 - Text fields are single-line; no wrapping, IME preedit, or undo yet. No complex shaping.
 - Glyph atlas resets when full (possible one-frame flicker).
-- No z-layers yet: overlays are drawn inside their node's paint closure.
 - Container ids are positional; give containers explicit keys once you add conditional UI.
 
 Font: Inter (SIL Open Font License, see `assets/Inter-OFL.txt`).
