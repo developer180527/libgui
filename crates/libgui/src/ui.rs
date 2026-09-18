@@ -3,7 +3,7 @@ use crate::text_edit::TextState;
 use crate::hash::{FxMap, FxSet};
 use crate::input::UiEvent;
 use crate::input_state::InputState;
-use crate::{Align, Atlas, Color, Cursor, DrawList, FontError, FontId, Fonts, FrameInfo, FrameInput, Gesture, Id, InputEvent, Insets, Key, Layout, Painter, PlatformOutput, PointerButton, PointerKind, Rect, Size, Theme, Vec2};
+use crate::{Align, Atlas, Color, Cursor, DrawList, FontError, FontId, Fonts, FrameInfo, FrameInput, Gesture, Id, InputEvent, Insets, Key, Layout, Painter, PlatformOutput, PointerButton, PointerKind, Rect, Shortcut, Size, Theme, Vec2};
 use std::hash::Hash;
 use std::ops::Range;
 
@@ -252,6 +252,12 @@ pub struct Ui {
     dup_next: FxMap<Id, u32>,
     /// Active `with_key` scopes as (salt, container depth at push).
     key_salt: Vec<(Id, usize)>,
+    /// Shortcut scopes: a shortcut only fires if every enclosing scope is active.
+    shortcut_scopes: Vec<bool>,
+    /// Keys already claimed this frame, so one press drives one command.
+    consumed_keys: Vec<Key>,
+    /// A text field had focus when the frame began: its editing keys are its own.
+    typing: bool,
     draw: DrawList,
     pub(crate) time: f64,
     // Keyboard focus
@@ -323,6 +329,9 @@ impl Ui {
             seen: FxSet::default(),
             dup_next: FxMap::default(),
             key_salt: Vec::new(),
+            shortcut_scopes: Vec::new(),
+            consumed_keys: Vec::new(),
+            typing: false,
             draw: DrawList::default(),
             time: 0.0,
             focused: None,
@@ -375,8 +384,66 @@ impl Ui {
         self.focused.is_some()
     }
 
-    /// `key` went down this frame (not a repeat). For shortcuts; check
-    /// `wants_keyboard()` first if typing should win.
+    /// Claim a shortcut for this frame.
+    ///
+    /// Returns true at most once per press: the first caller wins, so one key
+    /// cannot drive two commands. Refuses while a text field has focus and the
+    /// shortcut is one the field handles itself (`Delete` edits text, but
+    /// `Cmd+S` still saves), and refuses inside a
+    /// [`shortcut_scope`](Ui::shortcut_scope) that is not active.
+    ///
+    /// libgui supplies no bindings: what `Cmd+S` means is your app's keymap.
+    ///
+    /// ```ignore
+    /// if ui.consume_shortcut(Shortcut::command(Key::S)) { save(); }
+    /// if ui.consume_shortcut(Shortcut::command(Key::Z).shift()) { redo(); }
+    /// ```
+    pub fn consume_shortcut(&mut self, sc: Shortcut) -> bool {
+        if !self.shortcut_scopes.iter().all(|&a| a) {
+            return false;
+        }
+        if self.typing && sc.is_text_editing() {
+            return false;
+        }
+        if !self.input.keys_pressed.contains(&sc.key) || self.consumed_keys.contains(&sc.key) {
+            return false;
+        }
+        if !sc.matches(&self.input.modifiers, self.input_state.mac) {
+            return false;
+        }
+        self.consumed_keys.push(sc.key);
+        true
+    }
+
+    /// Limit the shortcuts declared inside `body` to when `active` is true.
+    ///
+    /// Scopes nest, and an inactive one disables everything within it, so the
+    /// same key can mean different things in different panels. Dock panels are
+    /// wrapped in one automatically, active when that pane has focus.
+    pub fn shortcut_scope<R>(&mut self, active: bool, body: impl FnOnce(&mut Self) -> R) -> R {
+        self.shortcut_scopes.push(active);
+        let r = body(self);
+        self.shortcut_scopes.pop();
+        r
+    }
+
+    /// True while an enclosing [`Ui::shortcut_scope`] is inactive.
+    pub fn shortcuts_blocked(&self) -> bool {
+        !self.shortcut_scopes.iter().all(|&a| a)
+    }
+
+    /// How a shortcut should read in a menu on this platform: `⌘S` or `Ctrl+S`.
+    pub fn shortcut_label(&self, sc: Shortcut) -> String {
+        sc.label(self.input_state.mac)
+    }
+
+    /// `key` went down this frame (not a repeat).
+    ///
+    /// Raw and unrouted: it ignores consumption, focus and scopes, so it will
+    /// be true even while the user is typing into a text field. Use it for
+    /// held-key state (a viewport's fly controls, gated on
+    /// [`wants_keyboard`](Ui::wants_keyboard)); use
+    /// [`consume_shortcut`](Ui::consume_shortcut) for commands.
     pub fn key_pressed(&self, key: Key) -> bool {
         self.input.keys_pressed.contains(&key)
     }
@@ -519,6 +586,11 @@ impl Ui {
         self.seen.clear();
         self.dup_next.clear();
         self.key_salt.clear();
+        self.shortcut_scopes.clear();
+        self.consumed_keys.clear();
+        // Focus is resolved during a frame, so this is last frame's answer —
+        // the same one-frame-late rule the rest of the input model uses.
+        self.typing = self.focused.is_some();
         let s = self.input.screen_size;
         let root = Node::new(Id::new("root"), Layout::column().width(Size::Fixed(s.x)).height(Size::Fixed(s.y)));
         self.nodes.push(root);
@@ -1556,6 +1628,149 @@ mod tests {
             }
         }
         assert!(checked > 3, "only {checked} rows overlapped; the test proves nothing");
+    }
+
+    /// Hold the modifiers and press the key. Modifiers must still be held when
+    /// the frame runs (`keys_pressed` records presses; `modifiers` is state),
+    /// so releasing is a separate step after the frame.
+    fn press(ui: &mut Ui, k: Key, mods: &[Key]) {
+        for &m in mods {
+            ui.push(InputEvent::Key { key: m, pressed: true, repeat: false });
+        }
+        ui.push(InputEvent::Key { key: k, pressed: true, repeat: false });
+    }
+
+    fn release(ui: &mut Ui, k: Key, mods: &[Key]) {
+        ui.push(InputEvent::Key { key: k, pressed: false, repeat: false });
+        for &m in mods {
+            ui.push(InputEvent::Key { key: m, pressed: false, repeat: false });
+        }
+    }
+
+    /// One press drives one command, and the modifiers must match exactly.
+    #[test]
+    fn a_shortcut_fires_once_and_matches_exactly() {
+        let mut ui = ui();
+        ui.set_mac_shortcuts(false);
+        let save = Shortcut::command(Key::S);
+
+        press(&mut ui, Key::S, &[Key::ControlLeft]);
+        ui.begin_frame(FrameInfo::default());
+        assert!(ui.consume_shortcut(save), "Ctrl+S did not fire");
+        assert!(!ui.consume_shortcut(save), "the same press fired twice");
+        let _ = ui.end_frame();
+        release(&mut ui, Key::S, &[Key::ControlLeft]);
+
+        // Ctrl+Shift+S is a different shortcut.
+        press(&mut ui, Key::S, &[Key::ControlLeft, Key::ShiftLeft]);
+        ui.begin_frame(FrameInfo::default());
+        assert!(!ui.consume_shortcut(save), "Ctrl+Shift+S fired a Ctrl+S shortcut");
+        assert!(ui.consume_shortcut(save.shift()), "Ctrl+Shift+S did not fire");
+        let _ = ui.end_frame();
+        release(&mut ui, Key::S, &[Key::ControlLeft, Key::ShiftLeft]);
+
+        // A bare key is not a command shortcut.
+        press(&mut ui, Key::S, &[]);
+        ui.begin_frame(FrameInfo::default());
+        assert!(!ui.consume_shortcut(save), "a bare S fired Ctrl+S");
+        assert!(ui.consume_shortcut(Shortcut::plain(Key::S)));
+        let _ = ui.end_frame();
+        release(&mut ui, Key::S, &[]);
+    }
+
+    /// `command` must resolve to the platform's key, and the *other* one must
+    /// not work: Ctrl+S on a Mac is not Save.
+    #[test]
+    fn command_is_platform_correct() {
+        let save = Shortcut::command(Key::S);
+        let mut ui = ui();
+        ui.set_mac_shortcuts(true);
+        press(&mut ui, Key::S, &[Key::SuperLeft]);
+        ui.begin_frame(FrameInfo::default());
+        assert!(ui.consume_shortcut(save), "Cmd+S did not fire on mac");
+        let _ = ui.end_frame();
+        release(&mut ui, Key::S, &[Key::SuperLeft]);
+
+        press(&mut ui, Key::S, &[Key::ControlLeft]);
+        ui.begin_frame(FrameInfo::default());
+        assert!(!ui.consume_shortcut(save), "Ctrl+S fired a command shortcut on mac");
+        let _ = ui.end_frame();
+        release(&mut ui, Key::S, &[Key::ControlLeft]);
+
+        assert_eq!(save.label(true), "\u{2318}S");
+        assert_eq!(save.shift().label(false), "Ctrl+Shift+S");
+        assert_eq!(Shortcut::plain(Key::F2).label(false), "F2");
+        assert_eq!(Shortcut::plain(Key::Delete).label(true), "Del");
+    }
+
+    /// While the user is typing, the keys the field handles belong to the
+    /// field — but a real command shortcut must still get through.
+    #[test]
+    fn typing_keeps_its_keys_but_not_all_of_them() {
+        let mut ui = ui();
+        ui.set_mac_shortcuts(false);
+        let mut text = String::from("hello");
+        let frame = |ui: &mut Ui, text: &mut String| -> (bool, bool) {
+            ui.begin_frame(FrameInfo::default());
+            let del = ui.consume_shortcut(Shortcut::plain(Key::Delete));
+            let save = ui.consume_shortcut(Shortcut::command(Key::S));
+            ui.text_input("field", text, "");
+            let _ = ui.end_frame();
+            (del, save)
+        };
+        frame(&mut ui, &mut text);
+
+        // Nothing focused: Delete is the app's.
+        press(&mut ui, Key::Delete, &[]);
+        assert!(frame(&mut ui, &mut text).0, "Delete should reach the app when nothing has focus");
+        release(&mut ui, Key::Delete, &[]);
+
+        // Focus the field, then try again.
+        ui.push(InputEvent::PointerMoved { pos: Vec2::new(40.0, 15.0) });
+        ui.push(InputEvent::PointerButton { button: PointerButton::Primary, pressed: true });
+        frame(&mut ui, &mut text);
+        ui.push(InputEvent::PointerButton { button: PointerButton::Primary, pressed: false });
+        frame(&mut ui, &mut text);
+        assert!(ui.wants_keyboard(), "the field did not take focus");
+
+        press(&mut ui, Key::Delete, &[]);
+        assert!(!frame(&mut ui, &mut text).0, "Delete fired an app command while typing");
+        release(&mut ui, Key::Delete, &[]);
+
+        press(&mut ui, Key::S, &[Key::ControlLeft]);
+        assert!(frame(&mut ui, &mut text).1, "Ctrl+S must still save while typing");
+        release(&mut ui, Key::S, &[Key::ControlLeft]);
+    }
+
+    /// An inactive scope blocks the shortcuts inside it, and scopes nest.
+    #[test]
+    fn scopes_route_shortcuts_by_focus() {
+        let mut ui = ui();
+        ui.set_mac_shortcuts(false);
+        let sc = Shortcut::plain(Key::F2);
+        let run = |ui: &mut Ui, outer: bool, inner: bool| -> (bool, bool, bool) {
+            ui.begin_frame(FrameInfo::default());
+            let mut got = (false, false, false);
+            ui.shortcut_scope(outer, |ui| {
+                got.0 = ui.consume_shortcut(sc);
+                ui.shortcut_scope(inner, |ui| {
+                    got.1 = ui.consume_shortcut(sc);
+                });
+            });
+            got.2 = ui.consume_shortcut(sc);
+            let _ = ui.end_frame();
+            got
+        };
+
+        press(&mut ui, Key::F2, &[]);
+        assert_eq!(run(&mut ui, false, true), (false, false, true), "an inactive outer scope must block its inner one");
+        release(&mut ui, Key::F2, &[]);
+        press(&mut ui, Key::F2, &[]);
+        assert_eq!(run(&mut ui, true, false), (true, false, false), "the active outer scope should have claimed it");
+        release(&mut ui, Key::F2, &[]);
+        press(&mut ui, Key::F2, &[]);
+        assert_eq!(run(&mut ui, false, false), (false, false, true), "outside every scope it is still available");
+        release(&mut ui, Key::F2, &[]);
     }
 
     #[test]

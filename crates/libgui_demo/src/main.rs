@@ -6,8 +6,8 @@ mod panels;
 mod scene;
 
 use libgui::{
-    Backend, Color, Density, DockState, FloatingMode, FrameInfo, Frame, InputEvent, Insets, Layout, PointerButton, Size, SurfaceId,
-    TextureId, Theme, ThemeWatcher, Ui, Vec2,
+    Backend, Color, Density, DockState, FloatingMode, FrameInfo, Frame, InputEvent, Insets, Key, Layout, PointerButton, Shortcut,
+    Size, SurfaceId, TextureId, Theme, ThemeWatcher, Ui, Vec2,
 };
 use panels::{default_layout, Demo, Panels, Tab, THEMES};
 use scene::{Scene, SceneParams};
@@ -418,6 +418,9 @@ impl App {
                     dock.show(ui, dock_id, &mut viewer);
                 });
                 if main {
+                    // After the panels, so a focused panel gets first refusal
+                    // on a key: consumption is first-come, first-served.
+                    app_shortcuts(ui, demo);
                     status_bar(ui, demo);
                 }
             });
@@ -495,6 +498,20 @@ impl App {
             }
         }
         self.wins.insert(wid, w);
+    }
+}
+
+/// The app's keymap: libgui supplies the matching and routing, never the
+/// bindings. Checked after the panels so a focused panel wins.
+fn app_shortcuts(ui: &mut Ui, d: &mut Demo) {
+    if ui.consume_shortcut(Shortcut::plain(Key::Space)) {
+        d.playing = !d.playing;
+        let state = if d.playing { "playing" } else { "paused" };
+        d.log(format!("{state} (Space)"));
+    }
+    if ui.consume_shortcut(Shortcut::command(Key::R).shift()) {
+        d.reset_layout = true;
+        d.log(format!("reset layout ({})", ui.shortcut_label(Shortcut::command(Key::R).shift())));
     }
 }
 

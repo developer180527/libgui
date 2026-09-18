@@ -1100,15 +1100,20 @@ fn show_leaf<V: TabViewer>(ui: &mut Ui, leaf: &mut Leaf<V::Tab>, cx: &mut ShowCt
         let scroll = cx.viewer.scroll(tab);
         let body = Frame { fill: ui.theme.panel.fill, border: Color::TRANSPARENT, border_width: 0.0, radius: 0.0, shadow: false, clip: true };
         let viewer = &mut *cx.viewer;
-        if scroll {
-            ui.container_id(body_id, Layout::column().shrink(), body, |ui| {
-                let opts = ScrollOptions { gap: ui.theme.metrics.space, padding, ..ScrollOptions::new(Size::Grow(1.0)) };
-                ui.scroll_area_with("dock_scroll", opts, |ui| viewer.ui(ui, tab));
-            });
-        } else {
-            let gap = ui.theme.metrics.space;
-            ui.container_id(body_id, Layout::column().shrink().padding(padding).gap(gap), body, |ui| viewer.ui(ui, tab));
-        }
+        // Shortcuts declared inside a panel belong to that panel: they only
+        // fire while it has focus, so the same key can mean different things
+        // in the outliner and the viewport.
+        ui.shortcut_scope(focused, |ui| {
+            if scroll {
+                ui.container_id(body_id, Layout::column().shrink(), body, |ui| {
+                    let opts = ScrollOptions { gap: ui.theme.metrics.space, padding, ..ScrollOptions::new(Size::Grow(1.0)) };
+                    ui.scroll_area_with("dock_scroll", opts, |ui| viewer.ui(ui, tab));
+                });
+            } else {
+                let gap = ui.theme.metrics.space;
+                ui.container_id(body_id, Layout::column().shrink().padding(padding).gap(gap), body, |ui| viewer.ui(ui, tab));
+            }
+        });
     });
 }
 
@@ -1307,6 +1312,78 @@ mod tests {
         d.update();
         assert_eq!(d.surfaces.len(), 1);
         assert_eq!(leaves(d.surfaces[0].root.as_ref().unwrap())[0], vec!["outliner", "inspector"]);
+    }
+
+    /// Shortcuts declared inside a panel belong to that panel: the same key
+    /// must reach the focused pane and no other.
+    #[test]
+    fn panel_shortcuts_only_fire_in_the_focused_pane() {
+        use crate::{FrameInfo, InputEvent, Key, Shortcut};
+
+        /// Records which panels claimed F2 this frame.
+        struct Viewer {
+            fired: Vec<&'static str>,
+        }
+        impl TabViewer for Viewer {
+            type Tab = &'static str;
+            fn title(&self, tab: &Self::Tab) -> String {
+                tab.to_string()
+            }
+            fn id(&self, tab: &Self::Tab) -> u64 {
+                tab.len() as u64 * 7 + tab.as_bytes()[0] as u64
+            }
+            fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab) {
+                if ui.consume_shortcut(Shortcut::plain(Key::F2)) {
+                    self.fired.push(tab);
+                }
+            }
+        }
+
+        let mut d = fresh();
+        let mut ui = Ui::new(crate::Theme::dark(), include_bytes!("../../../assets/Inter.ttf")).unwrap();
+        ui.set_mac_shortcuts(false);
+        let left = match d.surfaces[0].root.as_ref().unwrap() {
+            DockNode::Split(s) => match &*s.first {
+                DockNode::Leaf(l) => l.id,
+                _ => unreachable!(),
+            },
+            _ => unreachable!(),
+        };
+        let right = match d.surfaces[0].root.as_ref().unwrap() {
+            DockNode::Split(s) => match &*s.second {
+                DockNode::Leaf(l) => l.id,
+                _ => unreachable!(),
+            },
+            _ => unreachable!(),
+        };
+
+        let frame = |d: &mut DockState<&'static str>, ui: &mut Ui| -> Vec<&'static str> {
+            let mut v = Viewer { fired: Vec::new() };
+            ui.begin_frame(FrameInfo::default());
+            d.show(ui, SurfaceId::MAIN, &mut v);
+            let _ = ui.end_frame();
+            v.fired
+        };
+        frame(&mut d, &mut ui);
+
+        // Focus the left pane: only it may claim F2.
+        d.focused_leaf = Some(left);
+        ui.push(InputEvent::Key { key: Key::F2, pressed: true, repeat: false });
+        assert_eq!(frame(&mut d, &mut ui), vec!["outliner"], "the focused pane did not get the key");
+        ui.push(InputEvent::Key { key: Key::F2, pressed: false, repeat: false });
+        frame(&mut d, &mut ui);
+
+        // Focus the right pane: the same key now goes there instead.
+        d.focused_leaf = Some(right);
+        ui.push(InputEvent::Key { key: Key::F2, pressed: true, repeat: false });
+        assert_eq!(frame(&mut d, &mut ui), vec!["viewport"], "the key did not follow focus");
+        ui.push(InputEvent::Key { key: Key::F2, pressed: false, repeat: false });
+        frame(&mut d, &mut ui);
+
+        // No pane focused: nobody claims it, so a global handler could.
+        d.focused_leaf = None;
+        ui.push(InputEvent::Key { key: Key::F2, pressed: true, repeat: false });
+        assert!(frame(&mut d, &mut ui).is_empty(), "an unfocused panel claimed the key");
     }
 
     /// A drop target is picked on one frame and applied on the next, so the

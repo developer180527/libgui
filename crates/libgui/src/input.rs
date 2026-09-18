@@ -140,6 +140,226 @@ pub enum Key {
     ControlLeft, ShiftLeft, AltLeft, SuperLeft, ControlRight, ShiftRight, AltRight, SuperRight,
 }
 
+/// A keyboard shortcut, written in terms of what the modifiers *mean* rather
+/// than which keys they are: `command` is Cmd on Apple platforms and Ctrl
+/// elsewhere, so one declaration is right on both.
+///
+/// libgui does not define what a shortcut *does* — that is your app's keymap,
+/// and your users will want to rebind it. What libgui provides is matching,
+/// platform-correct modifiers, routing by focus, and consumption so a
+/// shortcut cannot fire twice. See [`crate::Ui::consume_shortcut`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Shortcut {
+    pub key: Key,
+    /// Cmd on Apple platforms, Ctrl elsewhere.
+    pub command: bool,
+    pub shift: bool,
+    pub alt: bool,
+}
+
+impl Shortcut {
+    /// A bare key: `F2`, `Delete`.
+    pub const fn plain(key: Key) -> Self {
+        Self { key, command: false, shift: false, alt: false }
+    }
+
+    /// Cmd+key on Apple platforms, Ctrl+key elsewhere.
+    pub const fn command(key: Key) -> Self {
+        Self { key, command: true, shift: false, alt: false }
+    }
+
+    pub const fn shift(mut self) -> Self {
+        self.shift = true;
+        self
+    }
+
+    pub const fn alt(mut self) -> Self {
+        self.alt = true;
+        self
+    }
+
+    /// Exact match: `Cmd+S` must not fire on `Cmd+Shift+S`, and on a Mac
+    /// `Ctrl+S` must not fire a `command` shortcut.
+    pub fn matches(&self, m: &Modifiers, mac: bool) -> bool {
+        let (primary, other) = if mac { (m.logo, m.ctrl) } else { (m.ctrl, m.logo) };
+        primary == self.command && !other && m.shift == self.shift && m.alt == self.alt
+    }
+
+    /// Keys a focused text field handles itself, which therefore must not also
+    /// trigger an app shortcut while the user is typing.
+    pub(crate) fn is_text_editing(&self) -> bool {
+        match self.key {
+            Key::Backspace
+            | Key::Delete
+            | Key::ArrowLeft
+            | Key::ArrowRight
+            | Key::ArrowUp
+            | Key::ArrowDown
+            | Key::Home
+            | Key::End
+            | Key::Enter
+            | Key::Escape
+            | Key::Tab => true,
+            // Only as shortcuts: plain C is typing, Cmd+C is copy.
+            Key::A | Key::C | Key::X | Key::V => self.command,
+            _ => false,
+        }
+    }
+
+    /// How this shortcut should be written in a menu: `⌘⇧S` on Apple
+    /// platforms, `Ctrl+Shift+S` elsewhere.
+    pub fn label(&self, mac: bool) -> String {
+        let name = self.key.label();
+        if mac {
+            let mut s = String::new();
+            if self.command {
+                s.push('\u{2318}');
+            }
+            if self.alt {
+                s.push('\u{2325}');
+            }
+            if self.shift {
+                s.push('\u{21E7}');
+            }
+            s + name
+        } else {
+            let mut parts: Vec<&str> = Vec::new();
+            if self.command {
+                parts.push("Ctrl");
+            }
+            if self.alt {
+                parts.push("Alt");
+            }
+            if self.shift {
+                parts.push("Shift");
+            }
+            parts.push(name);
+            parts.join("+")
+        }
+    }
+}
+
+impl Key {
+    /// Short display name, for menus and keymap editors.
+    pub fn label(self) -> &'static str {
+        use Key::*;
+        match self {
+            Enter => "Enter",
+            Escape => "Esc",
+            Backspace => "Backspace",
+            Tab => "Tab",
+            Space => "Space",
+            Delete => "Del",
+            Home => "Home",
+            End => "End",
+            PageUp => "PgUp",
+            PageDown => "PgDn",
+            Insert => "Ins",
+            ArrowLeft => "Left",
+            ArrowRight => "Right",
+            ArrowUp => "Up",
+            ArrowDown => "Down",
+            Minus => "-",
+            Equal => "=",
+            BracketLeft => "[",
+            BracketRight => "]",
+            Backslash => "\\",
+            Semicolon => ";",
+            Quote => "'",
+            Backquote => "`",
+            Comma => ",",
+            Period => ".",
+            Slash => "/",
+            A => "A",
+            B => "B",
+            C => "C",
+            D => "D",
+            E => "E",
+            F => "F",
+            G => "G",
+            H => "H",
+            I => "I",
+            J => "J",
+            K => "K",
+            L => "L",
+            M => "M",
+            N => "N",
+            O => "O",
+            P => "P",
+            Q => "Q",
+            R => "R",
+            S => "S",
+            T => "T",
+            U => "U",
+            V => "V",
+            W => "W",
+            X => "X",
+            Y => "Y",
+            Z => "Z",
+            Num0 => "0",
+            Num1 => "1",
+            Num2 => "2",
+            Num3 => "3",
+            Num4 => "4",
+            Num5 => "5",
+            Num6 => "6",
+            Num7 => "7",
+            Num8 => "8",
+            Num9 => "9",
+            F1 => "F1",
+            F2 => "F2",
+            F3 => "F3",
+            F4 => "F4",
+            F5 => "F5",
+            F6 => "F6",
+            F7 => "F7",
+            F8 => "F8",
+            F9 => "F9",
+            F10 => "F10",
+            F11 => "F11",
+            F12 => "F12",
+            F13 => "F13",
+            F14 => "F14",
+            F15 => "F15",
+            F16 => "F16",
+            F17 => "F17",
+            F18 => "F18",
+            F19 => "F19",
+            F20 => "F20",
+            F21 => "F21",
+            F22 => "F22",
+            F23 => "F23",
+            F24 => "F24",
+            Numpad0 => "Num0",
+            Numpad1 => "Num1",
+            Numpad2 => "Num2",
+            Numpad3 => "Num3",
+            Numpad4 => "Num4",
+            Numpad5 => "Num5",
+            Numpad6 => "Num6",
+            Numpad7 => "Num7",
+            Numpad8 => "Num8",
+            Numpad9 => "Num9",
+            NumpadDivide => "Num/",
+            NumpadMultiply => "Num*",
+            NumpadSubtract => "Num-",
+            NumpadAdd => "Num+",
+            NumpadEnter => "NumEnter",
+            NumpadDecimal => "Num.",
+            NumLock => "NumLock",
+            CapsLock => "CapsLock",
+            PrintScreen => "PrtSc",
+            ScrollLock => "ScrLk",
+            Pause => "Pause",
+            ContextMenu => "Menu",
+            ControlLeft | ControlRight => "Ctrl",
+            ShiftLeft | ShiftRight => "Shift",
+            AltLeft | AltRight => "Alt",
+            SuperLeft | SuperRight => "Super",
+        }
+    }
+}
+
 /// (HID usage on page 0x07, key), in usage order.
 const HID: &[(u16, Key)] = {
     use Key::*;

@@ -129,6 +129,35 @@ scopes combine. `button_keyed`, `button_styled_keyed`, `toggle_keyed`, `slider_k
 `selectable_keyed` take a key for a single widget; `segmented`, `text_input`, `scroll_area` and
 `viewport` already take one.
 
+## Keyboard shortcuts
+
+libgui supplies the **mechanism** — matching, platform-correct modifiers, routing by focus, and
+consumption so one press cannot drive two commands. It supplies **no bindings**: what `Cmd+S` means
+is your app's keymap, and your users will want to rebind it.
+
+```rust
+if ui.consume_shortcut(Shortcut::command(Key::S)) { save(); }             // Cmd+S / Ctrl+S
+if ui.consume_shortcut(Shortcut::command(Key::Z).shift()) { redo(); }
+ui.shortcut_label(Shortcut::command(Key::S));                             // "⌘S" or "Ctrl+S"
+```
+
+- **`command` is Cmd on Apple platforms and Ctrl elsewhere**, so one declaration is right on both,
+  and the wrong one is rejected: `Ctrl+S` on a Mac does not fire a `command` shortcut. Matching is
+  exact, so `Cmd+S` never fires on `Cmd+Shift+S`.
+- **Typing wins.** While a text field has focus, keys it handles itself (`Delete`, arrows, `Enter`,
+  `Cmd+A/C/X/V`) never reach an app shortcut — but `Cmd+S` still saves.
+- **Panels are scoped automatically.** A shortcut declared inside a dock panel only fires while that
+  pane has focus, so the same key can mean different things in the outliner and the viewport. Wrap
+  anything else in `ui.shortcut_scope(active, |ui| …)`; scopes nest, and an inactive one disables
+  everything within it.
+- **Consumption is first-come, first-served,** so check panel shortcuts before global ones — build
+  the panels, then the app's keymap. `libgui_demo` does exactly that: `Delete` in the outliner
+  deletes the selected object (and does nothing while you type in its search box), while `Space`
+  toggles playback globally.
+
+`ui.key_pressed` / `key_down` stay raw and unrouted, for held-key state like a viewport's fly
+controls — gate those on `ui.wants_keyboard()`.
+
 ## Scroll areas
 
 ```rust
@@ -373,7 +402,7 @@ these are the regression guards.
 
 1. ~~Text input~~ ✅ single-line; next: multi-line editor, IME preedit, double-click word select, undo.
 2. ~~Scroll areas~~ ✅ ~~virtualised lists, variable row heights, trees~~ ✅ `ui.virtual_list`, `ui.virtual_rows`, `ui.tree_row`; next: horizontal scroll, keyboard PageUp/Down, multi-select and drag-to-reparent.
-3. **Keyboard/shortcut routing**, menus, popups/context menus, tooltips (needs a layer/z-order stack).
+3. ~~Keyboard/shortcut routing~~ ✅ `Shortcut`, `consume_shortcut`, focus scopes; next: menus, popups/context menus, tooltips (needs a layer/z-order stack).
 4. ~~Docking + tabs + splitters~~ ✅ Unity-style with OS-window tear-off; next: layout save/load, tab close/context menu, maximize pane.
 5. **Real text shaping**: replace `text.rs` internals with `cosmic-text`/`swash` or HarfBuzz
    (ligatures, bidi, font fallback, CJK), multi-page atlas with LRU eviction.

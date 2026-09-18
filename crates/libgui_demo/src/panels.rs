@@ -1,7 +1,7 @@
 //! App state and panel UI. Panels don't know which window they live in; the
 //! dock decides that.
 
-use libgui::{Axis, Branch, Color, DockConfig, DockNode, DockState, Insets, ListOptions, Painter, Rect, ScrollOptions, Size, StateColors, TabViewer, TextureId, Ui, Vec2};
+use libgui::{Axis, Branch, Color, DockConfig, DockNode, DockState, Insets, Key, ListOptions, Painter, Rect, ScrollOptions, Shortcut, Size, StateColors, TabViewer, TextureId, Ui, Vec2};
 use std::collections::{HashSet, VecDeque};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -334,6 +334,13 @@ impl Panels<'_> {
 
     fn outliner(&mut self, ui: &mut Ui) {
         let d = &mut *self.d;
+        // Panel-scoped: Delete only reaches here while the outliner has focus,
+        // and never while the search box below is being typed into.
+        if ui.consume_shortcut(Shortcut::plain(Key::Delete)) && d.objects.len() > 1 {
+            let name = d.objects.remove(d.selected);
+            d.selected = d.selected.min(d.objects.len() - 1);
+            d.log(format!("deleted {name}"));
+        }
         ui.text_input("search", &mut d.filter, "Search objects…");
         let filter = d.filter.to_lowercase();
 
