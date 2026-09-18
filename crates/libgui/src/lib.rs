@@ -8,6 +8,7 @@
 mod backend;
 mod dock;
 mod draw;
+mod hash;
 mod id;
 mod input;
 mod layout;
@@ -29,7 +30,7 @@ pub use input::{Cursor, Event, Gesture, Input, Key, Modifiers, PointerKind, Touc
 pub use layout::{Align, Axis, Insets, Layout, Size};
 pub use math::{Color, Rect, Vec2};
 pub use painter::Painter;
-pub use text::{Atlas, FontId, Fonts};
+pub use text::{Atlas, FontError, FontId, Fonts};
 pub use theme::{
     ButtonStyle, Density, DropPreviewStyle, Metrics, Palette, PanelStyle, PlotStyle, ScrollbarStyle, SegmentedStyle,
     SelectableStyle, Shadow, SliderStyle, SplitterStyle, StateColors, TabStyle, TextInputStyle, Theme, ToggleStyle,

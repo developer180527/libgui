@@ -123,6 +123,8 @@ pub enum Cursor {
     Pointer,
     ResizeHorizontal,
     ResizeVertical,
+    /// Top-left <-> bottom-right, for corner resize grips.
+    ResizeDiagonal,
     Grab,
     Grabbing,
     Text,

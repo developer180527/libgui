@@ -86,6 +86,23 @@ impl<'de> serde::Deserialize<'de> for Color {
     }
 }
 
+/// Byte index of the last `@` that is not inside a `mix(...)` argument list.
+/// `mix(a, b, 0.5)@0.25` splits; `mix(accent@0.5, b, 0.5)` does not, so the
+/// inner alpha is resolved with its own argument instead.
+fn top_level_at(e: &str) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut found = None;
+    for (i, ch) in e.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            '@' if depth == 0 => found = Some(i),
+            _ => {}
+        }
+    }
+    found
+}
+
 /// Resolve a colour expression against a palette.
 fn resolve(expr: &str, palette: &toml::Table) -> Result<Color, String> {
     let e = expr.trim();
@@ -93,7 +110,8 @@ fn resolve(expr: &str, palette: &toml::Table) -> Result<Color, String> {
         return Ok(c);
     }
     // `<any colour>@alpha`
-    if let Some((left, a)) = e.rsplit_once('@') {
+    if let Some(at) = top_level_at(e) {
+        let (left, a) = (&e[..at], &e[at + 1..]);
         if let Ok(alpha) = a.trim().parse::<f32>() {
             return Ok(resolve(left, palette)?.with_alpha(alpha));
         }
@@ -379,6 +397,20 @@ mod tests {
         assert!(n >= 3);
         let t = Theme::from_toml("[tab]\nfill_hover = \"mix(#000000, #ffffff, 0.5)@0.25\"").unwrap();
         assert!((t.tab.fill_hover.a - 0.25).abs() < 0.01 && (t.tab.fill_hover.r - 0.5).abs() < 0.01);
+    }
+
+    /// An `@alpha` on a mix() *argument* belongs to that argument, not to the
+    /// whole expression: only a top-level `@` splits.
+    #[test]
+    fn alpha_inside_mix_arguments() {
+        let t = Theme::from_toml("[tab]\nfill_hover = \"mix(#000000@0.5, #000000, 0.0)\"").unwrap();
+        assert!((t.tab.fill_hover.a - 0.5).abs() < 0.01, "{:?}", t.tab.fill_hover);
+        // Nested, and combined with a trailing alpha on the outer expression.
+        let t = Theme::from_toml("[tab]\nfill_hover = \"mix(accent@0.5, mix(#ffffff@0.25, #000000, 0.0), 1.0)@0.75\"").unwrap();
+        assert!((t.tab.fill_hover.a - 0.75).abs() < 0.01, "{:?}", t.tab.fill_hover);
+        // A genuinely bad alpha is still reported as one.
+        let e = Theme::from_toml("[tab]\nfill_hover = \"accent@wat\"").unwrap_err().0;
+        assert!(e.contains("bad alpha"), "{e}");
     }
 
     #[test]

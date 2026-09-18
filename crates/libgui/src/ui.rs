@@ -1,7 +1,7 @@
 use crate::layout::{self, Node, PaintFn, Scroll};
 use crate::text_edit::TextState;
-use crate::{Atlas, Color, Cursor, DrawList, Event, FontId, Fonts, Gesture, Id, Input, Insets, Key, Layout, Painter, PointerKind, Rect, Size, Theme, Vec2};
-use std::collections::{HashMap, HashSet};
+use crate::hash::{FxMap, FxSet};
+use crate::{Atlas, Color, Cursor, DrawList, Event, FontError, FontId, Fonts, Gesture, Id, Input, Insets, Key, Layout, Painter, PointerKind, Rect, Size, Theme, Vec2};
 use std::hash::Hash;
 
 /// Result of an interactive widget for this frame.
@@ -99,23 +99,26 @@ pub struct Ui {
     nodes: Vec<Node>,
     stack: Vec<usize>,
     // Retained state
-    rects: HashMap<Id, Rect>,
+    rects: FxMap<Id, Rect>,
     hits: Vec<(Id, Rect)>,
     hovered: Option<Id>,
     active: Option<Id>,
-    anims: HashMap<(Id, u8), f32>,
-    seen: HashSet<Id>,
+    anims: FxMap<(Id, u8), f32>,
+    seen: FxSet<Id>,
+    /// Next free suffix per colliding base id, so N widgets sharing a key cost
+    /// O(N) to disambiguate rather than O(N^2).
+    dup_next: FxMap<Id, u32>,
     draw: DrawList,
     pub(crate) time: f64,
     // Keyboard focus
     pub(crate) focused: Option<Id>,
     pub(crate) focus_order: Vec<Id>,
     pending_tab: Option<bool>,
-    pub(crate) text_states: HashMap<Id, TextState>,
+    pub(crate) text_states: FxMap<Id, TextState>,
     pub(crate) copied: Option<String>,
     pub(crate) ime_rect: Option<Rect>,
     // Scrolling
-    scroll_states: HashMap<Id, ScrollState>,
+    scroll_states: FxMap<Id, ScrollState>,
     scroll_hits: Vec<(Id, Rect)>,
     scroll_target: Option<Id>,
     /// Hit rects that win over normal widgets (splitters).
@@ -146,10 +149,12 @@ pub struct LeafOptions {
 }
 
 impl Ui {
-    pub fn new(theme: Theme, font_bytes: &[u8]) -> Self {
+    /// Build a `Ui` with `font_bytes` as its default font. Fails if the bytes
+    /// are not a readable font.
+    pub fn new(theme: Theme, font_bytes: &[u8]) -> Result<Self, FontError> {
         let mut fonts = Fonts::new();
-        let font = fonts.add_font(font_bytes);
-        Self {
+        let font = fonts.add_font(font_bytes)?;
+        Ok(Self {
             theme,
             fonts,
             font,
@@ -162,21 +167,22 @@ impl Ui {
             released: false,
             nodes: Vec::new(),
             stack: Vec::new(),
-            rects: HashMap::new(),
+            rects: FxMap::default(),
             hits: Vec::new(),
             hovered: None,
             active: None,
-            anims: HashMap::new(),
-            seen: HashSet::new(),
+            anims: FxMap::default(),
+            seen: FxSet::default(),
+            dup_next: FxMap::default(),
             draw: DrawList::default(),
             time: 0.0,
             focused: None,
             focus_order: Vec::new(),
             pending_tab: None,
-            text_states: HashMap::new(),
+            text_states: FxMap::default(),
             copied: None,
             ime_rect: None,
-            scroll_states: HashMap::new(),
+            scroll_states: FxMap::default(),
             scroll_hits: Vec::new(),
             scroll_target: None,
             top_hits: Vec::new(),
@@ -190,7 +196,7 @@ impl Ui {
             multi_lock: false,
             prev_two: None,
             gesture: Gesture::default(),
-        }
+        })
     }
 
     pub fn input(&self) -> &Input {
@@ -327,6 +333,7 @@ impl Ui {
         self.nodes.clear();
         self.stack.clear();
         self.seen.clear();
+        self.dup_next.clear();
         let s = self.input.screen_size;
         let root = Node::new(Id::new("root"), Layout::column().width(Size::Fixed(s.x)).height(Size::Fixed(s.y)));
         self.nodes.push(root);
@@ -406,16 +413,27 @@ impl Ui {
     // ---- building blocks for widgets -------------------------------------
 
     /// Stable id derived from the current container and `src`. Duplicates in
-    /// the same container are disambiguated automatically.
+    /// the same container are disambiguated automatically, by build order: the
+    /// k-th widget sharing a key gets `base.with(k - 1)`.
+    ///
+    /// Resolving a collision resumes from the last suffix handed out for that
+    /// base. Rescanning from 1 each time made a container of N widgets sharing
+    /// one key (`space`, `flex`, `separator`, or a list of equal labels)
+    /// quadratic: 2000 spacers cost 25 ms/frame.
     pub fn make_id(&mut self, src: impl Hash) -> Id {
         let parent = self.nodes[*self.stack.last().unwrap()].id;
         let base = parent.with(&src);
-        let mut id = base;
-        let mut n = 1u32;
-        while !self.seen.insert(id) {
-            id = base.with(n);
-            n += 1;
+        if self.seen.insert(base) {
+            return base;
         }
+        let mut n = *self.dup_next.get(&base).unwrap_or(&1);
+        let mut id = base.with(n);
+        // Loops only on a genuine hash collision with an unrelated id.
+        while !self.seen.insert(id) {
+            n += 1;
+            id = base.with(n);
+        }
+        self.dup_next.insert(base, n + 1);
         id
     }
 
@@ -718,7 +736,7 @@ impl Ui {
 struct HitSink<'a> {
     hits: &'a mut Vec<(Id, Rect)>,
     top_hits: &'a mut Vec<(Id, Rect)>,
-    rects: &'a mut HashMap<Id, Rect>,
+    rects: &'a mut FxMap<Id, Rect>,
     scroll_hits: &'a mut Vec<(Id, Rect)>,
 }
 
@@ -791,7 +809,7 @@ mod tests {
     use super::*;
 
     fn ui() -> Ui {
-        Ui::new(Theme::dark(), include_bytes!("../../../assets/Inter.ttf"))
+        Ui::new(Theme::dark(), include_bytes!("../../../assets/Inter.ttf")).unwrap()
     }
 
     /// 20 buttons (30px + 0 gap) in a 100px scroll area at the top of the screen.
@@ -841,6 +859,83 @@ mod tests {
         build(&mut ui, outside);
         let r = build(&mut ui, base);
         assert_eq!(r[19].rect.bottom(), 100.0);
+    }
+
+    /// `segmented`'s thumb position is retained across frames, so it can point
+    /// past the end of a shorter option list on the next one.
+    #[test]
+    fn segmented_survives_a_shrinking_option_list() {
+        let mut ui = ui();
+        let mut sel = 3usize;
+        let frame = |ui: &mut Ui, sel: &mut usize, options: &[&str]| {
+            ui.begin_frame(Input { dt: 1.0, ..Input::default() });
+            ui.segmented("mode", sel, options);
+            let _ = ui.end_frame();
+        };
+        for _ in 0..4 {
+            frame(&mut ui, &mut sel, &["a", "b", "c", "d"]);
+        }
+        // Drawing must not panic on the shorter list. Note the widget does not
+        // write the clamp back: `sel` is still the caller's out-of-range value.
+        frame(&mut ui, &mut sel, &["a", "b"]);
+        assert_eq!(sel, 3);
+        frame(&mut ui, &mut sel, &["a", "b"]);
+        // An empty list draws the frame and nothing else.
+        frame(&mut ui, &mut sel, &[]);
+    }
+
+    /// Widgets sharing a key are disambiguated by build order. The fast path
+    /// for that must hand out exactly the ids the naive rescan did: same
+    /// sequence, all distinct, identical from frame to frame.
+    #[test]
+    fn duplicate_keys_get_stable_distinct_ids() {
+        let mut ui = ui();
+        let ids = |ui: &mut Ui| -> Vec<Id> {
+            ui.begin_frame(Input::default());
+            let v: Vec<Id> = (0..64).map(|_| ui.make_id("same")).collect();
+            let _ = ui.end_frame();
+            v
+        };
+        let a = ids(&mut ui);
+        let b = ids(&mut ui);
+        assert_eq!(a, b, "ids are stable across frames");
+        assert_eq!(a.iter().collect::<std::collections::HashSet<_>>().len(), 64, "all distinct");
+
+        // The documented scheme: base, then base.with(1), base.with(2), ...
+        let root = Id::new("root");
+        let base = root.with("same");
+        assert_eq!(a[0], base);
+        assert_eq!(a[1], base.with(1u32));
+        assert_eq!(a[63], base.with(63u32));
+
+        // A key used once still gets the bare base id.
+        ui.begin_frame(Input::default());
+        assert_eq!(ui.make_id("solo"), root.with("solo"));
+        let _ = ui.end_frame();
+    }
+
+    #[test]
+    fn bad_font_bytes_are_an_error_not_a_panic() {
+        let Err(e) = Ui::new(Theme::dark(), b"not a font") else { panic!("expected an error") };
+        assert!(e.to_string().contains("invalid font data"), "{e}");
+    }
+
+    /// A font size larger than the atlas must not abort: the glyph is dropped
+    /// but keeps its advance, so measurement and layout stay consistent.
+    #[test]
+    fn oversized_glyphs_are_skipped_not_fatal() {
+        let mut ui = ui();
+        let wide = ui.fonts.measure(ui.font, 4000.0, "WW").x;
+        assert!(wide > 0.0, "advances still measure");
+        ui.begin_frame(Input::default());
+        ui.text_with("WW", 4000.0, Color::WHITE);
+        let out = ui.end_frame();
+        assert!(out.draw.instances.is_empty(), "nothing is drawn for an unplaceable glyph");
+        // Normal text still renders afterwards: the atlas was not left broken.
+        ui.begin_frame(Input::default());
+        ui.text_with("ok", 13.0, Color::WHITE);
+        let out = ui.end_frame();
+        assert!(!out.draw.instances.is_empty());
     }
 
     fn touch(points: &[(f32, f32)]) -> Input {

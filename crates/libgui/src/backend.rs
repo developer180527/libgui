@@ -124,7 +124,7 @@ mod tests {
     #[test]
     fn backend_receives_batched_draws() {
         let font = include_bytes!("../../../assets/Inter.ttf");
-        let mut ui = Ui::new(Theme::dark(), font);
+        let mut ui = Ui::new(Theme::dark(), font).unwrap();
         let mut backend = Recorder::default();
         for frame in 0..2 {
             ui.begin_frame(Default::default());

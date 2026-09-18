@@ -379,7 +379,7 @@ mod tests {
     #[test]
     fn ui_focus_typing_clipboard_and_tab() {
         use crate::{Input, Theme};
-        let mut ui = Ui::new(Theme::dark(), include_bytes!("../../../assets/Inter.ttf"));
+        let mut ui = Ui::new(Theme::dark(), include_bytes!("../../../assets/Inter.ttf")).unwrap();
         let (mut a, mut b) = (String::new(), String::from("second"));
         let mut frame = |ui: &mut Ui, input: Input| -> (TextResponse, TextResponse) {
             ui.begin_frame(input);

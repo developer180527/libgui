@@ -238,6 +238,9 @@ impl Ui {
         let min_w = total * 0.6;
         self.add_leaf(id, Layout::leaf(Size::Grow(1.0), Size::Fixed(s.height)), Vec2::new(min_w, 0.0), true, move |p, r| {
             p.rect_bordered(r, s.fill, s.radius, 1.0, s.border);
+            if widths.is_empty() {
+                return;
+            }
             let scale = r.w / total;
             // Narrow pane: shrink the label font rather than overlapping.
             let size = if scale < 1.0 { (size * (0.35 + 0.65 * scale)).max(size * 0.75) } else { size };
@@ -246,7 +249,10 @@ impl Ui {
                 *x += w * scale;
                 Some(start)
             }).collect();
-            // Sliding thumb interpolated between segment positions.
+            // Sliding thumb interpolated between segment positions. `pos` is
+            // retained across frames, so it can still point past the end after
+            // the caller shortens `options`: clamp before indexing.
+            let pos = pos.clamp(0.0, (xs.len() - 1) as f32);
             let (i0, t) = (pos.floor() as usize, pos.fract());
             let i1 = (i0 + 1).min(xs.len() - 1);
             let x = xs[i0] + (xs[i1] - xs[i0]) * t;

@@ -1,0 +1,13 @@
+[package]
+name = "libgui_bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[features]
+# Off by default: the counting allocator adds two atomics to every allocation,
+# which would bias the timing runs toward the thing we are trying to measure.
+count-allocs = []
+
+[dependencies]
+libgui = { path = "../libgui" }

@@ -758,6 +758,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "libgui_bench"
+version = "0.1.0"
+dependencies = [
+ "libgui",
+]
+
+[[package]]
 name = "libgui_demo"
 version = "0.1.0"
 dependencies = [

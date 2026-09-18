@@ -912,7 +912,7 @@ impl<T> DockState<T> {
                 }
             });
             if g.hovered || g.active {
-                ui.cursor = Cursor::ResizeHorizontal;
+                ui.cursor = Cursor::ResizeDiagonal;
             }
         });
         if close {

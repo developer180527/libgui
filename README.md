@@ -35,6 +35,9 @@ Key ideas (see source comments):
   an immediate API own retained state: animations (`ui.animate`), drag, focus.
 - **Layout after build** (`layout.rs`): `Fixed | Fit | Grow(weight)` per axis,
   padding, gap, alignment. Lets "fit content, then fill the rest" work in one frame.
+  Space is distributed in a single pass: a `Grow` child never shrinks below its
+  content, so if one clamps up to its minimum the row **overflows** its parent
+  rather than re-dividing the remainder among its siblings (unlike flexbox).
 - **One-frame-late input**: `Response.rect` is last frame's rect. Invisible in practice,
   and it keeps the model simple.
 - **Paint closures** run after layout with final rects. Custom widgets and
@@ -82,7 +85,9 @@ Pipeline, same for every API (details in `libgui_shaders` docs):
   (texel loads + in-shader bilinear), so HLSL is just `b0` + `t0, space1`.
 - Premultiplied alpha blend, no depth, no culling, UNORM (non-sRGB) target.
 - `TextureId::User(n)` is opaque; map `n` to any texture/SRV handle in your RHI, which is how
-  your renderer's viewport targets appear in the UI.
+  your renderer's viewport targets appear in the UI. The image path ignores the texture's own
+  alpha and composites it as opaque (rounded-corner mask and tint still apply), which suits
+  viewport targets; RGBA icons need a shader change.
 
 Pick the shader flavour your RHI consumes from `libgui_shaders::{HLSL, MSL, SPIRV, GLSL_VERTEX, GLSL_FRAGMENT, WGSL}`,
 or export them to files for a C++ shader pipeline. Edit only `shaders/ui.wgsl`; a shader error fails the build.
@@ -247,5 +252,9 @@ xcrun simctl launch booted com.libgui.demo
 - Glyph atlas resets when full (possible one-frame flicker).
 - No z-layers yet: overlays are drawn inside their node's paint closure.
 - Container ids are positional; give containers explicit keys once you add conditional UI.
+- Widgets sharing a label in one container are disambiguated **by build order**
+  (`ui.rs::make_id`), so hiding the first `ui.button("Delete")` hands its id — and its
+  animation, drag and focus state — to the second. Vary the label, or wrap each in a
+  `container_id` with an explicit key.
 
 Font: Inter (SIL Open Font License, see `assets/Inter-OFL.txt`).
