@@ -1,10 +1,12 @@
-//! Glyph rasterisation + atlas. fontdue handles rasterising; there is no
-//! complex shaping yet (see README: swap in cosmic-text/swash or HarfBuzz for
-//! ligatures, bidi, and fallback fonts).
+//! Text layout on top of a pluggable [`FontRasterizer`]: measurement (cached),
+//! DPI and zoom fitting, caret positions, the glyph atlas and pixel snapping.
+//! Shaping and rasterising belong to the rasterizer (see `font.rs`).
 
+use crate::font::{FontRasterizer, ShapedGlyph};
 use crate::{Color, DrawList, Rect, Vec2};
 use crate::hash::FxMap;
 use std::cell::RefCell;
+use std::rc::Rc;
 use std::fmt;
 
 /// Distinct strings cached per (font, size) before the cache is dropped. Keeps
@@ -12,9 +14,10 @@ use std::fmt;
 /// without bound; a UI with this many live strings wants a virtualised list.
 const MEASURE_CAP: usize = 50_000;
 
-// Not cached: kerning. `fontdue::Font::horizontal_kern` turned out to be
-// cheaper than a map lookup on a (font, left, right, px) key, and caching it
-// measured 8% slower on `label` and 15% slower on `button`.
+// Shaping *is* cached, per (font, px, string): re-shaping every visible label
+// every frame made `label` ~70% slower with fontdue, and a real shaper
+// (HarfBuzz) costs more still. Kerning pairs are not cached separately: that
+// measured 8-15% slower than recomputing them inside the shaper.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FontId(pub u16);
@@ -85,19 +88,30 @@ struct Glyph {
     uv: [f32; 4],
     w: f32,
     h: f32,
-    xmin: f32,
-    ymin: f32,
-    advance: f32,
+    /// Pen to bitmap left, px.
+    left: f32,
+    /// Baseline to bitmap bottom, px, +y up.
+    bottom: f32,
+}
+
+/// A shaped string: its glyphs and total advance, in physical px.
+#[derive(Clone)]
+struct Run {
+    glyphs: Rc<[ShapedGlyph]>,
+    width: f32,
 }
 
 pub struct Fonts {
-    fonts: Vec<fontdue::Font>,
-    glyphs: FxMap<(u16, char, u32), Glyph>,
+    fonts: Vec<Box<dyn FontRasterizer>>,
+    /// (font, glyph id, px) -> atlas entry.
+    glyphs: FxMap<(u16, u32, u32), Glyph>,
+    /// Scratch for shaping a string the run cache has not seen yet.
+    shaped: RefCell<Vec<ShapedGlyph>>,
+    /// (font, px) -> text -> shaped run, in physical px. Keyed *before*
+    /// dividing by `scale`, so one entry stays correct across DPI changes.
+    runs: RefCell<FxMap<(u16, u32), FxMap<String, Run>>>,
     /// (font, px) -> (ascent, descent), in physical px.
     lines: RefCell<FxMap<(u16, u32), (f32, f32)>>,
-    /// (font, px) -> text -> advance width, in physical px. Cached *before*
-    /// dividing by `scale`, so one entry stays correct across DPI changes.
-    widths: RefCell<FxMap<(u16, u32), FxMap<String, f32>>>,
     atlas: Atlas,
     scale: f32,
     /// Extra resolution for text inside a zoomed canvas.
@@ -109,21 +123,29 @@ impl Fonts {
         Self {
             fonts: Vec::new(),
             glyphs: FxMap::default(),
+            shaped: RefCell::new(Vec::new()),
             lines: RefCell::new(FxMap::default()),
-            widths: RefCell::new(FxMap::default()),
+            runs: RefCell::new(FxMap::default()),
             atlas: Atlas::new(2048),
             scale: 1.0,
             zoom: 1.0,
         }
     }
 
-    /// Parse and register a font. Fails rather than panicking, so a host
-    /// loading a user-chosen font can fall back to a built-in one.
+    /// Parse and register a font with the built-in fontdue backend. Fails
+    /// rather than panicking, so a host loading a user-chosen font can fall
+    /// back to a built-in one.
+    #[cfg(feature = "fontdue")]
     pub fn add_font(&mut self, bytes: &[u8]) -> Result<FontId, FontError> {
-        let font = fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default())
-            .map_err(|e| FontError(e.to_string()))?;
-        self.fonts.push(font);
-        Ok(FontId(self.fonts.len() as u16 - 1))
+        let r = crate::font::FontdueRasterizer::from_bytes(bytes)?;
+        Ok(self.add_rasterizer(Box::new(r)))
+    }
+
+    /// Register a font face backed by your own rasterizer (FreeType +
+    /// HarfBuzz, CoreText, DirectWrite, an engine's text system…).
+    pub fn add_rasterizer(&mut self, rasterizer: Box<dyn FontRasterizer>) -> FontId {
+        self.fonts.push(rasterizer);
+        FontId(self.fonts.len() as u16 - 1)
     }
 
     pub fn atlas(&self) -> &Atlas {
@@ -170,38 +192,42 @@ impl Fonts {
         if let Some(v) = self.lines.borrow().get(&key) {
             return *v;
         }
-        let m = self.fonts[font.0 as usize].horizontal_line_metrics(px);
-        let v = m.map(|m| (m.ascent, m.descent)).unwrap_or((px * 0.8, -px * 0.2));
+        let m = self.fonts[font.0 as usize].line_metrics(px);
+        let v = (m.ascent, m.descent);
         self.lines.borrow_mut().insert(key, v);
         v
     }
 
-    /// Advance width of one line in *physical* px, memoised. Interactive
-    /// widgets measure their label twice a frame (once to size the node, once
-    /// to centre or align the text inside the paint closure), and every widget
-    /// measures the same strings again next frame.
-    fn width_px(&self, font: FontId, px: f32, text: &str) -> f32 {
+    /// The shaped run for `text`, memoised. Interactive widgets measure their
+    /// label twice a frame (once to size the node, once to align it in the
+    /// paint closure), draw it, and do it all again next frame: after the first
+    /// frame each of those is one hash lookup.
+    fn run(&self, font: FontId, px: f32, text: &str) -> Run {
         let key = (font.0, px as u32);
-        if let Some(w) = self.widths.borrow().get(&key).and_then(|m| m.get(text)) {
-            return *w;
+        if let Some(r) = self.runs.borrow().get(&key).and_then(|m| m.get(text)) {
+            return r.clone();
         }
-        let f = &self.fonts[font.0 as usize];
-        let mut w = 0.0;
-        let mut prev = None;
-        for ch in text.chars() {
-            if let Some(p) = prev {
-                w += f.horizontal_kern(p, ch, px).unwrap_or(0.0);
-            }
-            w += f.metrics(ch, px).advance_width;
-            prev = Some(ch);
-        }
-        let mut cache = self.widths.borrow_mut();
+        let run = {
+            let mut shaped = self.shaped.borrow_mut();
+            shaped.clear();
+            self.fonts[font.0 as usize].shape(text, px, &mut shaped);
+            Run { width: shaped.iter().map(|g| g.advance).sum(), glyphs: Rc::from(shaped.as_slice()) }
+        };
+        let mut cache = self.runs.borrow_mut();
         let m = cache.entry(key).or_default();
         if m.len() >= MEASURE_CAP {
             m.clear();
         }
-        m.insert(text.to_string(), w);
-        w
+        m.insert(text.to_string(), run.clone());
+        run
+    }
+
+    fn width_px(&self, font: FontId, px: f32, text: &str) -> f32 {
+        // Hot path (every measure): read the width in place, no run clone.
+        if let Some(r) = self.runs.borrow().get(&(font.0, px as u32)).and_then(|m| m.get(text)) {
+            return r.width;
+        }
+        self.run(font, px, text).width
     }
 
     /// Size of a single line of text in logical px.
@@ -217,27 +243,26 @@ impl Fonts {
     /// Caret x positions (logical px from the text start) before each char and
     /// after the last one: `len == chars + 1`.
     ///
-    /// Snapped to physical pixels the same way [`Fonts::draw`] snaps its pen, so
-    /// a caret lines up with the glyph it precedes instead of drifting from it
-    /// along a long line. (The kerning between a pair is applied to the second
-    /// glyph, not to the caret between them, which is what you want: the caret
-    /// sits on the advance boundary.)
+    /// A caret sits at the pen position of the first glyph whose cluster starts
+    /// at or after its character, so characters inside a ligature share the
+    /// ligature's end. Snapped to physical pixels the way [`Fonts::draw`] snaps
+    /// its pen, so a caret lines up with the glyph it precedes.
     pub fn carets(&self, font: FontId, size: f32, text: &str) -> Vec<f32> {
         let px = self.px(size);
         let r = self.fit(size, px);
-        let f = &self.fonts[font.0 as usize];
-        let mut out = Vec::with_capacity(text.chars().count() + 1);
-        let mut x = 0.0;
-        let mut prev = None;
-        out.push(0.0);
-        for ch in text.chars() {
-            if let Some(p) = prev {
-                x += f.horizontal_kern(p, ch, px).unwrap_or(0.0);
+        let s = self.text_scale();
+        let run = self.run(font, px, text);
+        let shaped = &run.glyphs;
+        let mut out = Vec::with_capacity(text.len() + 1);
+        let (mut j, mut pen) = (0usize, 0.0f32);
+        for (byte, _) in text.char_indices() {
+            while j < shaped.len() && (shaped[j].cluster as usize) < byte {
+                pen += shaped[j].advance;
+                j += 1;
             }
-            x += f.metrics(ch, px).advance_width;
-            out.push((x * r).round() / self.text_scale());
-            prev = Some(ch);
+            out.push((pen * r).round() / s);
         }
+        out.push((run.width * r).round() / s);
         out
     }
 
@@ -248,13 +273,14 @@ impl Fonts {
         ((asc - desc) * size / px).ceil()
     }
 
-    fn glyph(&mut self, font: FontId, ch: char, px: f32) -> Glyph {
-        let key = (font.0, ch, px as u32);
+    fn glyph(&mut self, font: FontId, id: u32, px: f32) -> Glyph {
+        let key = (font.0, id, px as u32);
         if let Some(g) = self.glyphs.get(&key) {
             return *g;
         }
-        let (m, bitmap) = self.fonts[font.0 as usize].rasterize(ch, px);
-        let (w, h) = (m.width as u32, m.height as u32);
+        let m = self.fonts[font.0 as usize].rasterize(id, px);
+        let bitmap = &m.coverage;
+        let (w, h) = (m.width, m.height);
         let mut uv = [0.0; 4];
         // Zero when the glyph could not be placed: it is then skipped by `draw`
         // (invisible) while its advance still counts, so layout stays correct.
@@ -301,9 +327,8 @@ impl Fonts {
             uv,
             w: placed.0 as f32,
             h: placed.1 as f32,
-            xmin: m.xmin as f32,
-            ymin: m.ymin as f32,
-            advance: m.advance_width,
+            left: m.left,
+            bottom: m.bottom,
         };
         self.glyphs.insert(key, g);
         g
@@ -321,19 +346,17 @@ impl Fonts {
         // drawn at their native raster size and snapped, so they stay crisp.
         let mut x = 0.0;
         let baseline = (pos.y * s + asc * r).round();
-        let mut prev = None;
-        for ch in text.chars() {
-            if let Some(p) = prev {
-                x += self.fonts[font.0 as usize].horizontal_kern(p, ch, px).unwrap_or(0.0);
-            }
-            let g = self.glyph(font, ch, px);
+        // The run is reference-counted, so holding it while rasterising glyphs
+        // (which needs `&mut self`) costs no copy.
+        let run = self.run(font, px, text);
+        for sg in run.glyphs.iter() {
+            let g = self.glyph(font, sg.glyph, px);
             if g.w > 0.0 {
-                let gx = (x0 + x * r).round() + g.xmin;
-                let gy = baseline - (g.ymin + g.h);
+                let gx = (x0 + (x + sg.offset.x) * r).round() + g.left;
+                let gy = baseline + (sg.offset.y * r).round() - (g.bottom + g.h);
                 dl.glyph(Rect::new(gx / s, gy / s, g.w / s, g.h / s), g.uv, color);
             }
-            x += g.advance;
-            prev = Some(ch);
+            x += sg.advance;
         }
     }
 }

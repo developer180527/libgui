@@ -8,6 +8,7 @@
 mod backend;
 mod dock;
 mod draw;
+mod font;
 mod hash;
 mod id;
 mod input;
@@ -37,6 +38,9 @@ pub use input::{
 pub use layout::{Align, Axis, Insets, Layout, Size};
 pub use math::{Color, Rect, Transform, Vec2};
 pub use painter::Painter;
+pub use font::{FontRasterizer, GlyphBitmap, LineMetrics, ShapedGlyph};
+#[cfg(feature = "fontdue")]
+pub use font::FontdueRasterizer;
 pub use text::{Atlas, FontError, FontId, Fonts};
 pub use theme::{
     ButtonStyle, Density, DropPreviewStyle, Metrics, MenuStyle, Palette, PanelStyle, PlotStyle, ScrollbarStyle, SegmentedStyle,

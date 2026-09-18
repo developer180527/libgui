@@ -3,7 +3,7 @@ use crate::text_edit::TextState;
 use crate::hash::{FxMap, FxSet};
 use crate::input::UiEvent;
 use crate::input_state::InputState;
-use crate::{Align, Atlas, Color, Cursor, DrawList, FontError, FontId, Fonts, FrameInfo, FrameInput, Gesture, Id, InputEvent, Insets, Key, Layout, Painter, PlatformOutput, PointerButton, PointerKind, Rect, Shortcut, Size, Theme, Transform, Vec2};
+use crate::{Align, Atlas, Color, Cursor, DrawList, FontId, Fonts, FrameInfo, FrameInput, Gesture, Id, InputEvent, Insets, Key, Layout, Painter, PlatformOutput, PointerButton, PointerKind, Rect, Shortcut, Size, Theme, Transform, Vec2};
 use std::hash::Hash;
 
 /// Paint callback run after the tree (drag previews, tooltips).
@@ -394,10 +394,22 @@ pub struct LeafOptions {
 impl Ui {
     /// Build a `Ui` with `font_bytes` as its default font. Fails if the bytes
     /// are not a readable font.
-    pub fn new(theme: Theme, font_bytes: &[u8]) -> Result<Self, FontError> {
+    #[cfg(feature = "fontdue")]
+    pub fn new(theme: Theme, font_bytes: &[u8]) -> Result<Self, crate::FontError> {
         let mut fonts = Fonts::new();
         let font = fonts.add_font(font_bytes)?;
-        Ok(Self {
+        Ok(Self::with_fonts(theme, fonts, font))
+    }
+
+    /// Build a `Ui` whose default font is your own [`crate::FontRasterizer`].
+    pub fn with_rasterizer(theme: Theme, rasterizer: Box<dyn crate::FontRasterizer>) -> Self {
+        let mut fonts = Fonts::new();
+        let font = fonts.add_rasterizer(rasterizer);
+        Self::with_fonts(theme, fonts, font)
+    }
+
+    fn with_fonts(theme: Theme, fonts: Fonts, font: FontId) -> Self {
+        Self {
             theme,
             fonts,
             font,
@@ -454,7 +466,7 @@ impl Ui {
             multi_lock: false,
             prev_two: None,
             gesture: Gesture::default(),
-        })
+        }
     }
 
     /// Queue an input event; it is applied when the next frame begins. Call

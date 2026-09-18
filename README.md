@@ -436,8 +436,14 @@ xcrun simctl launch booted com.libgui.demo
   backends (e.g. a C++ RHI with its own HLSL) should use the same values and check the version.
 - **Stable ids:** widget ids use libgui's own SipHash-1-3 (`StableHasher`), pinned by tests, so they are
   identical across Rust releases, 32/64-bit and endianness: safe to persist and to pass over FFI.
+- **Font backend (`FontRasterizer`):** libgui asks a font for line metrics, to *shape* a string into
+  glyph ids (so HarfBuzz/CoreText/DirectWrite ligatures, contextual forms and marks work), and to
+  rasterise one glyph. It keeps measurement, shaped-run caching, DPI/zoom fitting, carets (mapped
+  through clusters), the atlas and pixel snapping. `FontdueRasterizer` (feature `fontdue`, default) is
+  built in; register your own with `Fonts::add_rasterizer` / `Ui::with_rasterizer`.
 - **Features:** `theme-toml` (default) parses/exports themes, pure data; `theme-watch` (opt-in) adds
-  `ThemeWatcher`, the only filesystem access in the crate.
+  `ThemeWatcher`, the only filesystem access in the crate; `fontdue` (default) is the built-in font
+  backend, and without it the core has only `bytemuck` as a dependency.
 
 ## Hosts and input providers
 

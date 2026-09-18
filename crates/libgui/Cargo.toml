@@ -4,14 +4,16 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = ["theme-toml"]
+default = ["theme-toml", "fontdue"]
+# The built-in font backend (see `FontRasterizer` to plug in your own).
+fontdue = ["dep:fontdue"]
 # Parse and export TOML themes (pure data, no I/O).
 theme-toml = ["dep:serde", "dep:toml"]
 # Hot-reload a theme file by polling it: the only filesystem access in libgui.
 theme-watch = ["theme-toml"]
 
 [dependencies]
-fontdue.workspace = true
+fontdue = { workspace = true, optional = true }
 bytemuck.workspace = true
 serde = { version = "1", features = ["derive"], optional = true }
 toml = { version = "1", optional = true }
