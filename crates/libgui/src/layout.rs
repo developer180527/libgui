@@ -65,6 +65,9 @@ pub struct Layout {
     pub gap: f32,
     pub align_main: Align,
     pub align_cross: Align,
+    /// Ignore children when computing the minimum size (they get clipped
+    /// instead). Needed for split panes whose size comes from a fraction.
+    pub shrink: bool,
 }
 
 impl Layout {
@@ -77,6 +80,7 @@ impl Layout {
             gap: 0.0,
             align_main: Align::Start,
             align_cross: Align::Center,
+            shrink: false,
         }
     }
 
@@ -89,6 +93,7 @@ impl Layout {
             gap: 0.0,
             align_main: Align::Start,
             align_cross: Align::Start,
+            shrink: false,
         }
     }
 
@@ -116,6 +121,11 @@ impl Layout {
 
     pub const fn gap(mut self, g: f32) -> Self {
         self.gap = g;
+        self
+    }
+
+    pub const fn shrink(mut self) -> Self {
+        self.shrink = true;
         self
     }
 
@@ -154,6 +164,10 @@ pub(crate) struct Node {
     pub min: Vec2,
     pub rect: Rect,
     pub interactive: bool,
+    /// Extra hit-test margin around the rect (e.g. thin splitters).
+    pub hit_pad: f32,
+    /// Hit-test before normal widgets regardless of paint order.
+    pub hit_top: bool,
     pub clip: bool,
     pub paint: Option<PaintFn>,
     pub scroll: Option<Scroll>,
@@ -171,6 +185,8 @@ impl Node {
             min: Vec2::ZERO,
             rect: Rect::default(),
             interactive: false,
+            hit_pad: 0.0,
+            hit_top: false,
             clip: false,
             paint: None,
             scroll: None,
@@ -225,6 +241,7 @@ fn measure(nodes: &mut [Node], i: usize) -> Vec2 {
     for axis in [Axis::X, Axis::Y] {
         let v = match l.size(axis) {
             Size::Fixed(v) => v,
+            Size::Fit | Size::Grow(_) if l.shrink => l.padding.along(axis),
             Size::Fit | Size::Grow(_) => get(content, axis) + l.padding.along(axis),
         };
         match axis {
@@ -373,6 +390,25 @@ mod tests {
         assert_eq!(nodes[1].content, 10.0 * 20.0 + 9.0 * 2.0);
         assert_eq!(nodes[rows[0]].rect.y, -30.0);
         assert_eq!(nodes[rows[9]].rect.y, 9.0 * 22.0 - 30.0);
+    }
+
+    #[test]
+    fn shrink_ignores_children_min() {
+        let mut nodes = vec![Node::new(Id::new("root"), Layout::row())];
+        let a = {
+            nodes.push(Node::new(Id::new("a"), Layout::column().width(Size::Grow(0.25)).shrink()));
+            nodes[0].children.push(1);
+            1
+        };
+        let b = {
+            nodes.push(Node::new(Id::new("b"), Layout::column().width(Size::Grow(0.75)).shrink()));
+            nodes[0].children.push(2);
+            2
+        };
+        leaf(&mut nodes, a, Size::Fixed(500.0), Size::Fixed(10.0), Vec2::ZERO);
+        solve(&mut nodes, 0, Rect::new(0.0, 0.0, 400.0, 100.0));
+        assert_eq!(nodes[a].rect.w, 100.0, "fraction wins over wide content");
+        assert_eq!(nodes[b].rect.w, 300.0);
     }
 
     #[test]

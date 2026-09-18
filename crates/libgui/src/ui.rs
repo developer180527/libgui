@@ -112,6 +112,19 @@ pub struct Ui {
     scroll_states: HashMap<Id, ScrollState>,
     scroll_hits: Vec<(Id, Rect)>,
     scroll_target: Option<Id>,
+    /// Hit rects that win over normal widgets (splitters).
+    top_hits: Vec<(Id, Rect)>,
+    overlays: Vec<Box<dyn FnOnce(&mut Painter)>>,
+}
+
+/// Options for [`Ui::add_leaf_ex`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LeafOptions {
+    pub interactive: bool,
+    /// Grow the hit area by this many px on every side.
+    pub hit_pad: f32,
+    /// Hit-test above normal widgets regardless of paint order.
+    pub hit_top: bool,
 }
 
 impl Ui {
@@ -148,6 +161,8 @@ impl Ui {
             scroll_states: HashMap::new(),
             scroll_hits: Vec::new(),
             scroll_target: None,
+            top_hits: Vec::new(),
+            overlays: Vec::new(),
         }
     }
 
@@ -193,7 +208,8 @@ impl Ui {
         self.fonts.set_scale(input.scale);
         // Hit-test against last frame's layout; later entries were painted on top.
         self.hovered = if input.mouse_inside {
-            self.hits.iter().rev().find(|(_, r)| r.contains(input.mouse_pos)).map(|(id, _)| *id)
+            let top = self.top_hits.iter().rev().find(|(_, r)| r.contains(input.mouse_pos));
+            top.or_else(|| self.hits.iter().rev().find(|(_, r)| r.contains(input.mouse_pos))).map(|(id, _)| *id)
         } else {
             None
         };
@@ -213,6 +229,7 @@ impl Ui {
         });
         self.time += input.dt as f64;
         self.focus_order.clear();
+        self.overlays.clear();
         self.ime_rect = None;
         self.cursor = Cursor::Default;
         self.input = input;
@@ -235,9 +252,18 @@ impl Ui {
         self.hits.clear();
         self.rects.clear();
         self.scroll_hits.clear();
+        self.top_hits.clear();
         let mut painter = Painter { draw: &mut self.draw, fonts: &mut self.fonts, theme: &self.theme, font: self.font };
-        let mut sink = HitSink { hits: &mut self.hits, rects: &mut self.rects, scroll_hits: &mut self.scroll_hits };
+        let mut sink = HitSink {
+            hits: &mut self.hits,
+            rects: &mut self.rects,
+            scroll_hits: &mut self.scroll_hits,
+            top_hits: &mut self.top_hits,
+        };
         paint(&mut self.nodes, 0, &mut painter, &mut sink);
+        for overlay in self.overlays.drain(..) {
+            overlay(&mut painter);
+        }
 
         // Feed this frame's measured content back into scroll state.
         for n in &self.nodes {
@@ -333,6 +359,38 @@ impl Ui {
         *v
     }
 
+    /// Like [`Ui::animate`] with an explicit rate (1/s).
+    pub fn animate_with_speed(&mut self, id: Id, slot: u8, target: f32, speed: f32) -> f32 {
+        let k = 1.0 - (-speed * self.input.dt).exp();
+        let v = self.anims.entry((id, slot)).or_insert(target);
+        *v += (target - *v) * k;
+        if (target - *v).abs() < 0.01 {
+            *v = target;
+        }
+        *v
+    }
+
+    /// Jump an animation to `value` (it then eases towards its next target).
+    pub fn set_anim(&mut self, id: Id, slot: u8, value: f32) {
+        self.anims.insert((id, slot), value);
+    }
+
+    /// Mark an explicitly-constructed id as alive this frame so its retained
+    /// state (animations, text/scroll state) is kept.
+    pub fn keep_id(&mut self, id: Id) {
+        self.seen.insert(id);
+    }
+
+    /// Rect of `id` from the previous frame's layout.
+    pub fn rect_of(&self, id: Id) -> Option<Rect> {
+        self.rects.get(&id).copied()
+    }
+
+    /// Paint on top of everything, after the tree (drag previews, tooltips).
+    pub fn overlay(&mut self, f: impl FnOnce(&mut Painter) + 'static) {
+        self.overlays.push(Box::new(f));
+    }
+
     /// Animation eased towards 1 when `on`, 0 otherwise.
     pub fn animate_bool(&mut self, id: Id, slot: u8, on: bool) -> f32 {
         self.animate(id, slot, if on { 1.0 } else { 0.0 })
@@ -355,9 +413,25 @@ impl Ui {
         interactive: bool,
         paint: impl FnOnce(&mut Painter, Rect) + 'static,
     ) {
+        let opts = LeafOptions { interactive, ..Default::default() };
+        self.add_leaf_ex(id, layout, content, opts, paint);
+    }
+
+    /// `add_leaf` with hit-area options.
+    pub fn add_leaf_ex(
+        &mut self,
+        id: Id,
+        layout: Layout,
+        content: Vec2,
+        opts: LeafOptions,
+        paint: impl FnOnce(&mut Painter, Rect) + 'static,
+    ) {
+        self.seen.insert(id);
         let mut n = Node::new(id, layout);
         n.intrinsic = content;
-        n.interactive = interactive;
+        n.interactive = opts.interactive;
+        n.hit_pad = opts.hit_pad;
+        n.hit_top = opts.hit_top;
         n.paint = Some(Box::new(paint) as PaintFn);
         self.attach(n);
     }
@@ -366,6 +440,13 @@ impl Ui {
     pub fn container<R>(&mut self, layout: Layout, frame: Frame, body: impl FnOnce(&mut Self) -> R) -> R {
         let idx = self.nodes[*self.stack.last().unwrap()].children.len();
         let id = self.make_id(("container", idx));
+        self.container_id(id, layout, frame, body)
+    }
+
+    /// Container with an explicit id: its rect is queryable via `rect_of`, and
+    /// children's ids derive from it, so their state follows it around.
+    pub fn container_id<R>(&mut self, id: Id, layout: Layout, frame: Frame, body: impl FnOnce(&mut Self) -> R) -> R {
+        self.seen.insert(id);
         let mut n = Node::new(id, layout);
         n.clip = frame.clip;
         if frame.fill.a > 0.0 || frame.border_width > 0.0 || frame.shadow {
@@ -471,6 +552,7 @@ impl Ui {
 
 struct HitSink<'a> {
     hits: &'a mut Vec<(Id, Rect)>,
+    top_hits: &'a mut Vec<(Id, Rect)>,
     rects: &'a mut HashMap<Id, Rect>,
     scroll_hits: &'a mut Vec<(Id, Rect)>,
 }
@@ -481,8 +563,13 @@ fn paint(nodes: &mut [Node], i: usize, p: &mut Painter, sink: &mut HitSink) {
     sink.rects.insert(id, rect);
     let visible = p.draw.clip().intersect(&rect);
     if nodes[i].interactive {
-        if let Some(r) = visible {
-            sink.hits.push((id, r));
+        let pad = nodes[i].hit_pad;
+        if let Some(r) = p.draw.clip().expand(pad).intersect(&rect.expand(pad)) {
+            if nodes[i].hit_top {
+                sink.top_hits.push((id, r));
+            } else {
+                sink.hits.push((id, r));
+            }
         }
     }
     if let (Some(_), Some(r)) = (nodes[i].scroll, visible) {

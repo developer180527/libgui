@@ -117,6 +117,38 @@ ui.scroll_area_with("console", opts, |ui| { /* log lines */ });
 - Clipped hit-testing: widgets scrolled out of view can't be hovered or clicked.
 - `stick_to_end` keeps logs/consoles pinned to the newest line while at the bottom.
 
+## Docking (Unity-style, multi-window)
+
+```rust
+let mut dock = DockState::<MyTab>::new();
+let left = dock.leaf(vec![MyTab::Outliner]);
+let right = dock.leaf(vec![MyTab::Scene, MyTab::Game]);
+let root = dock.split(Axis::X, 0.2, left, right);
+dock.set_root(SurfaceId::MAIN, root);
+
+// every frame, per window:
+dock.show(&mut ui, window_surface_id, &mut my_tab_viewer);
+```
+
+- **Tabs:** click to activate, drag sideways to reorder live (neighbours slide out of the way).
+- **Tear-off:** drag a tab out of its bar and it *instantly* becomes a real OS window under the pointer,
+  following it until release. Drag the only tab of a floating window to move that window.
+- **Dock back:** hover any pane: centre or tab bar = add as tab; near an edge = split that pane;
+  near a window edge = dock along the whole side. An animated preview shows the result; the dragged
+  window hides while over a target (configurable). Release to dock; the floating window closes.
+  Esc cancels a drag. Closing a floating window returns its tabs to the main window.
+- **Splitters:** drag the gaps; thin visual gap with a wider invisible grab area that wins over content.
+
+**Tuning the feel:** every parameter is in `DockConfig` (thresholds, drop-zone sizes, animation
+speeds, tab metrics, splitter size, hide-over-target). The demo's *Dock Tuning* panel edits them live;
+copy the values you like into `DockConfig::default()`.
+
+**Host contract:** libgui never creates windows. Per loop iteration the host forwards the global
+pointer (`set_pointer`, physical screen px), reports window placement (`set_surface_frame`), calls
+`update()`, then makes OS windows match `dock.surfaces()` (create/destroy, apply `window_pos` and
+`visible`) and renders each window with `dock.show`. `libgui_demo/src/main.rs` is a complete
+winit reference (~450 lines) with one shared wgpu device and a renderer + `Ui` per window.
+
 ## Integrating with your engine
 
 - Render your scene to a texture, `renderer.register_texture(&view)` (wgpu backend), then show it with
@@ -131,7 +163,7 @@ ui.scroll_area_with("console", opts, |ui| { /* log lines */ });
 1. ~~Text input~~ ✅ single-line; next: multi-line editor, IME preedit, double-click word select, undo.
 2. ~~Scroll areas~~ ✅; next: virtualised lists/trees (only build visible rows), horizontal scroll, keyboard PageUp/Down.
 3. **Keyboard/shortcut routing**, menus, popups/context menus, tooltips (needs a layer/z-order stack).
-4. **Docking + tabs + splitters**: a retained dock tree stored in `Ui`, serialised to disk.
+4. ~~Docking + tabs + splitters~~ ✅ Unity-style with OS-window tear-off; next: layout save/load, tab close/context menu, maximize pane.
 5. **Real text shaping**: replace `text.rs` internals with `cosmic-text`/`swash` or HarfBuzz
    (ligatures, bidi, font fallback, CJK), multi-page atlas with LRU eviction.
 6. **Theme hot-reload** from a RON/TOML file.

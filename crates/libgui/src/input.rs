@@ -84,6 +84,7 @@ pub enum Cursor {
     Default,
     Pointer,
     ResizeHorizontal,
+    ResizeVertical,
     Grab,
     Grabbing,
     Text,
