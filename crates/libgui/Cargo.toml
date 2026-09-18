@@ -3,6 +3,13 @@ name = "libgui"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = ["theme-toml"]
+# Load/save/hot-reload themes from TOML files.
+theme-toml = ["dep:serde", "dep:toml"]
+
 [dependencies]
 fontdue.workspace = true
 bytemuck.workspace = true
+serde = { version = "1", features = ["derive"], optional = true }
+toml = { version = "1", optional = true }

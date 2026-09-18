@@ -15,6 +15,8 @@ mod math;
 mod painter;
 mod text;
 mod theme;
+#[cfg(feature = "theme-toml")]
+mod theme_file;
 mod ui;
 mod text_edit;
 mod widgets;
@@ -28,6 +30,12 @@ pub use layout::{Align, Axis, Insets, Layout, Size};
 pub use math::{Color, Rect, Vec2};
 pub use painter::Painter;
 pub use text::{Atlas, FontId, Fonts};
-pub use theme::Theme;
+pub use theme::{
+    ButtonStyle, Density, DropPreviewStyle, Metrics, Palette, PanelStyle, PlotStyle, ScrollbarStyle, SegmentedStyle,
+    SelectableStyle, Shadow, SliderStyle, SplitterStyle, StateColors, TabStyle, TextInputStyle, Theme, ToggleStyle,
+    ViewportStyle,
+};
+#[cfg(feature = "theme-toml")]
+pub use theme_file::{ThemeError, ThemeWatcher};
 pub use text_edit::TextResponse;
 pub use ui::{Frame, FrameOutput, LeafOptions, Response, ScrollOptions, Ui};

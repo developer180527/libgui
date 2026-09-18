@@ -1,7 +1,7 @@
 //! App state and panel UI. Panels don't know which window they live in; the
 //! dock decides that.
 
-use libgui::{Axis, Color, DockConfig, DockNode, DockState, Insets, Painter, Rect, ScrollOptions, Size, TabViewer, TextureId, Ui, Vec2};
+use libgui::{Axis, Color, DockConfig, DockNode, DockState, Insets, Painter, Rect, ScrollOptions, Size, StateColors, TabViewer, TextureId, Ui, Vec2};
 use std::collections::VecDeque;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -11,8 +11,19 @@ pub enum Tab {
     Inspector,
     Console,
     Stats,
+    Appearance,
     DockTuning,
 }
+
+/// Theme picker entries: built-in presets, then files in `themes/`.
+pub const THEMES: [(&str, Option<&str>); 6] = [
+    ("Dark", None),
+    ("Midnight", None),
+    ("Light", None),
+    ("Unity-ish  (themes/unity.toml)", Some("unity.toml")),
+    ("Blender-ish  (themes/blender.toml)", Some("blender.toml")),
+    ("Custom  (themes/custom.toml)", Some("custom.toml")),
+];
 
 impl Tab {
     pub fn title(self) -> &'static str {
@@ -22,6 +33,7 @@ impl Tab {
             Tab::Inspector => "Inspector",
             Tab::Console => "Console",
             Tab::Stats => "Stats",
+            Tab::Appearance => "Appearance",
             Tab::DockTuning => "Dock Tuning",
         }
     }
@@ -36,7 +48,7 @@ pub fn default_layout(dock: &mut DockState<Tab>) {
     let console = dock.leaf(vec![Tab::Console]);
     let center = dock.split(Axis::Y, 0.72, scene, console);
     let stats = dock.leaf(vec![Tab::Stats]);
-    let tuning = dock.leaf(vec![Tab::DockTuning]);
+    let tuning = dock.leaf(vec![Tab::Appearance, Tab::DockTuning]);
     let right = dock.split(Axis::Y, 0.38, stats, tuning);
     let center_right = dock.split(Axis::X, 0.76, center, right);
     let root: DockNode<Tab> = dock.split(Axis::X, 0.2, left, center_right);
@@ -76,6 +88,13 @@ pub struct Demo {
     /// Edited by the Dock Tuning panel; the host copies it into the dock.
     pub dock_cfg: DockConfig,
     pub reset_layout: bool,
+    /// Index into `THEMES`.
+    pub theme_choice: usize,
+    /// 0 = the theme's own density, then Compact / Regular / Touch.
+    pub density_choice: usize,
+    pub theme_status: String,
+    pub theme_error: bool,
+    pub export_theme: bool,
 }
 
 impl Default for Demo {
@@ -102,6 +121,11 @@ impl Default for Demo {
             viewport_px: (1, 1),
             dock_cfg: DockConfig::default(),
             reset_layout: false,
+            theme_choice: 0,
+            density_choice: 0,
+            theme_status: String::new(),
+            theme_error: false,
+            export_theme: false,
         }
     }
 }
@@ -223,6 +247,7 @@ impl TabViewer for Panels<'_> {
             Tab::Inspector => self.inspector(ui),
             Tab::Console => self.console(ui),
             Tab::Stats => self.stats(ui),
+            Tab::Appearance => appearance(ui, self.d),
             Tab::DockTuning => dock_tuning(ui, &mut self.d.dock_cfg),
         }
     }
@@ -236,18 +261,18 @@ impl Panels<'_> {
         let title = d.objects[d.selected].clone();
         let resp = ui.viewport("main", self.viewport_tex, move |p: &mut Painter, r: Rect| {
             let t = p.theme;
-            let small = t.font_size_small;
+            let small = t.metrics.font_size_small;
             if overlay {
                 let w = p.measure(small, &stats).x + 20.0;
                 let badge = Rect::new(r.x + 12.0, r.y + 12.0, w, 24.0);
-                p.rect_bordered(badge, t.bg_panel.with_alpha(0.85), 12.0, 1.0, t.border);
-                p.text_centered(badge, small, t.text, &stats);
+                p.rect_bordered(badge, t.palette.bg_panel.with_alpha(0.85), 12.0, 1.0, t.palette.border);
+                p.text_centered(badge, small, t.palette.text, &stats);
             }
             let tw = p.measure(small, &title).x + 24.0;
             let tag = Rect::new(r.right() - tw - 12.0, r.y + 12.0, tw, 24.0);
-            p.rect(tag, t.accent.with_alpha(0.2), 12.0);
-            p.text_centered(tag, small, t.accent_hover, &title);
-            p.text(Vec2::new(r.x + 14.0, r.bottom() - 26.0), small, t.text_faint, "Drag to orbit  ·  Scroll to zoom");
+            p.rect(tag, t.palette.accent.with_alpha(0.2), 12.0);
+            p.text_centered(tag, small, t.palette.accent_hover, &title);
+            p.text(Vec2::new(r.x + 14.0, r.bottom() - 26.0), small, t.palette.text_faint, "Drag to orbit  ·  Scroll to zoom");
         });
         d.viewport_px = ((resp.rect.w * self.scale).round() as u32, (resp.rect.h * self.scale).round() as u32);
         d.yaw += resp.drag_delta.x * 0.008;
@@ -295,7 +320,7 @@ impl Panels<'_> {
     fn console(&mut self, ui: &mut Ui) {
         let d = &mut *self.d;
         let t = ui.theme.clone();
-        let well = libgui::Frame { fill: t.bg_inset, border: t.border, border_width: 1.0, radius: t.radius, shadow: false, clip: true };
+        let well = libgui::Frame { fill: t.palette.bg_inset, border: t.palette.border, border_width: 1.0, radius: t.metrics.radius, shadow: false, clip: true };
         ui.container(libgui::Layout::column().height(Size::Grow(1.0)), well, |ui| {
             let opts = ScrollOptions {
                 gap: 3.0,
@@ -306,13 +331,13 @@ impl Panels<'_> {
             ui.scroll_area_with("console", opts, |ui| {
                 for line in &d.console {
                     let color = if line.starts_with("> ") {
-                        t.text
+                        t.palette.text
                     } else if line.starts_with("error") {
                         Color::hex(0xf87171)
                     } else {
-                        t.text_muted
+                        t.palette.text_muted
                     };
-                    ui.text_with(line, t.font_size_small + 0.5, color);
+                    ui.text_with(line, t.metrics.font_size_small + 0.5, color);
                 }
             });
         });
@@ -327,7 +352,7 @@ impl Panels<'_> {
         let d = &*self.d;
         let t = ui.theme.clone();
         ui.section("Frame");
-        ui.text_with(&format!("{:.2} ms", d.avg_ms()), 22.0, t.text);
+        ui.text_with(&format!("{:.2} ms", d.avg_ms()), 22.0, t.palette.text);
         let hist: Vec<f32> = d.frame_ms.iter().copied().collect();
         ui.plot("frame times", &hist, 33.3, 56.0);
         ui.label_muted(&format!("UI: {} instances · {} draw calls", d.ui_instances, d.ui_batches));
@@ -353,14 +378,10 @@ fn dock_tuning(ui: &mut Ui, c: &mut DockConfig) {
     ui.section("Animation");
     ui.slider("Preview speed", &mut c.preview_speed, 4.0, 60.0);
     ui.slider("Reorder slide speed", &mut c.reorder_speed, 4.0, 60.0);
-    ui.slider("Preview opacity", &mut c.preview_alpha, 0.05, 0.6);
-    ui.section("Tabs & splitters");
-    ui.slider("Tab height", &mut c.tab_height, 22.0, 44.0);
-    ui.slider("Tab padding", &mut c.tab_padding, 6.0, 24.0);
-    ui.slider("Tab radius", &mut c.tab_radius, 0.0, 12.0);
-    ui.slider("Splitter gap", &mut c.splitter_size, 1.0, 10.0);
+    ui.section("Splitters");
     ui.slider("Splitter grab pad", &mut c.splitter_hit_pad, 0.0, 10.0);
     ui.slider("Min pane size", &mut c.min_pane_size, 40.0, 300.0);
+    ui.label_muted("Tab & splitter looks live in the theme ([tab], [splitter]).");
     ui.section("Current values (paste into DockConfig)");
     let dump = format!(
         "drag_threshold {:.1}, tear_off {:.1}, edge_zone {:.2}, root_edge {:.1}, split {:.2}, root_split {:.2}, preview {:.1}, reorder {:.1}",
@@ -368,4 +389,45 @@ fn dock_tuning(ui: &mut Ui, c: &mut DockConfig) {
     );
     let mut dump = dump;
     ui.text_input("dump", &mut dump, "");
+}
+
+/// Theme picker, density, hot-reload status, export, and a `with_style` demo.
+fn appearance(ui: &mut Ui, d: &mut Demo) {
+    ui.section("Theme");
+    for (i, (name, _)) in THEMES.iter().enumerate() {
+        if ui.selectable(name, d.theme_choice == i).clicked {
+            d.theme_choice = i;
+        }
+    }
+    ui.space(4.0);
+    ui.section("Density");
+    ui.segmented("density", &mut d.density_choice, &["Theme", "Compact", "Regular", "Touch"]);
+    ui.space(4.0);
+    ui.section("Status");
+    let color = if d.theme_error { ui.theme.palette.danger } else { ui.theme.palette.text_muted };
+    let size = ui.theme.metrics.font_size_small + 0.5;
+    ui.text_with(&d.theme_status, size, color);
+    if ui.button("Export resolved theme").clicked {
+        d.export_theme = true;
+    }
+    ui.space(4.0);
+    ui.section("Scoped styles  (ui.with_style)");
+    let t = ui.theme.clone();
+    ui.row(|ui| {
+        ui.button("Default");
+        let mut danger = t.button_primary;
+        let dn = t.palette.danger;
+        danger.fill = StateColors::new(dn, dn.lerp(Color::WHITE, 0.12), dn.lerp(Color::BLACK, 0.15));
+        danger.border = StateColors::same(dn.lerp(Color::WHITE, 0.15));
+        danger.shadow.color = dn.with_alpha(0.35);
+        ui.button_styled("Delete", &danger);
+        ui.with_style(
+            |t| {
+                t.button.radius = 0.0;
+                t.button.highlight = 0.0;
+                t.button.fill.normal = t.palette.bg_inset;
+            },
+            |ui| ui.button("Square"),
+        );
+    });
 }

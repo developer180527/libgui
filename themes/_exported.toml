@@ -1,0 +1,195 @@
+# Every resolved value of "Unity-ish". Copy the keys you want to change.
+name = "Unity-ish"
+density = "compact"
+
+[palette]
+bg_app = "#191919"
+bg_panel = "#383838"
+bg_inset = "#2a2a2a"
+surface = "#585858"
+surface_hover = "#676767"
+surface_active = "#4a4a4a"
+border = "#242424"
+border_strong = "#1b1b1b"
+shadow = "#00000066"
+accent = "#3a79d8"
+accent_hover = "#4b89e6"
+accent_active = "#2c5d87"
+text = "#d2d2d2"
+text_muted = "#b0b0b0"
+text_faint = "#7f7f7f"
+text_on_accent = "#ffffff"
+knob = "#f2f4f8"
+danger = "#f87171"
+warning = "#f59e0b"
+
+[metrics]
+radius = 3.0
+radius_large = 3.0
+space = 6.0
+control_height = 24.0
+row_height = 22.0
+tab_height = 26.0
+font_size = 12.0
+font_size_small = 10.5
+font_size_heading = 13.5
+anim_speed = 20.0
+
+[button]
+radius = 3.0
+border_width = 1.0
+padding_x = 10.5
+height = 24.0
+highlight = 0.0
+press_offset = 0.5
+
+[button.fill]
+normal = "#585858"
+hover = "#676767"
+active = "#4a4a4a"
+
+[button.border]
+normal = "#1b1b1b"
+hover = "#1b1b1b"
+active = "#1b1b1b"
+
+[button.text]
+normal = "#d2d2d2"
+hover = "#d2d2d2"
+active = "#d2d2d2"
+
+[button.shadow]
+color = "#00000055"
+offset_y = 1.0
+blur = 0.0
+
+[button_primary]
+radius = 3.0
+border_width = 1.0
+padding_x = 10.5
+height = 24.0
+highlight = 0.08
+press_offset = 0.5
+
+[button_primary.fill]
+normal = "#3a79d8"
+hover = "#4b89e6"
+active = "#2c5d87"
+
+[button_primary.border]
+normal = "#5289dd"
+hover = "#6197e9"
+active = "#2c5d87"
+
+[button_primary.text]
+normal = "#ffffff"
+hover = "#ffffff"
+active = "#ffffff"
+
+[button_primary.shadow]
+color = "#0000004d"
+offset_y = 1.5
+blur = 3.0
+
+[toggle]
+track_off = "#2a2a2a"
+track_on = "#3a79d8"
+border_off = "#1b1b1b"
+border_on = "#4b89e6"
+knob = "#f2f4f8"
+label = "#d2d2d2"
+width = 27.2
+height = 14.400001
+
+[slider]
+track = "#2a2a2a"
+fill = "#3a79d8"
+knob = "#f2f4f8"
+ring = "#3a79d82e"
+label = "#b0b0b0"
+value = "#d2d2d2"
+value_active = "#4b89e6"
+track_height = 3.2
+knob_radius = 5.6
+
+[selectable]
+fill_hover = "#58585899"
+fill_selected = "#2c5d87"
+indicator = "#3a79d8"
+text = "#d2d2d2"
+text_hover = "#d2d2d2"
+text_selected = "#d2d2d2"
+radius = 0.0
+indicator_width = 0.0
+height = 22.0
+padding_x = 7.5
+
+[text_input]
+fill = "#2a2a2a"
+border = "#1b1b1b"
+border_hover = "#4d4d4d"
+border_focus = "#3a79d8"
+focus_ring = "#3a79d847"
+text = "#d2d2d2"
+placeholder = "#7f7f7f"
+selection = "#3a79d859"
+caret = "#4b89e6"
+radius = 3.0
+padding_x = 7.5
+height = 24.0
+
+[segmented]
+fill = "#2a2a2a"
+border = "#242424"
+fill_selected = "#676767"
+text = "#b0b0b0"
+text_selected = "#d2d2d2"
+radius = 3.0
+height = 24.0
+
+[scrollbar]
+thumb = "#7f7f7f"
+thumb_hover = "#b0b0b0"
+width = 3.2
+width_hover = 5.6
+rest_alpha = 0.25
+
+[tab]
+height = 26.0
+padding_x = 10.5
+min_width = 57.600002
+radius = 2.0
+gap = 0.0
+bar_fill = "#282828"
+fill_hover = "#ffffff0a"
+fill_active = "#383838"
+text = "#7f7f7f"
+text_active = "#d2d2d2"
+accent = "#3a79d8"
+accent_height = 0.0
+
+[splitter]
+size = 2.0
+line_hover = "#3a79d8d9"
+
+[panel]
+fill = "#383838"
+border = "#242424"
+radius = 0.0
+
+[plot]
+fill = "#2a2a2a"
+border = "#242424"
+bar = "#3a79d8"
+bar_high = "#f59e0b"
+
+[viewport]
+radius = 0.0
+border = "#242424"
+border_hover = "#1b1b1b"
+
+[drop_preview]
+fill = "#3a79d833"
+border = "#3a79d8e6"
+border_width = 2.0
+radius = 3.0

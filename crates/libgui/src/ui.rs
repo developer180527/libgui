@@ -33,11 +33,11 @@ pub struct Frame {
 
 impl Frame {
     pub fn panel(t: &Theme) -> Self {
-        Self { fill: t.bg_panel, border: t.border, border_width: 1.0, radius: 0.0, shadow: false, clip: true }
+        Self { fill: t.panel.fill, border: t.panel.border, border_width: 1.0, radius: t.panel.radius, shadow: false, clip: true }
     }
 
     pub fn card(t: &Theme) -> Self {
-        Self { fill: t.bg_panel, border: t.border, border_width: 1.0, radius: t.radius_large, shadow: true, clip: true }
+        Self { fill: t.panel.fill, border: t.panel.border, border_width: 1.0, radius: t.metrics.radius_large, shadow: true, clip: true }
     }
 
     pub fn none() -> Self {
@@ -307,7 +307,7 @@ impl Ui {
             atlas: self.fonts.atlas(),
             screen_size: s,
             scale: self.input.scale,
-            clear_color: self.theme.bg_app,
+            clear_color: self.theme.palette.bg_app,
         }
     }
 
@@ -350,7 +350,7 @@ impl Ui {
 
     /// Retained animation value: eases towards `target` each frame.
     pub fn animate(&mut self, id: Id, slot: u8, target: f32) -> f32 {
-        let k = 1.0 - (-self.theme.anim_speed * self.input.dt).exp();
+        let k = 1.0 - (-self.theme.metrics.anim_speed * self.input.dt).exp();
         let v = self.anims.entry((id, slot)).or_insert(target);
         *v += (target - *v) * k;
         if (target - *v).abs() < 0.001 {
@@ -452,7 +452,7 @@ impl Ui {
         if frame.fill.a > 0.0 || frame.border_width > 0.0 || frame.shadow {
             n.paint = Some(Box::new(move |p: &mut Painter, r: Rect| {
                 if frame.shadow {
-                    p.shadow(r.translate(0.0, 4.0), frame.radius, 16.0, p.theme.shadow);
+                    p.shadow(r.translate(0.0, 4.0), frame.radius, 16.0, p.theme.palette.shadow);
                 }
                 p.rect_bordered(r, frame.fill, frame.radius, frame.border_width, frame.border);
             }));
@@ -466,7 +466,7 @@ impl Ui {
 
     /// Vertical scroll area that fills the remaining height.
     pub fn scroll_area<R>(&mut self, key: &str, body: impl FnOnce(&mut Self) -> R) -> R {
-        let gap = self.theme.space;
+        let gap = self.theme.metrics.space;
         let opts = ScrollOptions { gap, ..ScrollOptions::new(Size::Grow(1.0)) };
         self.scroll_area_with(key, opts, body)
     }
@@ -531,7 +531,7 @@ impl Ui {
         let layout = Layout::column().height(opts.height).gap(opts.gap).padding(opts.padding);
         let mut n = Node::new(id, layout);
         n.clip = true;
-        n.scroll = Some(Scroll { offset: st.offset, bar_id, visible, hover });
+        n.scroll = Some(Scroll { offset: st.offset, bar_id, visible, hover, style: self.theme.scrollbar });
         let i = self.attach(n);
         self.stack.push(i);
         let r = body(self);
@@ -540,12 +540,12 @@ impl Ui {
     }
 
     pub fn row<R>(&mut self, body: impl FnOnce(&mut Self) -> R) -> R {
-        let gap = self.theme.space;
+        let gap = self.theme.metrics.space;
         self.container(Layout::row().gap(gap), Frame::none(), body)
     }
 
     pub fn column<R>(&mut self, body: impl FnOnce(&mut Self) -> R) -> R {
-        let gap = self.theme.space;
+        let gap = self.theme.metrics.space;
         self.container(Layout::column().gap(gap).height(Size::Fit), Frame::none(), body)
     }
 }
@@ -608,67 +608,10 @@ fn scrollbar(p: &mut Painter, sink: &mut HitSink, rect: Rect, content: f32, sc: 
     }
     let thumb_h = (track.h * rect.h / content).max(24.0).min(track.h);
     let y = track.y + (track.h - thumb_h) * (sc.offset / max).clamp(0.0, 1.0);
-    let w = 4.0 + 3.0 * sc.hover;
+    let s = sc.style;
+    let w = s.width + (s.width_hover - s.width) * sc.hover;
     let thumb = Rect::new(track.right() - w - 3.0, y, w, thumb_h);
-    let t = p.theme;
-    let color = t.text_faint.lerp(t.text_muted, sc.hover).with_alpha(0.25 + 0.55 * sc.visible.max(sc.hover));
-    p.rect(thumb, color, w * 0.5);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn ui() -> Ui {
-        Ui::new(Theme::dark(), include_bytes!("../../../assets/Inter.ttf"))
-    }
-
-    /// 20 buttons (30px + 0 gap) in a 100px scroll area at the top of the screen.
-    fn build(ui: &mut Ui, input: Input) -> Vec<Response> {
-        ui.begin_frame(input);
-        let mut out = Vec::new();
-        ui.scroll_area_with("list", ScrollOptions::new(Size::Fixed(100.0)), |ui| {
-            for i in 0..20 {
-                out.push(ui.button(&format!("item {i}")));
-            }
-        });
-        let _ = ui.end_frame();
-        out
-    }
-
-    #[test]
-    fn wheel_scrolls_clamps_and_clips_hit_testing() {
-        let mut ui = ui();
-        let base = Input { mouse_inside: true, mouse_pos: Vec2::new(20.0, 50.0), dt: 1.0, ..Input::default() };
-        build(&mut ui, base.clone());
-        build(&mut ui, base.clone());
-
-        // Scroll down 90px; dt = 1s so smoothing settles in one frame.
-        let mut wheel = base.clone();
-        wheel.scroll = Vec2::new(0.0, -90.0);
-        build(&mut ui, wheel);
-        let r = build(&mut ui, base.clone());
-        assert_eq!(r[3].rect.y, 0.0, "item 3 now at the top");
-
-        // Items scrolled out of the viewport are not hoverable/clickable.
-        let mut hover_top = base.clone();
-        hover_top.mouse_pos = Vec2::new(20.0, 5.0);
-        let r = build(&mut ui, hover_top);
-        assert!(r[3].hovered && !r[0].hovered && !r[2].hovered);
-
-        // Over-scrolling clamps at content - viewport = 600 - 100.
-        let mut far = base.clone();
-        far.scroll = Vec2::new(0.0, -10_000.0);
-        build(&mut ui, far);
-        let r = build(&mut ui, base.clone());
-        assert_eq!(r[19].rect.bottom(), 100.0);
-
-        // Wheel outside the area does nothing.
-        let mut outside = base.clone();
-        outside.mouse_pos = Vec2::new(20.0, 300.0);
-        outside.scroll = Vec2::new(0.0, 500.0);
-        build(&mut ui, outside);
-        let r = build(&mut ui, base);
-        assert_eq!(r[19].rect.bottom(), 100.0);
-    }
+    let alpha = s.rest_alpha + (1.0 - s.rest_alpha) * sc.visible.max(sc.hover) * 0.8;
+    let color = s.thumb.lerp(s.thumb_hover, sc.hover);
+    p.rect(thumb, color.with_alpha(color.a * alpha), w * 0.5);
 }

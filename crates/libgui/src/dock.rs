@@ -60,19 +60,13 @@ impl Side {
     }
 }
 
-/// Every knob that affects the docking feel. Tweak live; nothing is cached.
+/// Every knob that affects how docking *behaves* (the look is in `Theme`:
+/// `tab`, `splitter`, `drop_preview`). Tweak live; nothing is cached.
 #[derive(Clone, Debug)]
 pub struct DockConfig {
-    // Tabs
-    pub tab_height: f32,
-    pub tab_padding: f32,
-    pub tab_min_width: f32,
     /// Left inset of the tab bar (floating windows use it to place the grab point).
     pub tab_bar_padding: f32,
-    pub tab_radius: f32,
-    // Splitters
-    /// Visual gap between panes.
-    pub splitter_size: f32,
+    // Splitters (the visible gap size is `theme.splitter.size`)
     /// Extra grab area on each side of the gap.
     pub splitter_hit_pad: f32,
     pub min_pane_size: f32,
@@ -98,18 +92,12 @@ pub struct DockConfig {
     // Animation (1/s; higher = snappier)
     pub preview_speed: f32,
     pub reorder_speed: f32,
-    pub preview_alpha: f32,
 }
 
 impl Default for DockConfig {
     fn default() -> Self {
         Self {
-            tab_height: 30.0,
-            tab_padding: 14.0,
-            tab_min_width: 72.0,
             tab_bar_padding: 6.0,
-            tab_radius: 6.0,
-            splitter_size: 3.0,
             splitter_hit_pad: 3.0,
             min_pane_size: 90.0,
             drag_threshold: 6.0,
@@ -123,7 +111,6 @@ impl Default for DockConfig {
             root_split_fraction: 0.3,
             preview_speed: 26.0,
             reorder_speed: 22.0,
-            preview_alpha: 0.2,
         }
     }
 }
@@ -791,8 +778,9 @@ fn empty_hint(ui: &mut Ui) {
     let id = Id::new("dock_empty");
     ui.add_leaf(id, Layout::leaf(Size::Grow(1.0), Size::Grow(1.0)), Vec2::ZERO, false, |p, r| {
         let t = p.theme;
-        p.rect_bordered(r.shrink(12.0, 12.0, 12.0, 12.0), Color::TRANSPARENT, t.radius_large, 1.0, t.border_strong);
-        p.text_centered(r, t.font_size, t.text_faint, "Drag a tab here");
+        let (border, faint) = (t.palette.border_strong, t.palette.text_faint);
+        p.rect_bordered(r.shrink(12.0, 12.0, 12.0, 12.0), Color::TRANSPARENT, t.metrics.radius_large, 1.0, border);
+        p.text_centered(r, t.metrics.font_size, faint, "Drag a tab here");
     });
 }
 
@@ -805,11 +793,9 @@ fn drop_preview(ui: &mut Ui, surface: crate::dock::SurfaceId, target: Rect, cfg:
     let y = ui.animate_with_speed(id, 1, r.y, sp);
     let w = ui.animate_with_speed(id, 2, r.w, sp);
     let h = ui.animate_with_speed(id, 3, r.h, sp);
-    let alpha = cfg.preview_alpha;
+    let s = ui.theme.drop_preview;
     ui.overlay(move |p| {
-        let t = p.theme;
-        let r = Rect::new(x, y, w, h);
-        p.rect_bordered(r, t.accent.with_alpha(alpha), t.radius, 2.0, t.accent.with_alpha(0.9));
+        p.rect_bordered(Rect::new(x, y, w, h), s.fill, s.radius, s.border_width, s.border);
     });
 }
 
@@ -824,7 +810,7 @@ fn show_split<V: TabViewer>(ui: &mut Ui, s: &mut Split<V::Tab>, cx: &mut ShowCtx
     let id = Id::new(("dock_split", s.id));
     let axis = s.axis;
     let main = |r: Rect| if axis == Axis::X { r.w } else { r.h };
-    let total = ui.rect_of(id).map(main).unwrap_or(0.0) - cx.cfg.splitter_size;
+    let total = ui.rect_of(id).map(main).unwrap_or(0.0) - ui.theme.splitter.size;
     let base = match axis {
         Axis::X => Layout::row(),
         Axis::Y => Layout::column(),
@@ -856,9 +842,10 @@ fn splitter<T>(ui: &mut Ui, s: &mut Split<T>, total: f32, cfg: &DockConfig) {
     }
     let hot = ui.animate_bool(id, 0, resp.hovered || resp.active);
     let axis = s.axis;
+    let style = ui.theme.splitter;
     let layout = match axis {
-        Axis::X => Layout::leaf(Size::Fixed(cfg.splitter_size), Size::Grow(1.0)),
-        Axis::Y => Layout::leaf(Size::Grow(1.0), Size::Fixed(cfg.splitter_size)),
+        Axis::X => Layout::leaf(Size::Fixed(style.size), Size::Grow(1.0)),
+        Axis::Y => Layout::leaf(Size::Grow(1.0), Size::Fixed(style.size)),
     };
     let opts = LeafOptions { interactive: true, hit_pad: cfg.splitter_hit_pad, hit_top: true };
     ui.add_leaf_ex(id, layout, Vec2::ZERO, opts, move |p, r| {
@@ -867,7 +854,7 @@ fn splitter<T>(ui: &mut Ui, s: &mut Split<T>, total: f32, cfg: &DockConfig) {
                 Axis::X => Rect::new(r.center().x - 1.0, r.y, 2.0, r.h),
                 Axis::Y => Rect::new(r.x, r.center().y - 1.0, r.w, 2.0),
             };
-            p.rect(line, p.theme.accent.with_alpha(0.85 * hot), 1.0);
+            p.rect(line, style.line_hover.with_alpha(style.line_hover.a * hot), 1.0);
         }
     });
 }
@@ -892,13 +879,15 @@ fn show_leaf<V: TabViewer>(ui: &mut Ui, leaf: &mut Leaf<V::Tab>, cx: &mut ShowCt
     let focused = cx.focused == Some(leaf.id);
 
     ui.container_id(leaf_id, Layout::column().shrink(), Frame { clip: true, ..Frame::none() }, |ui| {
+        let ts = ui.theme.tab;
         let bar_layout = Layout::row()
-            .height(Size::Fixed(cfg.tab_height))
+            .height(Size::Fixed(ts.height))
             .padding(Insets { left: cfg.tab_bar_padding, top: 0.0, right: cfg.tab_bar_padding, bottom: 0.0 })
-            .gap(2.0)
+            .gap(ts.gap)
             .align(crate::Align::Start, crate::Align::End)
             .shrink();
-        ui.container_id(bar_id, bar_layout, Frame::none(), |ui| {
+        let bar_frame = Frame { fill: ts.bar_fill, ..Frame::none() };
+        ui.container_id(bar_id, bar_layout, bar_frame, |ui| {
             for i in 0..leaf.tabs.len() {
                 let pressed = tab(ui, leaf, i, tab_ids[i], focused, cx);
                 if pressed {
@@ -912,15 +901,15 @@ fn show_leaf<V: TabViewer>(ui: &mut Ui, leaf: &mut Leaf<V::Tab>, cx: &mut ShowCt
         let body_id = Id::new(("dock_body", cx.viewer.id(tab)));
         let padding = cx.viewer.padding(tab);
         let scroll = cx.viewer.scroll(tab);
-        let body = Frame { fill: ui.theme.bg_panel, border: Color::TRANSPARENT, border_width: 0.0, radius: 0.0, shadow: false, clip: true };
+        let body = Frame { fill: ui.theme.panel.fill, border: Color::TRANSPARENT, border_width: 0.0, radius: 0.0, shadow: false, clip: true };
         let viewer = &mut *cx.viewer;
         if scroll {
             ui.container_id(body_id, Layout::column().shrink(), body, |ui| {
-                let opts = ScrollOptions { gap: ui.theme.space, padding, ..ScrollOptions::new(Size::Grow(1.0)) };
+                let opts = ScrollOptions { gap: ui.theme.metrics.space, padding, ..ScrollOptions::new(Size::Grow(1.0)) };
                 ui.scroll_area_with("dock_scroll", opts, |ui| viewer.ui(ui, tab));
             });
         } else {
-            let gap = ui.theme.space;
+            let gap = ui.theme.metrics.space;
             ui.container_id(body_id, Layout::column().shrink().padding(padding).gap(gap), body, |ui| viewer.ui(ui, tab));
         }
     });
@@ -930,7 +919,7 @@ fn show_leaf<V: TabViewer>(ui: &mut Ui, leaf: &mut Leaf<V::Tab>, cx: &mut ShowCt
 fn tab<V: TabViewer>(ui: &mut Ui, leaf: &Leaf<V::Tab>, i: usize, id: Id, leaf_focused: bool, cx: &mut ShowCtx<V>) -> bool {
     let cfg = cx.cfg;
     let title = cx.viewer.title(&leaf.tabs[i]);
-    let size = ui.theme.font_size;
+    let size = ui.theme.metrics.font_size;
     let m = ui.fonts.measure(ui.font, size, &title);
     ui.keep_id(id);
     let resp = ui.interact(id);
@@ -948,11 +937,12 @@ fn tab<V: TabViewer>(ui: &mut Ui, leaf: &Leaf<V::Tab>, i: usize, id: Id, leaf_fo
         }
     }
     let slide = ui.animate_with_speed(id, 2, 0.0, cfg.reorder_speed);
-    let (pad, radius) = (cfg.tab_padding, cfg.tab_radius);
-    let content = Vec2::new(m.x.max(cfg.tab_min_width - 2.0 * pad), m.y);
-    let layout = Layout::leaf(Size::Fit, Size::Fixed(cfg.tab_height - 4.0)).padding(Insets::xy(pad, 0.0));
+    let s = ui.theme.tab;
+    let shadow = ui.theme.palette.shadow;
+    let (pad, radius) = (s.padding_x, s.radius);
+    let content = Vec2::new(m.x.max(s.min_width - 2.0 * pad), m.y);
+    let layout = Layout::leaf(Size::Fit, Size::Fixed((s.height - 4.0).max(m.y))).padding(Insets::xy(pad, 0.0));
     ui.add_leaf(id, layout, content, true, move |p, r| {
-        let t = p.theme;
         let mut r = r;
         match follow {
             Some(x) => r.x = x,
@@ -960,15 +950,16 @@ fn tab<V: TabViewer>(ui: &mut Ui, leaf: &Leaf<V::Tab>, i: usize, id: Id, leaf_fo
         }
         let lifted = follow.is_some();
         if lifted {
-            p.shadow(r.translate(0.0, 2.0), radius, 8.0, t.shadow);
+            p.shadow(r.translate(0.0, 2.0), radius, 8.0, shadow);
         }
         // Active tab merges into the panel below: extend it down under the body.
-        let fill = t.surface.with_alpha(0.55 * hover).lerp(t.bg_panel, on.max(if lifted { 1.0 } else { 0.0 }));
+        let fill = s.fill_hover.with_alpha(s.fill_hover.a * hover).lerp(s.fill_active, on.max(if lifted { 1.0 } else { 0.0 }));
         p.rect(Rect::new(r.x, r.y, r.w, r.h + radius), fill, radius);
-        if on > 0.01 && leaf_focused {
-            p.rect(Rect::new(r.x + radius * 0.5, r.y, r.w - radius, 2.0), t.accent.with_alpha(on), 1.0);
+        if on > 0.01 && leaf_focused && s.accent_height > 0.0 {
+            let a = Rect::new(r.x + radius * 0.5, r.y, r.w - radius, s.accent_height);
+            p.rect(a, s.accent.with_alpha(s.accent.a * on), s.accent_height * 0.5);
         }
-        let fg = t.text_muted.lerp(t.text, on.max(hover * 0.6));
+        let fg = s.text.lerp(s.text_active, on.max(hover * 0.6));
         p.text_centered(r, size, fg, &title);
     });
     resp.pressed

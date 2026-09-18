@@ -1,0 +1,50 @@
+# Blender-style: rounded raised widgets, compact, mid-grey panels,
+# pressed/selected states in blue.
+name = "Blender-ish"
+extends = "dark"
+density = "compact"
+
+[palette]
+bg_app = "#1d1d1d"
+bg_panel = "#303030"
+bg_inset = "#1d1d1d"
+surface = "#545454"
+surface_hover = "#656565"
+surface_active = "#4772b3"
+border = "#3d3d3d"
+border_strong = "#242424"
+accent = "#4772b3"
+accent_hover = "#5680c2"
+accent_active = "#3b5f96"
+text = "#e5e5e5"
+text_muted = "#b8b8b8"
+text_faint = "#8a8a8a"
+
+[metrics]
+radius = 5
+radius_large = 6
+
+[button]
+highlight = 0.07
+border = { normal = "border_strong", hover = "border_strong", active = "border_strong" }
+
+[tab]
+radius = 5
+bar_fill = "#232323"
+fill_active = "bg_panel"
+accent_height = 0
+
+[slider]
+track = "#545454"
+track_height = 6
+knob_radius = 6
+
+[selectable]
+radius = 3
+indicator_width = 0
+fill_selected = "accent@0.6"
+text = "text"
+
+[text_input]
+fill = "#1d1d1d"
+border = "border_strong"

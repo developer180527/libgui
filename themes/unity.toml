@@ -1,0 +1,51 @@
+# Unity-style: flat mid-greys, dense, square-ish tabs on a dark strip,
+# blue selection, no accent line under tabs.
+name = "Unity-ish"
+extends = "dark"
+density = "compact"
+
+[palette]
+bg_app = "#191919"
+bg_panel = "#383838"
+bg_inset = "#2a2a2a"
+surface = "#585858"
+surface_hover = "#676767"
+surface_active = "#4a4a4a"
+border = "#242424"
+border_strong = "#1b1b1b"
+shadow = "#00000066"
+accent = "#3a79d8"
+accent_hover = "#4b89e6"
+accent_active = "#2c5d87"
+text = "#d2d2d2"
+text_muted = "#b0b0b0"
+text_faint = "#7f7f7f"
+
+[metrics]
+radius = 3
+radius_large = 3
+
+[button]
+highlight = 0.0
+border = { normal = "border_strong", hover = "border_strong", active = "border_strong" }
+shadow = { color = "#00000055", offset_y = 1, blur = 0 }
+
+[tab]
+radius = 2
+gap = 0
+bar_fill = "#282828"
+fill_hover = "#ffffff@0.04"
+text = "text_faint"
+accent_height = 0
+
+[splitter]
+size = 2
+
+[selectable]
+radius = 0
+indicator_width = 0
+fill_selected = "accent_active"
+text = "text"
+
+[viewport]
+radius = 0

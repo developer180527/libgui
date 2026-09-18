@@ -5,8 +5,8 @@
 mod panels;
 mod scene;
 
-use libgui::{Backend, Color, Cursor, DockState, Event, Frame, Input, Insets, Key, Layout, Modifiers, Size, SurfaceId, TextureId, Ui, Vec2};
-use panels::{default_layout, Demo, Panels, Tab};
+use libgui::{Backend, Color, Cursor, Density, DockState, Event, Frame, Input, Insets, Key, Layout, Modifiers, Size, SurfaceId, TextureId, Theme, ThemeWatcher, Ui, Vec2};
+use panels::{default_layout, Demo, Panels, Tab, THEMES};
 use scene::{Scene, SceneParams};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -56,6 +56,15 @@ struct App {
     left_down: bool,
     /// Outer-minus-inner offset of a decorated window (title bar), physical px.
     decoration: Vec2,
+    /// One theme for every window; hot-reloaded from `themes/*.toml`.
+    theme: Theme,
+    watcher: Option<ThemeWatcher>,
+    applied_theme: Option<(usize, usize)>,
+}
+
+fn themes_dir() -> std::path::PathBuf {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../themes");
+    dir.canonicalize().unwrap_or(dir)
 }
 
 fn vec(p: PhysicalPosition<i32>) -> Vec2 {
@@ -74,6 +83,9 @@ impl App {
             clipboard: arboard::Clipboard::new().ok(),
             left_down: false,
             decoration: Vec2::ZERO,
+            theme: Theme::dark(),
+            watcher: None,
+            applied_theme: None,
         }
     }
 
@@ -139,6 +151,64 @@ impl App {
             },
         );
         id
+    }
+
+    /// Apply the Appearance panel's choice, and hot-reload the watched file.
+    fn update_theme(&mut self) {
+        let d = &mut self.demo;
+        let density = match d.density_choice {
+            1 => Some(Density::Compact),
+            2 => Some(Density::Regular),
+            3 => Some(Density::Touch),
+            _ => None,
+        };
+        let choice = (d.theme_choice, d.density_choice);
+        if self.applied_theme != Some(choice) {
+            self.applied_theme = Some(choice);
+            match THEMES[d.theme_choice] {
+                (_, Some(file)) => {
+                    let mut w = ThemeWatcher::new(themes_dir().join(file));
+                    w.density = density;
+                    self.watcher = Some(w);
+                }
+                (name, None) => {
+                    self.watcher = None;
+                    let mut t = Theme::preset(name).unwrap_or_default();
+                    if let Some(dn) = density {
+                        t.set_density(dn);
+                    }
+                    d.theme_status = format!("Built-in preset: {} ({:?})", t.name, t.density);
+                    d.theme_error = false;
+                    self.theme = t;
+                }
+            }
+        }
+        if let Some(w) = &mut self.watcher {
+            if let Some(result) = w.poll() {
+                let file = w.path().file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
+                match result {
+                    Ok(t) => {
+                        d.log(format!("theme reloaded: {} from {file}", t.name));
+                        d.theme_status = format!("Watching themes/{file}: edit & save to reload");
+                        d.theme_error = false;
+                        self.theme = t;
+                    }
+                    Err(e) => {
+                        d.log(format!("error: {e}"));
+                        d.theme_status = format!("{e}  (keeping previous theme)");
+                        d.theme_error = true;
+                    }
+                }
+            }
+        }
+        if std::mem::take(&mut d.export_theme) {
+            let path = themes_dir().join("_exported.toml");
+            let body = format!("# Every resolved value of \"{}\". Copy the keys you want to change.\n{}", self.theme.name, self.theme.to_toml());
+            match std::fs::write(&path, body) {
+                Ok(()) => d.log(format!("exported theme to {}", path.display())),
+                Err(e) => d.log(format!("error: export failed: {e}")),
+            }
+        }
     }
 
     /// Make OS windows match the dock: create/destroy/move/show/hide.
@@ -225,6 +295,9 @@ impl App {
         }
 
         // 1. UI
+        if w.ui.theme != self.theme {
+            w.ui.theme = self.theme.clone();
+        }
         let input = w.input.clone();
         w.input.scroll = Vec2::ZERO;
         w.input.events.clear();
@@ -383,8 +456,8 @@ fn top_bar(ui: &mut Ui, d: &mut Demo) {
         let id = ui.make_id("logo");
         ui.add_leaf(id, Layout::leaf(Size::Fixed(18.0), Size::Fixed(18.0)), Vec2::ZERO, false, |p, r| {
             let t = p.theme;
-            p.shadow(r, 5.0, 8.0, t.accent.with_alpha(0.5));
-            p.rect(r, t.accent, 5.0);
+            p.shadow(r, 5.0, 8.0, t.palette.accent.with_alpha(0.5));
+            p.rect(r, t.palette.accent, 5.0);
             p.rect(r.shrink(5.0, 5.0, 5.0, 5.0), Color::WHITE.with_alpha(0.9), 2.0);
         });
         ui.heading("libgui");
@@ -407,7 +480,7 @@ fn status_bar(ui: &mut Ui, d: &Demo) {
     let t = ui.theme.clone();
     let status = Layout::row().height(Size::Fixed(26.0)).padding(Insets::xy(12.0, 0.0)).gap(12.0);
     ui.container(status, Frame { clip: false, ..Frame::panel(&t) }, |ui| {
-        let (s, c) = (t.font_size_small, t.text_faint);
+        let (s, c) = (t.metrics.font_size_small, t.palette.text_faint);
         ui.text_with(if d.playing { "● Playing" } else { "❚❚ Paused" }, s, c);
         ui.flex();
         ui.text_with(&format!("{} window(s)  ·  libgui 0.1  ·  wgpu backend", d.windows), s, c);
@@ -502,6 +575,7 @@ impl ApplicationHandler for App {
             return;
         }
         self.dock.update();
+        self.update_theme();
         self.sync_windows(el);
         for w in self.wins.values() {
             if w.visible {
@@ -514,5 +588,16 @@ impl ApplicationHandler for App {
 fn main() {
     let event_loop = EventLoop::new().expect("event loop");
     let mut app = App::new();
+    // Optional startup look: LIBGUI_THEME=dark|midnight|light|unity|blender|custom,
+    // LIBGUI_DENSITY=compact|regular|touch.
+    if let Ok(name) = std::env::var("LIBGUI_THEME") {
+        let name = name.to_lowercase();
+        if let Some(i) = THEMES.iter().position(|(label, _)| label.to_lowercase().starts_with(&name)) {
+            app.demo.theme_choice = i;
+        }
+    }
+    if let Ok(d) = std::env::var("LIBGUI_DENSITY") {
+        app.demo.density_choice = ["theme", "compact", "regular", "touch"].iter().position(|x| *x == d.to_lowercase()).unwrap_or(0);
+    }
     event_loop.run_app(&mut app).expect("run");
 }

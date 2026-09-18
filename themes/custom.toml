@@ -1,0 +1,31 @@
+# Your playground. Edit and save: the demo reloads this file live when
+# "Custom file" is selected in the Appearance panel. Errors show in the panel
+# and the console; the last good theme stays active.
+#
+# Colours: "#rgb" "#rrggbb" "#rrggbbaa" "transparent", a palette name
+# ("accent"), name@alpha ("accent@0.3"), or mix(a, b, t).
+# Only keys you write change; typos are reported, not ignored.
+# Full list of keys: click "Export resolved theme" and open themes/_exported.toml.
+
+name = "Custom"
+extends = "midnight"      # dark | midnight | light
+density = "regular"       # compact | regular | touch
+
+[palette]
+accent = "#e0567b"
+accent_hover = "#ec6f91"
+accent_active = "#c64467"
+
+[metrics]
+radius = 9
+radius_large = 14
+
+[button_primary]
+shadow = { color = "accent@0.45", offset_y = 3, blur = 10 }
+
+[tab]
+accent_height = 3
+fill_hover = "mix(surface, accent, 0.15)@0.6"
+
+[selectable]
+indicator_width = 4

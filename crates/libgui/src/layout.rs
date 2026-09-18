@@ -153,6 +153,7 @@ pub(crate) struct Scroll {
     /// Scrollbar visibility 0..1 and hover/drag emphasis 0..1 (animated by Ui).
     pub visible: f32,
     pub hover: f32,
+    pub style: crate::ScrollbarStyle,
 }
 
 pub(crate) struct Node {
@@ -381,7 +382,7 @@ mod tests {
     fn scroll_container_offsets_children_and_reports_content() {
         let mut nodes = vec![Node::new(Id::new("root"), Layout::column())];
         let mut sc = Node::new(Id::new("sc"), Layout::column().height(Size::Grow(1.0)).gap(2.0));
-        sc.scroll = Some(Scroll { offset: 30.0, bar_id: Id::new("bar"), visible: 0.0, hover: 0.0 });
+        sc.scroll = Some(Scroll { offset: 30.0, bar_id: Id::new("bar"), visible: 0.0, hover: 0.0, style: crate::Theme::dark().scrollbar });
         nodes.push(sc);
         nodes[0].children.push(1);
         let rows: Vec<usize> = (0..10).map(|_| leaf(&mut nodes, 1, Size::Grow(1.0), Size::Fixed(20.0), Vec2::ZERO)).collect();

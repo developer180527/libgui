@@ -174,7 +174,8 @@ impl Ui {
     /// Single-line text field. `key` must be unique within the container.
     pub fn text_input(&mut self, key: &str, text: &mut String, placeholder: &str) -> TextResponse {
         let id = self.make_id(("text_input", key));
-        let (size, h, pad) = (self.theme.font_size, self.theme.control_height, self.theme.space * 1.25);
+        let st_style = self.theme.text_input;
+        let (size, h, pad) = (self.theme.metrics.font_size, st_style.height, st_style.padding_x);
         let resp = self.interact(id);
         if resp.hovered {
             self.cursor = Cursor::Text;
@@ -284,29 +285,29 @@ impl Ui {
 
         let layout = Layout::leaf(Size::Grow(1.0), Size::Fixed(h)).padding(Insets::xy(pad, 0.0));
         self.add_leaf(id, layout, Vec2::new(40.0, line_h), true, move |p, r| {
-            let t = p.theme;
-            let radius = t.radius;
+            let s = st_style;
+            let radius = s.radius;
             if focus_t > 0.01 {
-                p.rect_bordered(r.expand(3.0), Color::TRANSPARENT, radius + 3.0, 2.0, t.accent.with_alpha(0.28 * focus_t));
+                p.rect_bordered(r.expand(3.0), Color::TRANSPARENT, radius + 3.0, 2.0, s.focus_ring.with_alpha(s.focus_ring.a * focus_t));
             }
-            let border = t.border_strong.lerp(t.text_faint, hover_t * 0.5).lerp(t.accent, focus_t);
-            p.rect_bordered(r, t.bg_inset, radius, 1.0, border);
+            let border = s.border.lerp(s.border_hover, hover_t).lerp(s.border_focus, focus_t);
+            p.rect_bordered(r, s.fill, radius, 1.0, border);
 
             let inner = r.shrink(pad, 0.0, pad, 0.0);
             let ty = r.center().y - line_h * 0.5;
             let x0 = inner.x - scroll;
             p.draw.push_clip(inner.expand(1.0));
             if sel.1 > sel.0 {
-                let c = if focus_t > 0.5 { t.accent.with_alpha(0.35) } else { t.text_faint.with_alpha(0.3) };
+                let c = if focus_t > 0.5 { s.selection } else { s.selection.with_alpha(s.selection.a * 0.5) };
                 p.rect(Rect::new(x0 + sel.0, ty, sel.1 - sel.0, line_h), c, 2.0);
             }
             if shown.is_empty() {
-                p.text(Vec2::new(inner.x, ty), size, t.text_faint, &placeholder);
+                p.text(Vec2::new(inner.x, ty), size, s.placeholder, &placeholder);
             } else {
-                p.text(Vec2::new(x0, ty), size, t.text, &shown);
+                p.text(Vec2::new(x0, ty), size, s.text, &shown);
             }
             if caret_on {
-                p.rect(Rect::new((x0 + cx).round() - 0.75, ty - 1.0, 1.5, line_h + 2.0), t.accent_hover, 0.75);
+                p.rect(Rect::new((x0 + cx).round() - 0.75, ty - 1.0, 1.5, line_h + 2.0), s.caret, 0.75);
             }
             p.draw.pop_clip();
         });
