@@ -195,6 +195,13 @@ mod tests {
     /// Today the std hasher is the same algorithm; this guards the port. If a
     /// future Rust changes `DefaultHasher`, delete this test: `ids_are_pinned`
     /// is the real guarantee.
+    ///
+    /// Little-endian only, and that is the whole reason [`StableHasher`]
+    /// exists. `std`'s `Hash` impls feed integers in *native* byte order, so on
+    /// a big-endian target `DefaultHasher` gives different values for the same
+    /// input while `StableHasher` does not. Verified: on powerpc64 in CI this
+    /// assertion fails and `ids_are_pinned` still passes.
+    #[cfg(target_endian = "little")]
     #[test]
     fn matches_std_sip13_on_this_toolchain() {
         use std::collections::hash_map::DefaultHasher;

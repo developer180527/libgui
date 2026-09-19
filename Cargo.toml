@@ -4,9 +4,13 @@ members = ["crates/libgui", "crates/libgui_winit", "crates/libgui_shaders", "cra
 
 [workspace.package]
 edition = "2021"
-# Set by naga (a build-dependency of libgui_shaders), not by our own code.
-# `libgui` alone with --no-default-features builds on 1.82.
-rust-version = "1.87"
+# The floor is platform-dependent and comes from dependencies, not our code:
+# wgpu-hal pulls `ordered-float` (needs 1.90) through
+# `wgpu-core-deps-windows-linux-android`, so Linux, Windows and Android need
+# 1.90 while macOS does not pull it at all. This is the highest, so it is what
+# the GPU-backed crates declare. `libgui` and `libgui_nodes` use no GPU crate
+# and pin their own, lower floor.
+rust-version = "1.90"
 
 [workspace.dependencies]
 wgpu = "30"

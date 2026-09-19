@@ -22,7 +22,6 @@ jobs:
           - { name: linux-aarch64,  os: ubuntu-24.04-arm }
           - { name: windows-x86_64, os: windows-latest }
           - { name: macos-aarch64,  os: macos-latest }
-          - { name: macos-x86_64,   os: macos-13 }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -36,11 +35,11 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
             libxcursor-dev libxrandr-dev libxi-dev
-      - run: cargo build --workspace --all-targets
-      - run: cargo test --workspace
+      - run: cargo build --workspace --all-targets --locked
+      - run: cargo test --workspace --locked
       # The performance guards only assert their wall-clock budget in release;
       # a debug build is an order of magnitude slower and says nothing.
-      - run: cargo test --workspace --release
+      - run: cargo test --workspace --release --locked
 
   lint:
     runs-on: ubuntu-latest
@@ -54,7 +53,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libx11-dev libxkbcommon-dev libwayland-dev libxcursor-dev libxrandr-dev libxi-dev
-      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
   docs:
     name: docs · intra-doc links
@@ -63,23 +62,36 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo doc --workspace --no-deps --all-features
+      - run: cargo doc --workspace --no-deps --all-features --locked
         env:
           RUSTDOCFLAGS: -D warnings -D rustdoc::broken_intra_doc_links
 
-  msrv:
-    name: msrv · 1.87
+  # Two floors, because the dependency graph differs by platform: wgpu-hal pulls
+  # `ordered-float` (1.90) on Linux/Windows/Android but not on macOS. The
+  # GPU-free crates are the ones most people embed, so their lower floor is
+  # worth keeping honest separately.
+  msrv-core:
+    name: msrv · libgui 1.87
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.87
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check -p libgui -p libgui_nodes --all-targets --all-features --locked
+
+  msrv-workspace:
+    name: msrv · workspace 1.90
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.90
       - uses: Swatinem/rust-cache@v2
       - name: Linux system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libx11-dev libxkbcommon-dev libwayland-dev libxcursor-dev libxrandr-dev libxi-dev
-      - run: cargo check --workspace --all-targets
+      - run: cargo check --workspace --all-targets --locked
 
   features:
     name: feature combinations
@@ -90,12 +102,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # The core is meant to build with no features at all: no I/O, no font
       # backend, no TOML. Each of these catches a missing cfg.
-      - run: cargo check -p libgui --no-default-features
-      - run: cargo check -p libgui --no-default-features --features fontdue
-      - run: cargo check -p libgui --no-default-features --features theme-toml
-      - run: cargo check -p libgui --no-default-features --features theme-toml,theme-watch
-      - run: cargo check -p libgui --all-features
-      - run: cargo test -p libgui --all-features
+      - run: cargo check -p libgui --no-default-features --locked
+      - run: cargo check -p libgui --no-default-features --features fontdue --locked
+      - run: cargo check -p libgui --no-default-features --features theme-toml --locked
+      - run: cargo check -p libgui --no-default-features --features theme-toml,theme-watch --locked
+      - run: cargo check -p libgui --all-features --locked
+      - run: cargo test -p libgui --all-features --locked
 
   cross-build:
     name: builds for · ${{ matrix.target }}
@@ -116,8 +128,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # The core and the node editor are portable; the winit/wgpu hosts are not
       # checked here because each needs its own platform SDK.
-      - run: cargo check -p libgui --target ${{ matrix.target }} --all-features
-      - run: cargo check -p libgui_nodes --target ${{ matrix.target }}
+      - run: cargo check -p libgui --target ${{ matrix.target }} --all-features --locked
+      - run: cargo check -p libgui_nodes --target ${{ matrix.target }} --locked
 
   portability:
     name: 32-bit and big-endian
@@ -130,5 +142,9 @@ jobs:
       # `Id` promises the same value on every target, which is what makes a
       # saved layout portable. These run the pinned-id tests under emulation on
       # a 32-bit target and a big-endian one, which is the only real check of it.
+      #
+      # This has already earned its keep: on powerpc64 the pinned ids match,
+      # while `std`'s DefaultHasher does not agree with them — which is exactly
+      # why `Id` uses its own StableHasher rather than std's.
       - run: cross test -p libgui --no-default-features --features fontdue --target i686-unknown-linux-gnu
       - run: cross test -p libgui --no-default-features --features fontdue --target powerpc64-unknown-linux-gnu

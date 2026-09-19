@@ -13,10 +13,11 @@ cargo run -p libgui_shaders -- shaders_out   # export HLSL/MSL/GLSL/SPIR-V/WGSL
 
 | | |
 |---|---|
-| CI | build, test, clippy and docs on Linux (x86_64 + ARM), Windows, macOS (Intel + ARM) |
+| CI | build, test, clippy and docs on Linux (x86_64 + ARM), Windows, macOS (ARM) |
 | Also builds for | wasm32, Android (aarch64), iOS + simulator, 32-bit x86 |
-| Portability | `Id` values checked under emulation on a 32-bit and a big-endian target |
-| Rust | 1.87 (set by `naga`; `libgui` alone with `--no-default-features` builds on 1.82) |
+| Portability | `Id` values verified under emulation on 32-bit **and big-endian** targets |
+| Not tested | Android and iOS run on device, physical iPad, mixed-DPI multi-monitor docking |
+| Rust | **1.90** for the GPU crates (`wgpu-hal` on Linux/Windows/Android), **1.87** for `libgui` and `libgui_nodes` |
 | Licence | **not yet chosen** — see `LICENSING.md` |
 | Version | 0.1.0, pre-1.0: the API still changes between releases |
 
