@@ -366,11 +366,10 @@ ui.scroll_area_with("ruler", ScrollOptions::horizontal(Size::Grow(1.0), Size::Fi
   nudge the vertical offset. A vertical-only area ignores wide content, so one long label cannot make
   a column scroll sideways. `Grow` children fill the *content* box, so rows in a horizontally
   scrolling area span its whole width.
-- On an area that only scrolls sideways, a plain vertical wheel scrolls it: what a trackpad user
-  expects on a timeline.
-- Wheel/trackpad goes to the innermost scroll area under the mouse (nesting works). A wheel *notch*
-  eases in over a few frames; a trackpad's pixel deltas are already smooth and are applied in full,
-  the same frame, because easing them again only makes the list trail your fingers.
+- On an area that only scrolls sideways, a plain vertical scroll scrolls it: what you expect over a
+  timeline.
+- Scrolling goes to the innermost scroll area under the pointer (nesting works).
+- **No device is named anywhere in the scroll logic.** See below.
 - **A moving scroll runs sub-pixel; a still one sits on the pixel grid.** At rest the offset is
   rounded to whole physical pixels, so text is crisp and boxes have hard edges. The moment it moves,
   both the offset *and* the text baselines inside it stop rounding. That pairing matters: the first
@@ -380,6 +379,58 @@ ui.scroll_area_with("ruler", ScrollOptions::horizontal(Size::Grow(1.0), Size::Fi
   switch together. Moving text is resampled by the shader's bilinear fetch, which is invisible in
   motion and exact again the moment the scroll stops.
 - Overlay scrollbar fades in on hover, widens under the pointer; drag the thumb or click the track to jump.
+
+### Smoothing is policy, not a guess about your hardware
+
+A trackpad, a high-resolution wheel, a trackball, a joystick axis the host samples once a frame, a
+jog dial, a MIDI encoder, an accessibility switch — they all arrive as `InputEvent::Wheel`, and
+libgui neither knows nor asks which one it is. The only question it puts to the host is what one
+unit of the delta *means*:
+
+| `WheelUnit` | what it says | default handling |
+|---|---|---|
+| `Pixel` | **continuous** — already logical px, from something that moves smoothly | applied in full, the frame it arrives |
+| `Line` | **stepped** — one event is a whole detent | eased over a few frames |
+| `Page` | **stepped** — one event is a page | eased over a few frames |
+
+That is a property of the *signal*, and the host is the only thing in the stack that knows it. A
+free-spinning wheel reporting eighths of a detent should send `Pixel`; scroll driven from a D-pad
+should send `Line`. Nothing further down has to recognise a device.
+
+What the UI then does with each is entirely the app's, in `ScrollConfig`:
+
+```rust
+pub struct ScrollConfig {
+    pub line: f32,              // logical px per notch          (24)
+    pub page: f32,              // logical px per page          (480)
+    pub continuous: Smoothing,  // Instant
+    pub stepped: Smoothing,     // Eased { rate: 20.0 }
+    pub friction: f32,          // fling deceleration, 1/s      (3.2)
+    pub fling_cutoff: f32,      // a fling slower than this has stopped (5 px/s)
+}
+pub enum Smoothing { Instant, Eased { rate: f32 } }
+```
+
+```rust
+ui.scroll.continuous = Smoothing::Eased { rate: 30.0 };   // ease everything, globally
+ui.scroll.line = 3.0 * row_height;                        // three rows a notch
+
+// or per area — a timeline need not feel like an inspector
+let opts = ScrollOptions {
+    config: Some(ScrollConfig { stepped: Smoothing::Instant, ..ui.scroll }),
+    ..ScrollOptions::horizontal(Size::Grow(1.0), Size::Fixed(28.0))
+};
+```
+
+`Eased { rate }` closes that fraction of the remaining distance per second, so it is frame-rate
+independent, and it ends when it has less than half a *physical* pixel left to travel. Two things
+override the config, because they are direct manipulation rather than a signal to interpret:
+dragging a scrollbar thumb, and a finger on the glass (and the fling it throws). Those always track
+exactly.
+
+A scroll area remembers which smoothing is driving its current approach, so an ease a notch started
+carries on through the input-free frames that follow it rather than snapping the moment the events
+stop.
 - Clipped hit-testing: widgets scrolled out of view can't be hovered or clicked.
 - `stick_to_end` keeps logs/consoles pinned to the newest line while at the bottom.
 
@@ -580,7 +631,7 @@ xcrun simctl launch booted com.libgui.demo
 - **Touch input:** set `Input::pointer_kind = Touch` and fill `Input::touches`. libgui derives the primary
   pointer, has no hover on touch, and tells taps from scrolls: moving past `ui.touch_slop` (8 px) on
   anything that isn't a drag widget scrolls the innermost scroll area instead, cancelling the tap.
-  Flings coast with `ui.scroll_friction`. Drag widgets (sliders, splitters, viewport, tabs, text
+  Flings coast with `ui.scroll.friction`. Drag widgets (sliders, splitters, viewport, tabs, text
   selection) use `interact_drag` and keep the finger.
 - **Gestures:** two fingers give `ui.gesture()` (pan + zoom); widgets under them get
   `Response::pinch` / `pan2`. A second finger cancels a pending tap.
@@ -627,7 +678,7 @@ let out = ui.end_frame();          // draw data for your Backend + out.platform:
 // wants_pointer / wants_keyboard, pointer_lock, repaint_after (None = sleep until input)
 ```
 
-- **Events:** pointer position and raw `PointerDelta` (unaccelerated), five buttons, wheel (pixel/line/page),
+- **Events:** pointer position and raw `PointerDelta` (unaccelerated), five buttons, wheel (continuous px, or stepped lines/pages),
   touch, physical `Key`s (US-layout names, like HID usages) plus separate `Text`, modifiers, clipboard, focus loss.
 - **Timing lives in the core:** a press and release inside one frame still clicks, fingers that tap between
   frames still tap, modifiers are derived from modifier keys when a host only sends keys (raw HID),

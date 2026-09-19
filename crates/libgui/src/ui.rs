@@ -3,6 +3,7 @@ use crate::text_edit::TextState;
 use crate::hash::{FxMap, FxSet};
 use crate::input::UiEvent;
 use crate::input_state::InputState;
+use crate::scroll::{ScrollConfig, Smoothing};
 use crate::{Align, Axis, Atlas, Color, Cursor, DrawList, FontId, Fonts, FrameInfo, FrameInput, Gesture, Id, InputEvent, Insets, Key, KeyBindings, Layout, Painter, PlatformOutput, PointerButton, PointerKind, Rect, Shortcut, Size, Theme, Transform, UiAction, Vec2};
 use std::hash::Hash;
 
@@ -76,6 +77,9 @@ pub struct ScrollOptions {
     pub padding: Insets,
     /// Keep following the end while scrolled to the bottom (logs, consoles).
     pub stick_to_end: bool,
+    /// Override [`Ui::scroll`] for this area: a timeline and an inspector do
+    /// not have to feel the same.
+    pub config: Option<ScrollConfig>,
 }
 
 impl ScrollOptions {
@@ -89,6 +93,7 @@ impl ScrollOptions {
             gap: 0.0,
             padding: Insets::all(0.0),
             stick_to_end: false,
+            config: None,
         }
     }
 
@@ -270,6 +275,8 @@ pub struct ListOptions {
     pub overscan: usize,
     /// Keep following the end while scrolled to the bottom (logs, consoles).
     pub stick_to_end: bool,
+    /// Override [`Ui::scroll`] for this list. See [`ScrollConfig`].
+    pub config: Option<ScrollConfig>,
 }
 
 impl ListOptions {
@@ -281,6 +288,7 @@ impl ListOptions {
             padding: Insets::all(0.0),
             overscan: 2,
             stick_to_end: false,
+            config: None,
         }
     }
 }
@@ -294,6 +302,10 @@ struct ScrollAxis {
     viewport: f32,
     /// Touch fling velocity (px/s).
     velocity: f32,
+    /// How the offset is currently closing on the target. Set when input
+    /// arrives and kept until the next input, so an ease a wheel notch started
+    /// is not cut short by the input-free frames that follow it.
+    smoothing: Smoothing,
     /// The offset handed to layout last frame. A scroll is "moving" when this
     /// frame's differs, which is the only reliable test: a trackpad scroll
     /// settles within the frame, so `offset == target` even mid-gesture.
@@ -305,49 +317,57 @@ impl ScrollAxis {
         (self.content - self.viewport).max(0.0)
     }
 
-    /// Wheel, fling and smoothing for one axis. Returns whether the offset
-    /// should track the target exactly this frame (a finger, a trackpad),
-    /// rather than easing towards it (a wheel notch).
+    /// Move the destination by this frame's input, and pick how the offset
+    /// should follow it.
     ///
-    /// `wheel` is the whole wheel delta; `precise` is the part of it that came
-    /// in pixels. Easing a trackpad's already-smooth stream only adds lag.
-    fn update(&mut self, wheel: f32, precise: f32, touch: Option<f32>, friction: f32, dt: f32) -> bool {
+    /// `continuous` and `stepped` are this frame's delta in logical px, split
+    /// by what the host said the signal *is* — not by what produced it. A
+    /// finger on the glass and a fling in progress are continuous by
+    /// construction and always track exactly; easing them would make the
+    /// content trail the thing moving it.
+    fn update(&mut self, continuous: f32, stepped: f32, touch: Option<f32>, cfg: &ScrollConfig, dt: f32) {
         let max = self.max();
-        if wheel != 0.0 {
-            self.target -= wheel;
+        let delta = continuous + stepped;
+        if delta != 0.0 {
+            self.target -= delta;
             self.velocity = 0.0;
+            // A frame carrying a step is smoothed as a step: the notch is the
+            // big number, and it is the part that needs turning into motion.
+            self.smoothing = if stepped != 0.0 { cfg.stepped } else { cfg.continuous };
         }
-        let mut direct = precise != 0.0 && wheel == precise;
         match touch {
             Some(d) => {
                 self.target = (self.target - d).clamp(0.0, max);
                 self.velocity += (-d / dt - self.velocity) * 0.4;
-                direct = true;
+                self.smoothing = Smoothing::Instant;
             }
-            None if self.velocity.abs() > 5.0 => {
+            None if self.velocity.abs() > cfg.fling_cutoff => {
                 self.target += self.velocity * dt;
-                self.velocity *= (-friction * dt).exp();
+                self.velocity *= (-cfg.friction * dt).exp();
                 if self.target <= 0.0 || self.target >= max {
                     self.velocity = 0.0;
                 }
-                direct = true;
+                self.smoothing = Smoothing::Instant;
             }
             None => self.velocity = 0.0,
         }
-        direct
     }
 
-    fn settle(&mut self, direct: bool, dt: f32) {
+    /// `scale` is physical px per logical px: an ease ends when it has less
+    /// than half a physical pixel left to travel, because nothing it does
+    /// after that can reach the screen.
+    fn settle(&mut self, dt: f32, scale: f32) {
         let max = self.max();
         self.target = self.target.clamp(0.0, max);
-        if direct {
-            self.offset = self.target;
-        } else {
-            let k = 1.0 - (-20.0 * dt).exp();
-            self.offset += (self.target - self.offset) * k;
-            if (self.target - self.offset).abs() < 0.5 {
-                self.offset = self.target;
+        match self.smoothing {
+            Smoothing::Eased { rate } if rate > 0.0 => {
+                let k = 1.0 - (-rate * dt).exp();
+                self.offset += (self.target - self.offset) * k;
+                if (self.target - self.offset).abs() * scale < 0.5 {
+                    self.offset = self.target;
+                }
             }
+            _ => self.offset = self.target,
         }
         self.offset = self.offset.clamp(0.0, max);
     }
@@ -451,8 +471,9 @@ pub struct Ui {
     // Touch
     /// Finger travel (logical px) before a tap turns into a scroll.
     pub touch_slop: f32,
-    /// Fling deceleration (1/s): higher stops sooner.
-    pub scroll_friction: f32,
+    /// How input becomes scroll motion, for every area that does not override
+    /// it through [`ScrollOptions::config`]. See [`ScrollConfig`].
+    pub scroll: ScrollConfig,
     active_drag: bool,
     touch_press: Option<Vec2>,
     touch_candidate: Option<Id>,
@@ -558,7 +579,7 @@ impl Ui {
             top_hits: Vec::new(),
             overlays: Vec::new(),
             touch_slop: 8.0,
-            scroll_friction: 3.2,
+            scroll: ScrollConfig::default(),
             active_drag: false,
             touch_press: None,
             touch_candidate: None,
@@ -944,6 +965,15 @@ impl Ui {
     /// Start a frame: applies the events pushed since the last one.
     pub fn begin_frame(&mut self, info: FrameInfo) {
         let mut input = self.input_state.frame(info);
+        // Scroll units reach `FrameInput` unconverted, because what a notch is
+        // worth is the app's to set. Everything that just wants a number in px
+        // — a canvas's zoom, `Response::scroll` — reads the total; a scroll
+        // area reads the three apart, because how a delta is smoothed depends
+        // on which one it came in through.
+        let cfg = self.scroll;
+        let steps = |lines: f32, pages: f32| cfg.steps_to_px(lines, pages);
+        input.scroll = input.scroll_px
+            + Vec2::new(steps(input.scroll_lines.x, input.scroll_pages.x), steps(input.scroll_lines.y, input.scroll_pages.y));
         self.locked = std::mem::take(&mut self.lock_request);
         self.animating = false;
         let touch = input.pointer_kind == PointerKind::Touch;
@@ -1538,35 +1568,41 @@ impl Ui {
         let inside = self.scroll_target == Some(id);
         let dt = self.input.dt.max(1e-4);
         let touching = self.touch_scroll == Some(id);
-        let friction = self.scroll_friction;
+        let cfg = opts.config.unwrap_or(self.scroll);
 
-        // A wheel with no sideways component still scrolls sideways when the
-        // area only scrolls that way, which is what a trackpad user expects
-        // on a timeline.
-        let (wheel, precise) = if inside { (self.input.scroll, self.input.scroll_precise) } else { (Vec2::ZERO, Vec2::ZERO) };
-        let sideways = opts.scroll_x && !opts.scroll_y && wheel.x == 0.0;
-        let (wheel_x, precise_x) = if sideways { (wheel.y, precise.y) } else { (wheel.x, precise.x) };
+        // The two kinds of signal stay apart all the way down: the host said
+        // which is which, `cfg` says what each one does, and nothing here
+        // knows or cares what hardware is on the other end.
+        let zero = (Vec2::ZERO, Vec2::ZERO, Vec2::ZERO);
+        let (px, lines, pages) =
+            if inside { (self.input.scroll_px, self.input.scroll_lines, self.input.scroll_pages) } else { zero };
+        let stepped = Vec2::new(cfg.steps_to_px(lines.x, pages.x), cfg.steps_to_px(lines.y, pages.y));
+        // A scroll with no sideways component still scrolls an area that only
+        // goes sideways: what you expect when you scroll over a timeline.
+        let sideways = opts.scroll_x && !opts.scroll_y && px.x == 0.0 && stepped.x == 0.0;
+        let (px_x, stepped_x) = if sideways { (px.y, stepped.y) } else { (px.x, stepped.x) };
         let touch = touching.then_some(self.mouse_delta);
 
-        let mut direct_x = false;
-        let mut direct_y = false;
         if opts.scroll_x {
-            direct_x = st.x.update(wheel_x, precise_x, touch.map(|d| d.x), friction, dt);
+            st.x.update(px_x, stepped_x, touch.map(|d| d.x), &cfg, dt);
         }
         if opts.scroll_y {
-            direct_y = st.y.update(wheel.y, precise.y, touch.map(|d| d.y), friction, dt);
+            st.y.update(px.y, stepped.y, touch.map(|d| d.y), &cfg, dt);
         }
         if opts.stick_to_end && at_end && st.y.max() > 0.0 {
             st.y.target = f32::INFINITY;
         }
 
+        // Dragging a thumb is a direct manipulation: it tracks the pointer,
+        // whatever the config says about the wheel.
         let by = self.interact_drag(bar_y);
         let bx = self.interact_drag(bar_x);
-        direct_y |= drag_bar(&mut st.y, &by, Axis::Y);
-        direct_x |= drag_bar(&mut st.x, &bx, Axis::X);
+        drag_bar(&mut st.y, &by, Axis::Y);
+        drag_bar(&mut st.x, &bx, Axis::X);
 
-        st.x.settle(direct_x, self.input.dt);
-        st.y.settle(direct_y, self.input.dt);
+        let scale = self.input.scale.max(0.01);
+        st.x.settle(self.input.dt, scale);
+        st.y.settle(self.input.dt, scale);
 
         // A scroll standing still sits on the physical pixel grid: crisp text,
         // hard box edges. While it moves, the offset keeps its sub-pixel part
@@ -1578,7 +1614,6 @@ impl Ui {
         // nothing, a whole pixel, nothing, a whole pixel". `offset == target`
         // is no use as a test — a trackpad scroll settles within the frame —
         // so the test is against the offset handed to layout last frame.
-        let scale = self.input.scale.max(0.01);
         let snap = |v: f32| (v * scale).round() / scale;
         let moving = st.x.offset != st.x.applied || st.y.offset != st.y.applied;
         if !moving {
@@ -1711,6 +1746,7 @@ impl Ui {
             gap: opts.gap,
             padding: opts.padding,
             stick_to_end: opts.stick_to_end,
+            config: opts.config,
             ..ScrollOptions::new(opts.height)
         };
         let mut built = 0..0;
@@ -1945,16 +1981,16 @@ fn paint(nodes: &mut [Node], i: usize, p: &mut Painter, sink: &mut HitSink) {
     }
 }
 
-/// Drag or click a scrollbar track. Returns true if the offset should follow
-/// the target exactly this frame.
-fn drag_bar(st: &mut ScrollAxis, bar: &Response, axis: Axis) -> bool {
+/// Drag or click a scrollbar track. Direct manipulation: the thumb tracks the
+/// pointer exactly, whatever smoothing the config asks of the wheel.
+fn drag_bar(st: &mut ScrollAxis, bar: &Response, axis: Axis) {
     let max = st.max();
     let (track_len, track_start, pointer) = match axis {
         Axis::Y => (bar.rect.h, bar.rect.y, bar.mouse_pos.y),
         Axis::X => (bar.rect.w, bar.rect.x, bar.mouse_pos.x),
     };
     if max <= 0.0 || track_len <= 0.0 {
-        return false;
+        return;
     }
     let thumb = (track_len * st.viewport / st.content).max(24.0).min(track_len);
     let travel = (track_len - thumb).max(1.0);
@@ -1966,6 +2002,7 @@ fn drag_bar(st: &mut ScrollAxis, bar: &Response, axis: Axis) -> bool {
             let t = (pointer - track_start - thumb * 0.5) / travel;
             st.target = t.clamp(0.0, 1.0) * max;
             st.offset = st.target;
+            st.smoothing = Smoothing::Instant;
         }
     }
     if bar.active {
@@ -1974,9 +2011,8 @@ fn drag_bar(st: &mut ScrollAxis, bar: &Response, axis: Axis) -> bool {
             Axis::X => bar.drag_delta.x,
         };
         st.target += d * max / travel;
-        return true;
+        st.smoothing = Smoothing::Instant;
     }
-    false
 }
 
 /// Overlay scrollbars: thin, fading in while the pointer is over the area and
@@ -2212,6 +2248,121 @@ mod tests {
         assert!(((t1 - t2) - (r1 - r2)).abs() < 1e-3, "text and its row box moved by different amounts");
         assert!(((t2 - t3) - (r2 - r3)).abs() < 1e-3, "text and its row box moved by different amounts");
         assert!((r2 - r3 - 0.25).abs() < 1e-3, "a quarter-pixel scroll moved the row by {}", r2 - r3);
+    }
+
+    /// Everything that reads a scroll as a plain number in px — a canvas's
+    /// zoom, `Response::scroll` — sees every unit, converted through the
+    /// config. Splitting the units apart for the scroll areas once left this
+    /// permanently zero, and nothing noticed.
+    #[test]
+    fn frame_scroll_totals_every_unit_in_px() {
+        use crate::WheelUnit::{Line, Page, Pixel};
+        let read = |ui: &mut Ui| -> (Vec2, f32) {
+            ui.begin_frame(FrameInfo::default());
+            let id = ui.make_id("probe");
+            let r = ui.interact(id);
+            ui.add_leaf(id, Layout::leaf(Size::Grow(1.0), Size::Grow(1.0)), Vec2::ZERO, true, |_, _| {});
+            let total = ui.input.scroll;
+            let _ = ui.end_frame();
+            (total, r.scroll.y)
+        };
+        let mut ui = ui();
+        ui.push(InputEvent::PointerMoved { pos: Vec2::new(100.0, 100.0) });
+        read(&mut ui);
+
+        ui.push(InputEvent::Wheel { delta: Vec2::new(0.0, -7.5), unit: Pixel });
+        ui.push(InputEvent::Wheel { delta: Vec2::new(0.0, -2.0), unit: Line });
+        ui.push(InputEvent::Wheel { delta: Vec2::new(-1.0, 0.0), unit: Page });
+        let (total, resp) = read(&mut ui);
+        assert_eq!(total.y, -7.5 - 2.0 * 24.0, "lines missing from the px total");
+        assert_eq!(total.x, -480.0, "pages missing from the px total");
+        assert_eq!(resp, total.y, "Response::scroll disagrees with the frame total");
+
+        // And it follows the config, not a constant.
+        ui.scroll.line = 10.0;
+        ui.push(InputEvent::Wheel { delta: Vec2::new(0.0, -2.0), unit: Line });
+        assert_eq!(read(&mut ui).0.y, -20.0);
+    }
+
+    /// Smoothing is policy, not a guess about the hardware. The host says
+    /// whether a delta is continuous or stepped; the app says what happens to
+    /// each; and every combination of the two behaves the way it was asked to.
+    #[test]
+    fn smoothing_is_configurable_per_signal_and_per_area() {
+        use crate::WheelUnit::{Line, Pixel};
+        let frame = |ui: &mut Ui, d: f32, u: crate::WheelUnit, s: f32| scroll_frame(ui, d, u, s).0;
+
+        // Continuous input, eased on request: it must *not* arrive in full.
+        let mut ui = ui();
+        ui.scroll.continuous = Smoothing::Eased { rate: 20.0 };
+        let y0 = (0..3).map(|_| frame(&mut ui, 0.0, Pixel, 1.0)).last().unwrap();
+        let step = y0 - frame(&mut ui, -30.0, Pixel, 1.0);
+        assert!(step > 0.0 && step < 30.0, "an eased continuous scroll jumped {step} of 30");
+
+        // Stepped input, instant on request: a notch arrives whole.
+        let mut ui = self::ui();
+        ui.scroll.stepped = Smoothing::Instant;
+        let y0 = (0..3).map(|_| frame(&mut ui, 0.0, Line, 1.0)).last().unwrap();
+        assert_eq!(y0 - frame(&mut ui, -1.0, Line, 1.0), ui.scroll.line, "an instant notch was eased");
+
+        // A line is worth whatever the app says it is.
+        let mut ui = self::ui();
+        ui.scroll.line = 100.0;
+        ui.scroll.stepped = Smoothing::Instant;
+        let y0 = (0..3).map(|_| frame(&mut ui, 0.0, Line, 1.0)).last().unwrap();
+        assert_eq!(y0 - frame(&mut ui, -1.0, Line, 1.0), 100.0);
+
+        // An ease that a notch started keeps going on the frames after it,
+        // when no input arrives at all and `continuous` alone would snap.
+        let mut ui = self::ui();
+        for _ in 0..3 {
+            frame(&mut ui, 0.0, Line, 1.0);
+        }
+        let a = frame(&mut ui, -1.0, Line, 1.0);
+        let b = frame(&mut ui, 0.0, Line, 1.0);
+        let c = frame(&mut ui, 0.0, Line, 1.0);
+        assert!(a > b && b > c, "the ease stopped as soon as the input did: {a}, {b}, {c}");
+        assert!(c > -ui.scroll.line, "the ease jumped straight to the destination");
+
+        // Per area: two lists side by side, the same notch over each, and
+        // they answer differently because only one overrides the config.
+        let mut ui = self::ui();
+        let instant = ScrollConfig { stepped: Smoothing::Instant, ..ui.scroll };
+        let build = |ui: &mut Ui, notch: f32, over: f32| -> (f32, f32) {
+            ui.push(InputEvent::PointerMoved { pos: Vec2::new(20.0, over) });
+            if notch != 0.0 {
+                ui.push(InputEvent::Wheel { delta: Vec2::new(0.0, notch), unit: Line });
+            }
+            ui.begin_frame(FrameInfo { dt: 1.0 / 60.0, ..FrameInfo::default() });
+            for (n, cfg) in [("eased", None), ("instant", Some(instant))] {
+                let opts = ScrollOptions { config: cfg, ..ScrollOptions::new(Size::Fixed(100.0)) };
+                ui.scroll_area_with(n, opts, |ui| {
+                    for i in 0..40 {
+                        if i == 0 {
+                            let l = Layout::leaf(Size::Grow(1.0), Size::Fixed(24.0));
+                            ui.add_leaf(Id::new((n, "row")), l, Vec2::ZERO, false, |_, _| {});
+                        } else {
+                            let _ = ui.button(&format!("item {i}"));
+                        }
+                    }
+                });
+            }
+            let _ = ui.end_frame();
+            let y = |n| ui.rect_of(Id::new((n, "row"))).unwrap_or_default().y;
+            (y("eased"), y("instant"))
+        };
+        for _ in 0..3 {
+            build(&mut ui, 0.0, 50.0);
+        }
+        // One notch over the first area (y = 50), then one over the second
+        // (y = 150). Same event, same frame budget, different config.
+        let (e0, _) = build(&mut ui, 0.0, 50.0);
+        let (e1, _) = build(&mut ui, -1.0, 50.0);
+        let (_, i0) = build(&mut ui, 0.0, 150.0);
+        let (_, i1) = build(&mut ui, -1.0, 150.0);
+        let eased = e0 - e1;
+        assert!(eased > 0.0 && eased < 24.0, "the default area should ease its notch, moved {eased}");
+        assert_eq!(i0 - i1, 24.0, "the area overriding the config still eased its notch");
     }
 
     /// `segmented`'s thumb position is retained across frames, so it can point

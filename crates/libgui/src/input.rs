@@ -51,11 +51,15 @@ impl PointerButton {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WheelUnit {
-    /// Precise deltas (trackpads), logical px.
+    /// A **continuous** delta, already in logical px: the host is sampling
+    /// something that moves smoothly (a trackpad, a high-resolution wheel, a
+    /// trackball, a stick the host reads once a frame). The UI applies it as
+    /// given — there is nothing to interpolate.
     Pixel,
-    /// Mouse wheel notches.
+    /// A **stepped** delta in wheel notches: one event stands for a whole
+    /// detent, and turning that jump into motion is the UI's job.
     Line,
-    /// Page up/down steps.
+    /// A stepped delta in pages.
     Page,
 }
 
@@ -399,12 +403,18 @@ pub struct FrameInput {
     pub mouse_down: bool,
     pub buttons_down: [bool; 5],
     pub buttons_pressed: [bool; 5],
-    /// Scroll since last frame, logical px.
+    /// Every scroll this frame in logical px, through the `Ui`'s
+    /// [`ScrollConfig`](crate::ScrollConfig). Convenient for anything that
+    /// just wants a number (a canvas's zoom, a `Response`); scroll areas use
+    /// the three fields below, because how a delta is smoothed depends on
+    /// which of them it came in through.
     pub scroll: Vec2,
-    /// The part of `scroll` that arrived in pixels (trackpads, precise
-    /// wheels). It is already smooth, often with the OS's own momentum, so
-    /// scroll areas follow it exactly; the rest (wheel notches) is eased.
-    pub scroll_precise: Vec2,
+    /// Continuous scroll this frame ([`WheelUnit::Pixel`]), logical px.
+    pub scroll_px: Vec2,
+    /// Stepped scroll this frame, in wheel notches ([`WheelUnit::Line`]).
+    pub scroll_lines: Vec2,
+    /// Stepped scroll this frame, in pages ([`WheelUnit::Page`]).
+    pub scroll_pages: Vec2,
     /// Sum of `PointerDelta`s since last frame, if any arrived.
     pub raw_delta: Option<Vec2>,
     pub modifiers: Modifiers,
@@ -435,7 +445,9 @@ impl Default for FrameInput {
             buttons_down: [false; 5],
             buttons_pressed: [false; 5],
             scroll: Vec2::ZERO,
-            scroll_precise: Vec2::ZERO,
+            scroll_px: Vec2::ZERO,
+            scroll_lines: Vec2::ZERO,
+            scroll_pages: Vec2::ZERO,
             raw_delta: None,
             modifiers: Modifiers::default(),
             pointer_kind: PointerKind::Mouse,

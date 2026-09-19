@@ -13,10 +13,6 @@
 use crate::input::UiEvent;
 use crate::{FrameInfo, FrameInput, InputEvent, Key, KeyBindings, Modifiers, PointerKind, Touch, TouchPhase, UiAction, Vec2, WheelUnit};
 
-/// Logical px per wheel line / page.
-const LINE: f32 = 24.0;
-const PAGE: f32 = 480.0;
-
 #[derive(Clone, Copy, Default)]
 struct Button {
     down: bool,
@@ -116,17 +112,15 @@ impl InputState {
                     }
                     self.kind = PointerKind::Mouse;
                 }
-                InputEvent::Wheel { delta, unit } => {
-                    let k = match unit {
-                        WheelUnit::Pixel => 1.0,
-                        WheelUnit::Line => LINE,
-                        WheelUnit::Page => PAGE,
-                    };
-                    out.scroll += delta * k;
-                    if unit == WheelUnit::Pixel {
-                        out.scroll_precise += delta;
-                    }
-                }
+                // Units are kept apart: what one line or page is worth, and
+                // how each kind of signal is smoothed, is the app's to set
+                // (`ScrollConfig`) and can differ per scroll area, so the
+                // conversion cannot happen this early.
+                InputEvent::Wheel { delta, unit } => match unit {
+                    WheelUnit::Pixel => out.scroll_px += delta,
+                    WheelUnit::Line => out.scroll_lines += delta,
+                    WheelUnit::Page => out.scroll_pages += delta,
+                },
                 InputEvent::Touch { id, phase, pos } => {
                     self.kind = PointerKind::Touch;
                     match phase {
