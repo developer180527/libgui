@@ -17,7 +17,7 @@ cargo run -p libgui_shaders -- shaders_out   # export HLSL/MSL/GLSL/SPIR-V/WGSL
 | Also builds for | wasm32, Android (aarch64), iOS + simulator, 32-bit x86 |
 | Portability | `Id` values verified under emulation on 32-bit **and big-endian** targets |
 | Not tested | Android and iOS run on device, physical iPad, mixed-DPI multi-monitor docking |
-| Rust | **1.90** for the GPU crates (`wgpu-hal` on Linux/Windows/Android), **1.87** for `libgui` and `libgui_nodes` |
+| Rust | **1.90** for the GPU crates (`wgpu-hal` on Linux/Windows/Android), **1.87** for `libgui`, `libgui_nodes` and `libgui_soft` |
 | Licence | **not yet chosen** — see `LICENSING.md` |
 | Version | 0.1.0, pre-1.0: the API still changes between releases |
 
@@ -31,6 +31,7 @@ picker, general drag and drop, layout persistence. See the roadmap.
 | `crates/libgui` | Core. **No GPU code.** IDs, retained state, layout, input, theme, text, draw list, widgets, and the `Backend` trait. |
 | `crates/libgui_shaders` | The one UI shader. Authored in WGSL, validated + cross-compiled by naga at build time to HLSL (SM 5.1), MSL 2.0, GLSL 4.50, SPIR-V. |
 | `crates/libgui_wgpu` | `Backend` implementation for wgpu. Also the reference for writing your own. |
+| `crates/libgui_soft` | CPU reference `Backend`: renders a frame to an RGBA8 image, the same bytes on every machine. Golden-image tests live here. |
 | `crates/libgui_nodes` | Node-graph editing: nodes, ports, links, selection, routing. Built *on* libgui, not in it. |
 | `crates/libgui_demo` | winit host + editor layout + an "engine" scene rendered offscreen and shown via `ui.viewport`. |
 
@@ -583,6 +584,30 @@ where linear is 4x) rather than wall-clock times that flake on a loaded CI box.
 The one absolute budget is asserted in release only, since a debug build is an
 order of magnitude slower. `crates/libgui_bench` is the measuring tool;
 these are the regression guards.
+
+## Golden images
+
+Every scene in `crates/libgui_soft/tests/scenes/mod.rs` (widgets at rest, each
+interactive state, raw primitives, text, a scroll area mid-scroll) is rendered
+at 1x, 1.5x and 2x in the dark and light themes by `libgui_soft` and compared
+with the PNGs in `crates/libgui_soft/tests/golden/`.
+
+- **Deterministic.** The CPU renderer uses only IEEE-exact float operations,
+  and libgui's clock is the sum of frame `dt`s, so a scene renders to the same
+  bytes on any OS or CPU. The tolerance is one 8-bit step per channel.
+- **Faithful.** `libgui_wgpu/tests/parity.rs` renders every scene through the
+  real shader too, and fails if the two disagree. On Apple GPUs they are never
+  more than one step apart. It skips itself where there is no GPU adapter.
+- **Changing the look on purpose:**
+  `LIBGUI_BLESS=1 cargo test -p libgui_soft --test golden`, then review the
+  PNGs in the diff. On a mismatch, `<name>.actual.png` and `<name>.diff.png`
+  (changed pixels in magenta) are written under `target/tmp/golden/`.
+- **Adding a scene:** add it to `SCENES` and to the `goldens!` list; a test
+  fails if a scene has no golden test.
+
+Goldens check how things look, not how they move: motion and timing (scroll
+lag, fling, easing) stay as frame-trace tests like
+`trackpad_scroll_is_exact_and_offsets_land_on_pixels`.
 
 ## Roadmap (roughly in order)
 

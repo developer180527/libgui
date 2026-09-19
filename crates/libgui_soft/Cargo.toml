@@ -1,0 +1,13 @@
+[package]
+name = "libgui_soft"
+version = "0.1.0"
+edition.workspace = true
+# No GPU crate here, so this is lower than the workspace floor.
+rust-version = "1.87"
+description = "CPU reference backend for libgui: renders a frame to an RGBA8 image, bit-for-bit the same on every machine."
+
+[dependencies]
+libgui = { path = "../libgui" }
+
+[dev-dependencies]
+png = "0.18"
