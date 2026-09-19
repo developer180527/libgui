@@ -1,4 +1,4 @@
-use crate::layout::{self, Node, PaintFn, Scroll};
+use crate::layout::{self, Kids, Node, Scroll};
 use crate::text_edit::TextState;
 use crate::hash::{FxMap, FxSet};
 use crate::input::UiEvent;
@@ -409,7 +409,23 @@ pub struct Ui {
     pub(crate) pressed: bool,
     pub(crate) released: bool,
     pub(crate) nodes: Vec<Node>,
-    pub(crate) stack: Vec<usize>,
+    /// Child indices, contiguous per node; `Node.children` is a range into it.
+    /// Built through `open_kids`, which is a stack: a container's children sit
+    /// at the top of it until the container closes, because any container
+    /// opened *inside* it has already taken its own children away again.
+    kids: Vec<u32>,
+    open_kids: Vec<u32>,
+    /// Open containers, innermost last: (node, where its children start in
+    /// `open_kids`).
+    pub(crate) stack: Vec<(usize, u32)>,
+    /// Layers hang off the root while other containers are open, so they
+    /// cannot go through `open_kids`. Appended to the root's children when it
+    /// closes, which is also where they belong in paint order.
+    root_kids: Vec<u32>,
+    /// Working memory for `solve` and `paint`, kept across frames.
+    scratch: crate::layout::Scratch,
+    /// This frame's paint closures, stored inline rather than boxed one by one.
+    paints: crate::paint_arena::PaintArena,
     // Retained state
     rects: FxMap<Id, Rect>,
     hits: Vec<(Id, Rect)>,
@@ -549,7 +565,12 @@ impl Ui {
             pressed: false,
             released: false,
             nodes: Vec::new(),
+            kids: Vec::new(),
+            open_kids: Vec::new(),
             stack: Vec::new(),
+            root_kids: Vec::new(),
+            scratch: crate::layout::Scratch::default(),
+            paints: crate::paint_arena::PaintArena::default(),
             rects: FxMap::default(),
             hits: Vec::new(),
             hovered: None,
@@ -733,10 +754,10 @@ impl Ui {
         n.absolute = Some(rect);
         n.z = Layer::Popup;
         n.interactive = true;
-        n.paint = Some(Box::new(|_: &mut Painter, _: Rect| {}) as crate::layout::PaintFn);
+        n.paint = Some(self.paints.push(|_: &mut Painter, _: Rect| {}));
         let idx = self.nodes.len();
         self.nodes.push(n);
-        self.nodes[0].children.push(idx);
+        self.root_kids.push(idx as u32);
     }
 
     /// Show `body` in a popup panel if `id` is open, positioned near its anchor
@@ -772,18 +793,18 @@ impl Ui {
         n.absolute = Some(rect);
         n.z = Layer::Popup;
         n.clip = true;
-        n.paint = Some(Box::new(move |p: &mut Painter, r: Rect| {
+        n.paint = Some(self.paints.push(move |p: &mut Painter, r: Rect| {
             p.shadow(r.translate(0.0, 6.0), s.radius, 24.0, p.theme.palette.shadow);
             p.rect_bordered(r, s.fill, s.radius, 1.0, s.border);
-        }) as crate::layout::PaintFn);
+        }));
         let idx = self.nodes.len();
         self.nodes.push(n);
-        self.nodes[0].children.push(idx);
+        self.root_kids.push(idx as u32);
 
         self.popup_stack.push(id);
-        self.stack.push(idx);
+        self.open(idx);
         let r = body(self);
-        self.stack.pop();
+        self.close();
         self.popup_stack.pop();
         Some(r)
     }
@@ -831,14 +852,14 @@ impl Ui {
         let mut n = Node::new(id, Layout::leaf(Size::Fixed(w), Size::Fixed(h)));
         n.absolute = Some(rect);
         n.z = Layer::Tooltip;
-        n.paint = Some(Box::new(move |p: &mut Painter, r: Rect| {
+        n.paint = Some(self.paints.push(move |p: &mut Painter, r: Rect| {
             p.shadow(r.translate(0.0, 3.0), s.radius, 12.0, p.theme.palette.shadow);
             p.rect_bordered(r, s.fill, s.radius, 1.0, s.border);
             p.text_left(r.shrink(pad.left, 0.0, pad.right, 0.0), size, s.text, &text);
-        }) as crate::layout::PaintFn);
+        }));
         let idx = self.nodes.len();
         self.nodes.push(n);
-        self.nodes[0].children.push(idx);
+        self.root_kids.push(idx as u32);
     }
 
     /// The popup whose body is being built, if any. A submenu opens as a child
@@ -1054,6 +1075,10 @@ impl Ui {
         self.cursor = Cursor::Default;
         self.input = input;
         self.nodes.clear();
+        self.paints.clear();
+        self.kids.clear();
+        self.open_kids.clear();
+        self.root_kids.clear();
         self.stack.clear();
         self.seen.clear();
         self.dup_next.clear();
@@ -1073,14 +1098,19 @@ impl Ui {
         let s = self.input.screen_size;
         let root = Node::new(Id::new("root"), Layout::column().width(Size::Fixed(s.x)).height(Size::Fixed(s.y)));
         self.nodes.push(root);
-        self.stack.push(0);
+        self.open(0);
     }
 
     pub fn end_frame(&mut self) -> FrameOutput<'_> {
         debug_assert_eq!(self.stack.len(), 1, "unbalanced containers");
+        // Layers were collected aside while other containers were open; they
+        // join the root's children now, after its flow content, which is the
+        // order `paint` and `place` already expect of absolute nodes.
+        self.open_kids.extend_from_slice(&self.root_kids);
+        self.close();
         let s = self.input.screen_size;
         let screen = Rect::new(0.0, 0.0, s.x, s.y);
-        layout::solve(&mut self.nodes, 0, screen);
+        layout::solve(&mut self.nodes, &self.kids, 0, screen, &mut self.scratch);
         // Floating nodes size themselves from their content, which `measure`
         // has just worked out; keep it for next frame's placement.
         self.layer_min.clear();
@@ -1105,7 +1135,7 @@ impl Ui {
             drop_hits: &mut self.drop_hits,
             offscreen: 0,
         };
-        paint(&mut self.nodes, 0, &mut painter, &mut sink);
+        paint(&mut self.nodes, &self.kids, 0, &mut painter, &mut sink, &mut self.scratch, &mut self.paints);
         for overlay in self.overlays.drain(..) {
             overlay(&mut painter);
         }
@@ -1207,7 +1237,7 @@ impl Ui {
     /// one key (`space`, `flex`, `separator`, or a list of equal labels)
     /// quadratic: 2000 spacers cost 25 ms/frame.
     pub fn make_id(&mut self, src: impl Hash) -> Id {
-        let parent = self.nodes[*self.stack.last().expect("libgui: widget built outside begin_frame/end_frame")].id;
+        let parent = self.nodes[self.stack.last().expect("libgui: widget built outside begin_frame/end_frame").0].id;
         // A `with_key` scope salts the widgets built directly inside it. Nested
         // containers inherit it through their own (already salted) id, so the
         // salt is mixed in exactly once.
@@ -1393,11 +1423,34 @@ impl Ui {
     }
 
     fn attach(&mut self, node: Node) -> usize {
+        debug_assert!(!self.stack.is_empty(), "libgui: widget built outside begin_frame/end_frame");
         let idx = self.nodes.len();
         self.nodes.push(node);
-        let parent = *self.stack.last().expect("libgui: widget built outside begin_frame/end_frame");
-        self.nodes[parent].children.push(idx);
+        self.open_kids.push(idx as u32);
         idx
+    }
+
+    /// Start collecting children for `i`.
+    fn open(&mut self, i: usize) {
+        self.stack.push((i, self.open_kids.len() as u32));
+    }
+
+    /// Finish the innermost container: its children are whatever was added
+    /// since `open`, and they are contiguous, because every container opened
+    /// inside it took its own children off the top before this point.
+    fn close(&mut self) {
+        let (i, mark) = self.stack.pop().expect("libgui: unbalanced containers");
+        let start = self.kids.len() as u32;
+        self.kids.extend_from_slice(&self.open_kids[mark as usize..]);
+        self.open_kids.truncate(mark as usize);
+        self.nodes[i].children = Kids { start, len: self.kids.len() as u32 - start };
+    }
+
+    /// How many children the open container has so far: the position a bare
+    /// `container` derives its id from.
+    fn open_child_count(&self) -> usize {
+        let mark = self.stack.last().map_or(0, |&(_, m)| m as usize);
+        self.open_kids.len() - mark
     }
 
     /// Add a leaf node. `content` is its intrinsic size excluding padding.
@@ -1428,13 +1481,13 @@ impl Ui {
         n.interactive = opts.interactive;
         n.hit_pad = opts.hit_pad;
         n.hit_top = opts.hit_top;
-        n.paint = Some(Box::new(paint) as PaintFn);
+        n.paint = Some(self.paints.push(paint));
         self.attach(n);
     }
 
     /// Generic container. Children added inside `body` are laid out by `layout`.
     pub fn container<R>(&mut self, layout: Layout, frame: Frame, body: impl FnOnce(&mut Self) -> R) -> R {
-        let idx = self.nodes[*self.stack.last().expect("libgui: widget built outside begin_frame/end_frame")].children.len();
+        let idx = self.open_child_count();
         let id = self.make_id(("container", idx));
         self.container_id(id, layout, frame, body)
     }
@@ -1446,7 +1499,7 @@ impl Ui {
         let mut n = Node::new(id, layout);
         n.clip = frame.clip;
         if frame.fill.a > 0.0 || frame.border_width > 0.0 || frame.shadow {
-            n.paint = Some(Box::new(move |p: &mut Painter, r: Rect| {
+            n.paint = Some(self.paints.push(move |p: &mut Painter, r: Rect| {
                 if frame.shadow {
                     p.shadow(r.translate(0.0, 4.0), frame.radius, 16.0, p.theme.palette.shadow);
                 }
@@ -1454,9 +1507,9 @@ impl Ui {
             }));
         }
         let i = self.attach(n);
-        self.stack.push(i);
+        self.open(i);
         let r = body(self);
-        self.stack.pop();
+        self.close();
         r
     }
 
@@ -1507,7 +1560,7 @@ impl Ui {
         n.z = z;
         n.clip = frame.clip;
         if frame.fill.a > 0.0 || frame.border_width > 0.0 || frame.shadow {
-            n.paint = Some(Box::new(move |p: &mut Painter, r: Rect| {
+            n.paint = Some(self.paints.push(move |p: &mut Painter, r: Rect| {
                 if frame.shadow {
                     p.shadow(r.translate(0.0, 8.0), frame.radius, 28.0, p.theme.palette.shadow);
                 }
@@ -1517,10 +1570,10 @@ impl Ui {
         // Layers hang off the root so they sit above all flow content.
         let idx = self.nodes.len();
         self.nodes.push(n);
-        self.nodes[0].children.push(idx);
-        self.stack.push(idx);
+        self.root_kids.push(idx as u32);
+        self.open(idx);
         let r = body(self);
-        self.stack.pop();
+        self.close();
         r
     }
 
@@ -1554,7 +1607,7 @@ impl Ui {
         n.z = z;
         n.clip = frame.clip;
         if frame.fill.a > 0.0 || frame.border_width > 0.0 || frame.shadow {
-            n.paint = Some(Box::new(move |p: &mut Painter, r: Rect| {
+            n.paint = Some(self.paints.push(move |p: &mut Painter, r: Rect| {
                 if frame.shadow {
                     p.shadow(r.translate(0.0, 4.0), frame.radius, 16.0, p.theme.palette.shadow);
                 }
@@ -1562,9 +1615,9 @@ impl Ui {
             }));
         }
         let i = self.attach(n);
-        self.stack.push(i);
+        self.open(i);
         let r = body(self);
-        self.stack.pop();
+        self.close();
         r
     }
 
@@ -1576,7 +1629,7 @@ impl Ui {
         n.interactive = opts.interactive;
         n.hit_pad = opts.hit_pad;
         n.hit_top = opts.hit_top;
-        n.paint = Some(Box::new(paint) as PaintFn);
+        n.paint = Some(self.paints.push(paint));
         self.attach(n);
     }
 
@@ -1700,9 +1753,9 @@ impl Ui {
             snap: !moving,
         });
         let i = self.attach(n);
-        self.stack.push(i);
+        self.open(i);
         let r = body(self);
-        self.stack.pop();
+        self.close();
         r
     }
 
@@ -1900,14 +1953,14 @@ impl Ui {
         n.clip = true;
         n.xform = Some(t);
         let idx = self.attach(n);
-        self.stack.push(idx);
+        self.open(idx);
         self.xform_stack.push(t);
         // Background first, so everything built after it wins the pointer.
         let opts = LeafOptions { interactive: true, ..Default::default() };
         self.add_leaf_at(bg_id, visible, opts, |_, _| {});
         let r = body(self, view);
         self.xform_stack.pop();
-        self.stack.pop();
+        self.close();
         (bg, r)
     }
 
@@ -1919,11 +1972,11 @@ impl Ui {
         n.clip = true;
         n.xform = Some(t);
         let idx = self.attach(n);
-        self.stack.push(idx);
+        self.open(idx);
         self.xform_stack.push(t);
         let r = body(self);
         self.xform_stack.pop();
-        self.stack.pop();
+        self.close();
         r
     }
 
@@ -1948,7 +2001,15 @@ struct HitSink<'a> {
     offscreen: u32,
 }
 
-fn paint(nodes: &mut [Node], i: usize, p: &mut Painter, sink: &mut HitSink) {
+fn paint(
+    nodes: &mut [Node],
+    kids: &[u32],
+    i: usize,
+    p: &mut Painter,
+    sink: &mut HitSink,
+    s: &mut crate::layout::Scratch,
+    paints: &mut crate::paint_arena::PaintArena,
+) {
     let rect = nodes[i].rect;
     let id = nodes[i].id;
     sink.rects.insert(id, rect);
@@ -1981,7 +2042,7 @@ fn paint(nodes: &mut [Node], i: usize, p: &mut Painter, sink: &mut HitSink) {
         p.draw.push_snap_text(snap);
     }
     if let Some(f) = nodes[i].paint.take() {
-        f(p, rect);
+        paints.run(f, p, rect);
     }
     let clip = nodes[i].clip;
     if clip {
@@ -1993,23 +2054,34 @@ fn paint(nodes: &mut [Node], i: usize, p: &mut Painter, sink: &mut HitSink) {
         p.draw.push_xform(t);
         p.fonts.set_zoom(p.draw.xform().zoom);
     }
-    let children = std::mem::take(&mut nodes[i].children);
+    let children = nodes[i].children;
     // Flow children first, then absolute ones on top of them.
-    for &c in &children {
+    for k in children.range() {
+        let c = kids[k] as usize;
         if nodes[c].absolute.is_none() {
-            paint(nodes, c, p, sink);
+            paint(nodes, kids, c, p, sink, s, paints);
         }
     }
     // Absolute children stack by layer, and by build order within a layer, so a
-    // menu is above a floating panel however early the panel was built.
-    let mut floating: Vec<usize> = children.iter().copied().filter(|&c| nodes[c].absolute.is_some()).collect();
-    if floating.len() > 1 {
-        floating.sort_by_key(|&c| nodes[c].z);
+    // menu is above a floating panel however early the panel was built. Packed
+    // as `(layer << 32) | index`, so one integer sort does both and the scratch
+    // needs no access to `nodes`.
+    let base = s.floating.len();
+    for k in children.range() {
+        let c = kids[k] as usize;
+        if nodes[c].absolute.is_some() {
+            s.floating.push(((nodes[c].z as u64) << 32) | c as u64);
+        }
     }
-    for c in floating {
-        paint(nodes, c, p, sink);
+    let n = s.floating.len() - base;
+    if n > 1 {
+        s.floating[base..].sort_unstable();
     }
-    nodes[i].children = children;
+    for k in 0..n {
+        let c = (s.floating[base + k] & 0xffff_ffff) as usize;
+        paint(nodes, kids, c, p, sink, s, paints);
+    }
+    s.floating.truncate(base);
     if xform.is_some() {
         p.draw.pop_xform();
         p.fonts.set_zoom(p.draw.xform().zoom);

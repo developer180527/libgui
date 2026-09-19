@@ -2,7 +2,6 @@
 //! style), so a container can fit its content and grow children can share the
 //! remaining space in a single frame, which a lay-out-as-you-go immediate UI cannot do.
 
-use crate::painter::Painter;
 use crate::{Id, Rect, Vec2};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -144,7 +143,8 @@ impl Layout {
     }
 }
 
-pub(crate) type PaintFn = Box<dyn FnOnce(&mut Painter, Rect)>;
+/// Handle into the frame's [`PaintArena`](crate::paint_arena::PaintArena).
+pub(crate) type PaintFn = u32;
 
 /// Scroll container state for one frame (vertical scrolling).
 #[derive(Clone, Copy, Debug)]
@@ -170,7 +170,7 @@ pub(crate) struct Node {
     pub layout: Layout,
     /// Content size of a leaf (e.g. measured text), excluding padding.
     pub intrinsic: Vec2,
-    pub children: Vec<usize>,
+    pub children: Kids,
     pub min: Vec2,
     pub rect: Rect,
     pub interactive: bool,
@@ -202,7 +202,7 @@ impl Node {
             id,
             layout,
             intrinsic: Vec2::ZERO,
-            children: Vec::new(),
+            children: Kids::EMPTY,
             min: Vec2::ZERO,
             rect: Rect::default(),
             interactive: false,
@@ -249,20 +249,54 @@ fn other(axis: Axis) -> Axis {
     }
 }
 
-pub(crate) fn solve(nodes: &mut [Node], root: usize, rect: Rect) {
-    measure(nodes, root);
-    place(nodes, root, rect);
+/// Where a node's children are in the tree's child arena. Children are
+/// contiguous, so a node carries eight bytes instead of a `Vec` and its heap
+/// allocation — one per container, every frame, for a list that never changes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Kids {
+    pub start: u32,
+    pub len: u32,
+}
+
+impl Kids {
+    pub const EMPTY: Kids = Kids { start: 0, len: 0 };
+
+    pub fn range(self) -> std::ops::Range<usize> {
+        self.start as usize..(self.start as usize + self.len as usize)
+    }
+
+}
+
+/// Reusable working memory for one layout pass. Kept across frames so the
+/// whole solve allocates nothing in the steady state; `place` and `paint` mark
+/// their slice, use it, and truncate back, so recursion shares one buffer.
+#[derive(Default)]
+pub(crate) struct Scratch {
+    /// Flow (non-absolute) children of the containers being placed.
+    flow: Vec<u32>,
+    /// Their main-axis sizes.
+    mains: Vec<f32>,
+    /// Absolute children being painted, as `(layer << 32) | index` so one
+    /// integer sort puts them in stacking order and keeps build order within
+    /// a layer.
+    pub floating: Vec<u64>,
+}
+
+pub(crate) fn solve(nodes: &mut [Node], kids: &[u32], root: usize, rect: Rect, s: &mut Scratch) {
+    measure(nodes, kids, root);
+    place(nodes, kids, root, rect, s);
 }
 
 /// Bottom-up: minimum (fit) size of every node.
-fn measure(nodes: &mut [Node], i: usize) -> Vec2 {
-    let children = std::mem::take(&mut nodes[i].children);
+fn measure(nodes: &mut [Node], kids: &[u32], i: usize) -> Vec2 {
+    let children = nodes[i].children;
     let l = nodes[i].layout;
     let mut content = nodes[i].intrinsic;
     let mut flow = 0;
     let (mut main, mut cross) = (0.0f32, 0.0f32);
-    for &c in &children {
-        let m = measure(nodes, c);
+    for k in children.range() {
+        let c = kids[k] as usize;
+        let m = measure(nodes, kids, c);
         if nodes[c].absolute.is_none() {
             main += get(m, l.axis);
             cross = cross.max(get(m, other(l.axis)));
@@ -296,22 +330,31 @@ fn measure(nodes: &mut [Node], i: usize) -> Vec2 {
         }
     }
     nodes[i].min = min;
-    nodes[i].children = children;
     min
 }
 
 /// Top-down: distribute space and assign final rects.
-fn place(nodes: &mut [Node], i: usize, rect: Rect) {
+fn place(nodes: &mut [Node], kids: &[u32], i: usize, rect: Rect, s: &mut Scratch) {
     nodes[i].rect = rect;
-    let all = std::mem::take(&mut nodes[i].children);
-    for &c in &all {
+    let all = nodes[i].children;
+    for k in all.range() {
+        let c = kids[k] as usize;
         if let Some(r) = nodes[c].absolute {
-            place(nodes, c, r);
+            place(nodes, kids, c, r, s);
         }
     }
-    let children: Vec<usize> = all.iter().copied().filter(|&c| nodes[c].absolute.is_none()).collect();
-    if children.is_empty() {
-        nodes[i].children = all;
+    // Flow children, into this call's slice of the shared scratch. Everything
+    // below indexes `base + k` rather than holding a slice, so the recursive
+    // call at the end can borrow the scratch for its own slice above ours.
+    let base = s.flow.len();
+    for k in all.range() {
+        let c = kids[k] as usize;
+        if nodes[c].absolute.is_none() {
+            s.flow.push(c as u32);
+        }
+    }
+    let n = s.flow.len() - base;
+    if n == 0 {
         return;
     }
     let l = nodes[i].layout;
@@ -324,12 +367,13 @@ fn place(nodes: &mut [Node], i: usize, rect: Rect) {
     }
     let (axis, cross_axis) = (l.axis, other(l.axis));
     let mut inner_main = get(inner.size(), axis);
-    let inner_cross = get(inner.size(), cross_axis);
-    let gaps = l.gap * (children.len() - 1) as f32;
+    let mut inner_cross = get(inner.size(), cross_axis);
+    let gaps = l.gap * (n - 1) as f32;
 
     let mut fixed = 0.0;
     let mut weight = 0.0;
-    for &c in &children {
+    for k in 0..n {
+        let c = s.flow[base + k] as usize;
         match nodes[c].layout.size(axis) {
             Size::Grow(w) => weight += w,
             _ => fixed += get(nodes[c].min, axis),
@@ -340,11 +384,14 @@ fn place(nodes: &mut [Node], i: usize, rect: Rect) {
     // box by the offset. `Grow` children fill the box, not the viewport, so a
     // row inside a horizontally scrolling area spans the whole content width.
     let scroll = nodes[i].scroll;
-    let mut inner_cross = inner_cross;
     if let Some(sc) = scroll {
-        let natural_main: f32 = children.iter().map(|&c| get(nodes[c].min, axis)).sum::<f32>() + gaps;
-        let natural_cross =
-            children.iter().map(|&c| get(nodes[c].min, cross_axis)).fold(0.0f32, f32::max);
+        let mut natural_main = gaps;
+        let mut natural_cross = 0.0f32;
+        for k in 0..n {
+            let c = s.flow[base + k] as usize;
+            natural_main += get(nodes[c].min, axis);
+            natural_cross = natural_cross.max(get(nodes[c].min, cross_axis));
+        }
         if scrolls(sc, axis) {
             inner_main = inner_main.max(natural_main);
         }
@@ -354,17 +401,18 @@ fn place(nodes: &mut [Node], i: usize, rect: Rect) {
     }
     let free = (inner_main - gaps - fixed).max(0.0);
 
-    let mains: Vec<f32> = children
-        .iter()
-        .map(|&c| {
-            let min = get(nodes[c].min, axis);
-            match nodes[c].layout.size(axis) {
-                Size::Grow(w) if weight > 0.0 => (free * w / weight).max(min),
-                _ => min,
-            }
-        })
-        .collect();
-    let total: f32 = mains.iter().sum::<f32>() + gaps;
+    let mbase = s.mains.len();
+    let mut total = gaps;
+    for k in 0..n {
+        let c = s.flow[base + k] as usize;
+        let min = get(nodes[c].min, axis);
+        let main = match nodes[c].layout.size(axis) {
+            Size::Grow(w) if weight > 0.0 => (free * w / weight).max(min),
+            _ => min,
+        };
+        total += main;
+        s.mains.push(main);
+    }
     let slack = (inner_main - total).max(0.0);
     let mut cursor = get(Vec2::new(inner.x, inner.y), axis)
         + match l.align_main {
@@ -381,8 +429,9 @@ fn place(nodes: &mut [Node], i: usize, rect: Rect) {
         nodes[i].content = from_axes(axis, content_main, content_cross);
     }
 
-    for (k, &c) in children.iter().enumerate() {
-        let main = mains[k];
+    for k in 0..n {
+        let c = s.flow[base + k] as usize;
+        let main = s.mains[mbase + k];
         let cross = match nodes[c].layout.size(cross_axis) {
             Size::Grow(_) => inner_cross,
             _ => get(nodes[c].min, cross_axis),
@@ -394,32 +443,67 @@ fn place(nodes: &mut [Node], i: usize, rect: Rect) {
         };
         let pos = from_axes(axis, cursor, cross_start + cross_off);
         let size = from_axes(axis, main, cross);
-        place(nodes, c, Rect::new(pos.x, pos.y, size.x, size.y));
+        place(nodes, kids, c, Rect::new(pos.x, pos.y, size.x, size.y), s);
         cursor += main + l.gap;
     }
-    nodes[i].children = all;
+    s.flow.truncate(base);
+    s.mains.truncate(mbase);
 }
+
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn leaf(nodes: &mut Vec<Node>, parent: usize, w: Size, h: Size, content: Vec2) -> usize {
-        let mut n = Node::new(Id::new(nodes.len()), Layout::leaf(w, h));
-        n.intrinsic = content;
-        nodes.push(n);
-        let i = nodes.len() - 1;
-        nodes[parent].children.push(i);
-        i
+    /// A tree built the way a test wants to write one — name a parent for each
+    /// node, in any order — laid out into the contiguous child arena `solve`
+    /// reads, which is what `Ui` produces while building.
+    #[derive(Default)]
+    struct Tree {
+        nodes: Vec<Node>,
+        links: Vec<(usize, usize)>,
+    }
+
+    impl Tree {
+        fn root(layout: Layout) -> Self {
+            Self { nodes: vec![Node::new(Id::new("root"), layout)], links: Vec::new() }
+        }
+
+        fn add(&mut self, parent: usize, mut n: Node) -> usize {
+            let i = self.nodes.len();
+            n.id = Id::new(i);
+            self.nodes.push(n);
+            self.links.push((parent, i));
+            i
+        }
+
+        fn leaf(&mut self, parent: usize, w: Size, h: Size, content: Vec2) -> usize {
+            let mut n = Node::new(Id::new(0u32), Layout::leaf(w, h));
+            n.intrinsic = content;
+            self.add(parent, n)
+        }
+
+        fn solve(&mut self, rect: Rect) -> &[Node] {
+            let mut kids = Vec::new();
+            for i in 0..self.nodes.len() {
+                let start = kids.len() as u32;
+                kids.extend(self.links.iter().filter(|&&(p, _)| p == i).map(|&(_, c)| c as u32));
+                self.nodes[i].children = Kids { start, len: kids.len() as u32 - start };
+            }
+            let mut scratch = Scratch::default();
+            super::solve(&mut self.nodes, &kids, 0, rect, &mut scratch);
+            assert!(scratch.flow.is_empty() && scratch.mains.is_empty(), "place leaked scratch");
+            &self.nodes
+        }
     }
 
     #[test]
     fn grow_shares_leftover_space() {
-        let mut nodes = vec![Node::new(Id::new("root"), Layout::row().gap(10.0).padding(Insets::all(5.0)))];
-        let a = leaf(&mut nodes, 0, Size::Fixed(100.0), Size::Fixed(20.0), Vec2::ZERO);
-        let b = leaf(&mut nodes, 0, Size::Grow(1.0), Size::Fixed(20.0), Vec2::ZERO);
-        let c = leaf(&mut nodes, 0, Size::Grow(3.0), Size::Fixed(20.0), Vec2::ZERO);
-        solve(&mut nodes, 0, Rect::new(0.0, 0.0, 530.0, 100.0));
+        let mut t = Tree::root(Layout::row().gap(10.0).padding(Insets::all(5.0)));
+        let a = t.leaf(0, Size::Fixed(100.0), Size::Fixed(20.0), Vec2::ZERO);
+        let b = t.leaf(0, Size::Grow(1.0), Size::Fixed(20.0), Vec2::ZERO);
+        let c = t.leaf(0, Size::Grow(3.0), Size::Fixed(20.0), Vec2::ZERO);
+        let nodes = t.solve(Rect::new(0.0, 0.0, 530.0, 100.0));
         // inner 520, minus 100 fixed, minus 2 gaps = 400 → 100 / 300
         assert_eq!(nodes[a].rect, Rect::new(5.0, 40.0, 100.0, 20.0));
         assert_eq!(nodes[b].rect.x, 115.0);
@@ -430,22 +514,18 @@ mod tests {
 
     #[test]
     fn fit_wraps_children_and_padding() {
-        let mut nodes = vec![Node::new(Id::new("root"), Layout::column())];
-        let col = {
-            let n = Node::new(Id::new("col"), Layout::column().width(Size::Fit).height(Size::Fit).gap(4.0).padding(Insets::xy(8.0, 6.0)));
-            nodes.push(n);
-            nodes[0].children.push(1);
-            1
-        };
-        leaf(&mut nodes, col, Size::Fit, Size::Fit, Vec2::new(50.0, 10.0));
-        leaf(&mut nodes, col, Size::Fit, Size::Fit, Vec2::new(80.0, 12.0));
-        solve(&mut nodes, 0, Rect::new(0.0, 0.0, 400.0, 400.0));
+        let mut t = Tree::root(Layout::column());
+        let l = Layout::column().width(Size::Fit).height(Size::Fit).gap(4.0).padding(Insets::xy(8.0, 6.0));
+        let col = t.add(0, Node::new(Id::new("col"), l));
+        t.leaf(col, Size::Fit, Size::Fit, Vec2::new(50.0, 10.0));
+        t.leaf(col, Size::Fit, Size::Fit, Vec2::new(80.0, 12.0));
+        let nodes = t.solve(Rect::new(0.0, 0.0, 400.0, 400.0));
         assert_eq!(nodes[col].rect.size(), Vec2::new(80.0 + 16.0, 10.0 + 12.0 + 4.0 + 12.0));
     }
 
     #[test]
     fn scroll_container_offsets_children_and_reports_content() {
-        let mut nodes = vec![Node::new(Id::new("root"), Layout::column())];
+        let mut t = Tree::root(Layout::column());
         let mut sc = Node::new(Id::new("sc"), Layout::column().height(Size::Grow(1.0)).gap(2.0));
         sc.scroll = Some(Scroll {
             offset: Vec2::new(0.0, 30.0),
@@ -460,43 +540,34 @@ mod tests {
             style: crate::Theme::dark().scrollbar,
             snap: true,
         });
-        nodes.push(sc);
-        nodes[0].children.push(1);
-        let rows: Vec<usize> = (0..10).map(|_| leaf(&mut nodes, 1, Size::Grow(1.0), Size::Fixed(20.0), Vec2::ZERO)).collect();
-        solve(&mut nodes, 0, Rect::new(0.0, 0.0, 100.0, 100.0));
-        assert_eq!(nodes[1].rect.h, 100.0, "viewport keeps parent height");
-        assert_eq!(nodes[1].content.y, 10.0 * 20.0 + 9.0 * 2.0);
+        let sc = t.add(0, sc);
+        let rows: Vec<usize> = (0..10).map(|_| t.leaf(sc, Size::Grow(1.0), Size::Fixed(20.0), Vec2::ZERO)).collect();
+        let nodes = t.solve(Rect::new(0.0, 0.0, 100.0, 100.0));
+        assert_eq!(nodes[sc].rect.h, 100.0, "viewport keeps parent height");
+        assert_eq!(nodes[sc].content.y, 10.0 * 20.0 + 9.0 * 2.0);
         assert_eq!(nodes[rows[0]].rect.y, -30.0);
         assert_eq!(nodes[rows[9]].rect.y, 9.0 * 22.0 - 30.0);
     }
 
     #[test]
     fn shrink_ignores_children_min() {
-        let mut nodes = vec![Node::new(Id::new("root"), Layout::row())];
-        let a = {
-            nodes.push(Node::new(Id::new("a"), Layout::column().width(Size::Grow(0.25)).shrink()));
-            nodes[0].children.push(1);
-            1
-        };
-        let b = {
-            nodes.push(Node::new(Id::new("b"), Layout::column().width(Size::Grow(0.75)).shrink()));
-            nodes[0].children.push(2);
-            2
-        };
-        leaf(&mut nodes, a, Size::Fixed(500.0), Size::Fixed(10.0), Vec2::ZERO);
-        solve(&mut nodes, 0, Rect::new(0.0, 0.0, 400.0, 100.0));
+        let mut t = Tree::root(Layout::row());
+        let a = t.add(0, Node::new(Id::new("a"), Layout::column().width(Size::Grow(0.25)).shrink()));
+        let b = t.add(0, Node::new(Id::new("b"), Layout::column().width(Size::Grow(0.75)).shrink()));
+        t.leaf(a, Size::Fixed(500.0), Size::Fixed(10.0), Vec2::ZERO);
+        let nodes = t.solve(Rect::new(0.0, 0.0, 400.0, 100.0));
         assert_eq!(nodes[a].rect.w, 100.0, "fraction wins over wide content");
         assert_eq!(nodes[b].rect.w, 300.0);
     }
 
     #[test]
     fn absolute_children_skip_flow() {
-        let mut nodes = vec![Node::new(Id::new("root"), Layout::column().gap(10.0))];
-        let a = leaf(&mut nodes, 0, Size::Fixed(50.0), Size::Fixed(20.0), Vec2::ZERO);
-        let f = leaf(&mut nodes, 0, Size::Fixed(999.0), Size::Fixed(999.0), Vec2::ZERO);
-        nodes[f].absolute = Some(Rect::new(300.0, 40.0, 120.0, 80.0));
-        let b = leaf(&mut nodes, 0, Size::Fixed(50.0), Size::Fixed(20.0), Vec2::ZERO);
-        solve(&mut nodes, 0, Rect::new(0.0, 0.0, 500.0, 500.0));
+        let mut t = Tree::root(Layout::column().gap(10.0));
+        let a = t.leaf(0, Size::Fixed(50.0), Size::Fixed(20.0), Vec2::ZERO);
+        let f = t.leaf(0, Size::Fixed(999.0), Size::Fixed(999.0), Vec2::ZERO);
+        t.nodes[f].absolute = Some(Rect::new(300.0, 40.0, 120.0, 80.0));
+        let b = t.leaf(0, Size::Fixed(50.0), Size::Fixed(20.0), Vec2::ZERO);
+        let nodes = t.solve(Rect::new(0.0, 0.0, 500.0, 500.0));
         assert_eq!(nodes[f].rect, Rect::new(300.0, 40.0, 120.0, 80.0));
         assert_eq!(nodes[b].rect.y, 30.0, "b follows a directly; the absolute node takes no space");
         assert_eq!(nodes[a].rect.y, 0.0);
@@ -504,9 +575,9 @@ mod tests {
 
     #[test]
     fn grow_never_shrinks_below_content() {
-        let mut nodes = vec![Node::new(Id::new("root"), Layout::row())];
-        let a = leaf(&mut nodes, 0, Size::Grow(1.0), Size::Fit, Vec2::new(300.0, 10.0));
-        solve(&mut nodes, 0, Rect::new(0.0, 0.0, 100.0, 100.0));
+        let mut t = Tree::root(Layout::row());
+        let a = t.leaf(0, Size::Grow(1.0), Size::Fit, Vec2::new(300.0, 10.0));
+        let nodes = t.solve(Rect::new(0.0, 0.0, 100.0, 100.0));
         assert_eq!(nodes[a].rect.w, 300.0);
     }
 }

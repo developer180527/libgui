@@ -708,7 +708,8 @@ enforced by tests rather than left to a benchmark nobody runs
 | guard | today |
 |---|---|
 | A visible 211-widget inspector, as a share of a 60 fps frame | **0.26%** (44 µs) |
-| Allocations per widget per frame | **2.00** (170 bytes) |
+| Allocations per widget per frame | **1.00** (6 bytes) |
+| Allocations for 1,800 nested containers | **0** |
 | Allocations in an empty frame | **0** |
 | Draw instances for offscreen widgets | **0** (15x the rows, same instance count) |
 | A 1,000,000-row virtual list vs a 100-row one | **identical** — 39 rows built, 203 instances, ~13 µs |
@@ -793,6 +794,42 @@ No test can see *transitive* dependencies, so CI counts those too:
 
 A jump in either fails the build, so growth is something somebody chose rather
 than something a version bump did quietly.
+
+### Two arenas, so a frame barely touches the allocator
+
+A frame used to cost **2 allocations and 170 bytes per widget**; it now costs
+**1 and 6**, and nesting is free. Allocation is global shared state — a UI that
+churns it taxes every other thread in the process, not just itself — so this is
+the number that matters more than microseconds on any one machine.
+
+Both came from the same shape of problem: per-node data with a per-node
+lifetime, reached for one `Vec` and one `Box` at a time.
+
+- **Children.** A `Node` held a `Vec<usize>`, so every container allocated for a
+  list that never changes after it is built, and `place` allocated two more
+  temporaries. Children now live in one arena that is reused frame to frame, and
+  a node carries an 8-byte range into it. It works because `open_kids` is a
+  *stack*: a container's children sit on top of it until the container closes,
+  and any container opened inside it has already taken its own children away
+  again, so what is left is contiguous. Layers are the exception — they hang off
+  the root while other containers are open — so they are collected aside and
+  joined to the root's children when it closes, which is where paint order wants
+  them anyway. `place` and `paint` mark their slice of a shared scratch buffer,
+  use it, and truncate back.
+- **Paint closures.** Layout runs after the frame is built, so a widget hands
+  over a closure to run once its rect is known, and the obvious home for that is
+  a `Box` per widget per frame. `paint_arena.rs` writes the captures straight
+  into one reused buffer with a pair of function pointers per entry to call and
+  to drop them. **The widget API is unchanged** — a custom widget still passes an
+  ordinary closure, and a closure needing an alignment the buffer cannot give is
+  boxed first and the box stored inline, so nothing is refused. It is the only
+  `unsafe` in the crate: the invariants are written out at the top of the file,
+  an entry is marked consumed *before* it runs so a panic cannot double-drop it,
+  and its tests cover a closure that never runs, a mid-frame drop, reallocation
+  under load and the over-aligned path. They pass under Miri.
+
+The remaining allocation per widget is the `String` a text widget's closure
+owns. A frame-lifetime text arena would remove it too.
 
 ## Golden images
 

@@ -16,6 +16,7 @@ mod input;
 mod input_state;
 mod layout;
 mod math;
+mod paint_arena;
 mod painter;
 pub mod render_contract;
 mod scroll;

@@ -178,7 +178,7 @@ impl Ui {
     /// same zone and the last one's `accepts` is the one that counts. Wrap each
     /// in its own container to have several.
     pub fn drop_zone(&mut self, accepts: &[&str]) -> DropZone {
-        let i = *self.stack.last().expect("libgui: drop_zone outside a container");
+        let i = self.stack.last().expect("libgui: drop_zone outside a container").0;
         let id = self.nodes[i].id;
         let accepted = self.dnd.active().is_some_and(|a| accepts.contains(&a.kind()));
         // Only accepting zones register, so resolution needs no kind filter and

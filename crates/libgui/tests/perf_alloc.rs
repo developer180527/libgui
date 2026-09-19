@@ -71,10 +71,13 @@ fn a_frame_stays_within_its_allocation_budget() {
     println!("{per_widget:.2} allocations and {bytes_per_widget:.0} bytes per widget");
     println!("a 500-widget panel: {a1} allocations, {b1} bytes");
 
-    // Today: 2 per text widget (the owned label and its boxed paint closure).
-    // The ceiling catches a third being introduced, not normal variation.
-    assert!(per_widget <= 2.5, "{per_widget:.2} allocations per widget");
-    assert!(bytes_per_widget <= 256.0, "{bytes_per_widget:.0} bytes per widget");
+    // Today: one per text widget, the `String` its paint closure owns. The
+    // closure itself no longer costs one — it is written into the frame's
+    // paint arena — and neither does a container's child list, which is a
+    // range into the tree's child arena. The ceilings catch either arena being
+    // bypassed or a second allocation per widget appearing, not normal drift.
+    assert!(per_widget <= 1.2, "{per_widget:.2} allocations per widget");
+    assert!(bytes_per_widget <= 32.0, "{bytes_per_widget:.0} bytes per widget");
 
     // An idle repaint must be nearly free: a tool app that redraws a still
     // screen should not be handing work to the allocator at all.
@@ -88,6 +91,37 @@ fn a_frame_stays_within_its_allocation_budget() {
     let empty = ALLOCS.load(Relaxed);
     println!("an empty frame: {empty} allocations");
     assert!(empty <= 8, "an empty frame allocated {empty} times");
+
+    nesting_is_free(&mut ui);
+}
+
+/// Nesting is free: a container's children are a range into one arena that is
+/// reused frame to frame, and `place` works in one shared scratch buffer, so
+/// neither the child list nor the layout temporaries touch the allocator.
+/// Deliberately part of the same test — the counter is global, and a second
+/// `#[test]` here would race it.
+fn nesting_is_free(ui: &mut Ui) {
+    let depth = |ui: &mut Ui, n: usize| {
+        ui.begin_frame(FrameInfo::default());
+        fn nest(ui: &mut Ui, left: usize) {
+            if left == 0 {
+                return;
+            }
+            ui.container(libgui::Layout::column().height(Size::Fit), Frame::none(), |ui| nest(ui, left - 1));
+        }
+        for _ in 0..n {
+            ui.container(libgui::Layout::row().height(Size::Fit), Frame::none(), |ui| nest(ui, 8));
+        }
+        let _ = ui.end_frame();
+    };
+    for _ in 0..30 {
+        depth(ui, 200);
+    }
+    ALLOCS.store(0, Relaxed);
+    depth(ui, 200);
+    let a = ALLOCS.load(Relaxed);
+    println!("1800 nested containers: {a} allocations");
+    assert!(a <= 4, "nesting cost {a} allocations; the child arena is being bypassed");
 }
 
 fn build(ui: &mut Ui, rows: usize, names: &[String]) {
