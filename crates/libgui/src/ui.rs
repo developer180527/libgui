@@ -3,7 +3,7 @@ use crate::text_edit::TextState;
 use crate::hash::{FxMap, FxSet};
 use crate::input::UiEvent;
 use crate::input_state::InputState;
-use crate::{Align, Atlas, Color, Cursor, DrawList, FontId, Fonts, FrameInfo, FrameInput, Gesture, Id, InputEvent, Insets, Key, Layout, Painter, PlatformOutput, PointerButton, PointerKind, Rect, Shortcut, Size, Theme, Transform, Vec2};
+use crate::{Align, Axis, Atlas, Color, Cursor, DrawList, FontId, Fonts, FrameInfo, FrameInput, Gesture, Id, InputEvent, Insets, Key, Layout, Painter, PlatformOutput, PointerButton, PointerKind, Rect, Shortcut, Size, Theme, Transform, Vec2};
 use std::hash::Hash;
 
 /// Paint callback run after the tree (drag previews, tooltips).
@@ -66,7 +66,12 @@ impl Frame {
 /// Options for [`Ui::scroll_area_with`].
 #[derive(Clone, Copy, Debug)]
 pub struct ScrollOptions {
+    pub width: Size,
     pub height: Size,
+    /// Scroll sideways. Off by default: a column of rows that each fill the
+    /// width should not suddenly be scrollable because one is wide.
+    pub scroll_x: bool,
+    pub scroll_y: bool,
     pub gap: f32,
     pub padding: Insets,
     /// Keep following the end while scrolled to the bottom (logs, consoles).
@@ -74,8 +79,27 @@ pub struct ScrollOptions {
 }
 
 impl ScrollOptions {
+    /// Vertical scrolling, filling the width.
     pub fn new(height: Size) -> Self {
-        Self { height, gap: 0.0, padding: Insets::all(0.0), stick_to_end: false }
+        Self {
+            width: Size::Grow(1.0),
+            height,
+            scroll_x: false,
+            scroll_y: true,
+            gap: 0.0,
+            padding: Insets::all(0.0),
+            stick_to_end: false,
+        }
+    }
+
+    /// Scrolls both ways: timelines, wide tables, large canvases of widgets.
+    pub fn both(width: Size, height: Size) -> Self {
+        Self { width, scroll_x: true, ..Self::new(height) }
+    }
+
+    /// Sideways only.
+    pub fn horizontal(width: Size, height: Size) -> Self {
+        Self { width, scroll_x: true, scroll_y: false, ..Self::new(height) }
     }
 }
 
@@ -261,14 +285,71 @@ impl ListOptions {
     }
 }
 
+/// One axis of a scroll area.
 #[derive(Clone, Copy, Debug, Default)]
-struct ScrollState {
+struct ScrollAxis {
     target: f32,
     offset: f32,
     content: f32,
     viewport: f32,
     /// Touch fling velocity (px/s).
     velocity: f32,
+}
+
+impl ScrollAxis {
+    fn max(&self) -> f32 {
+        (self.content - self.viewport).max(0.0)
+    }
+
+    /// Wheel, fling and smoothing for one axis. `direct` means the offset
+    /// should track the target exactly (a finger or a thumb drag), rather than
+    /// easing towards it.
+    fn update(&mut self, wheel: f32, touch: Option<f32>, friction: f32, dt: f32) -> bool {
+        let max = self.max();
+        if wheel != 0.0 {
+            self.target -= wheel;
+            self.velocity = 0.0;
+        }
+        let mut direct = false;
+        match touch {
+            Some(d) => {
+                self.target = (self.target - d).clamp(0.0, max);
+                self.velocity += (-d / dt - self.velocity) * 0.4;
+                direct = true;
+            }
+            None if self.velocity.abs() > 5.0 => {
+                self.target += self.velocity * dt;
+                self.velocity *= (-friction * dt).exp();
+                if self.target <= 0.0 || self.target >= max {
+                    self.velocity = 0.0;
+                }
+                direct = true;
+            }
+            None => self.velocity = 0.0,
+        }
+        direct
+    }
+
+    fn settle(&mut self, direct: bool, dt: f32) {
+        let max = self.max();
+        self.target = self.target.clamp(0.0, max);
+        if direct {
+            self.offset = self.target;
+        } else {
+            let k = 1.0 - (-20.0 * dt).exp();
+            self.offset += (self.target - self.offset) * k;
+            if (self.target - self.offset).abs() < 0.5 {
+                self.offset = self.target;
+            }
+        }
+        self.offset = self.offset.clamp(0.0, max);
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ScrollState {
+    x: ScrollAxis,
+    y: ScrollAxis,
 }
 
 /// Everything a renderer needs for this frame.
@@ -959,8 +1040,10 @@ impl Ui {
         for n in &self.nodes {
             if n.scroll.is_some() {
                 if let Some(st) = self.scroll_states.get_mut(&n.id) {
-                    st.content = n.content;
-                    st.viewport = n.rect.h;
+                    st.x.content = n.content.x;
+                    st.x.viewport = n.rect.w;
+                    st.y.content = n.content.y;
+                    st.y.viewport = n.rect.h;
                 }
             }
         }
@@ -1180,6 +1263,19 @@ impl Ui {
         self.seen.insert(id);
     }
 
+    /// A rect in physical pixels, rounded: what an embedded renderer should
+    /// size its target to.
+    ///
+    /// ```ignore
+    /// let vp = ui.viewport("scene", scene_texture, |_, _| {});
+    /// let (w, h) = ui.physical_px(vp.rect);
+    /// if (w, h) != scene.size() { scene.resize(w, h); }
+    /// ```
+    pub fn physical_px(&self, rect: Rect) -> (u32, u32) {
+        let s = self.input.scale.max(0.01);
+        (((rect.w * s).round().max(0.0)) as u32, ((rect.h * s).round().max(0.0)) as u32)
+    }
+
     /// Rect of `id` from the previous frame's layout.
     pub fn rect_of(&self, id: Id) -> Option<Rect> {
         self.rects.get(&id).copied()
@@ -1375,84 +1471,75 @@ impl Ui {
     /// A scroll area with an id the caller already made (so it can read the
     /// area's retained state first, as [`Ui::virtual_list_with`] does).
     fn scroll_area_id<R>(&mut self, id: Id, opts: ScrollOptions, body: impl FnOnce(&mut Self) -> R) -> R {
-        let bar_id = id.with("bar");
-        self.seen.insert(bar_id);
+        let bar_y = id.with("bar");
+        let bar_x = id.with("bar_x");
+        self.seen.insert(bar_y);
+        self.seen.insert(bar_x);
         let mut st = self.scroll_states.get(&id).copied().unwrap_or_default();
-        let max = (st.content - st.viewport).max(0.0);
-        let at_end = st.target >= max - 1.0;
+        let at_end = st.y.target >= st.y.max() - 1.0;
 
         let inside = self.scroll_target == Some(id);
-        if inside && self.input.scroll.y != 0.0 {
-            st.target -= self.input.scroll.y;
-            st.velocity = 0.0;
-        }
         let dt = self.input.dt.max(1e-4);
         let touching = self.touch_scroll == Some(id);
-        let mut direct = false;
-        if touching {
-            // Content follows the finger 1:1; remember velocity for the fling.
-            let dy = self.mouse_delta.y;
-            st.target = (st.target - dy).clamp(0.0, max);
-            st.velocity = st.velocity + (-dy / dt - st.velocity) * 0.4;
-            direct = true;
-        } else if st.velocity.abs() > 5.0 {
-            st.target += st.velocity * dt;
-            st.velocity *= (-self.scroll_friction * dt).exp();
-            if st.target <= 0.0 || st.target >= max {
-                st.velocity = 0.0;
-            }
-            direct = true;
-        } else {
-            st.velocity = 0.0;
+        let friction = self.scroll_friction;
+
+        // A wheel with no sideways component still scrolls sideways when the
+        // area only scrolls that way, which is what a trackpad user expects
+        // on a timeline.
+        let wheel = if inside { self.input.scroll } else { Vec2::ZERO };
+        let wheel_x = if opts.scroll_x && !opts.scroll_y && wheel.x == 0.0 { wheel.y } else { wheel.x };
+        let touch = touching.then_some(self.mouse_delta);
+
+        let mut direct_x = false;
+        let mut direct_y = false;
+        if opts.scroll_x {
+            direct_x = st.x.update(wheel_x, touch.map(|d| d.x), friction, dt);
         }
-        if opts.stick_to_end && at_end && max > 0.0 {
-            st.target = f32::INFINITY;
+        if opts.scroll_y {
+            direct_y = st.y.update(wheel.y, touch.map(|d| d.y), friction, dt);
+        }
+        if opts.stick_to_end && at_end && st.y.max() > 0.0 {
+            st.y.target = f32::INFINITY;
         }
 
-        let bar = self.interact_drag(bar_id);
-        let mut dragging = false;
-        if max > 0.0 && bar.rect.h > 0.0 {
-            let thumb_h = (bar.rect.h * st.viewport / st.content).max(24.0).min(bar.rect.h);
-            let travel = (bar.rect.h - thumb_h).max(1.0);
-            if bar.pressed {
-                let thumb_y = bar.rect.y + travel * (st.offset / max);
-                let on_thumb = bar.mouse_pos.y >= thumb_y && bar.mouse_pos.y <= thumb_y + thumb_h;
-                if !on_thumb {
-                    // Jump so the thumb centres on the click.
-                    let t = (bar.mouse_pos.y - bar.rect.y - thumb_h * 0.5) / travel;
-                    st.target = t.clamp(0.0, 1.0) * max;
-                    st.offset = st.target;
-                }
-            }
-            if bar.active {
-                st.target += bar.drag_delta.y * max / travel;
-                dragging = true;
-            }
-        }
-        st.target = st.target.clamp(0.0, max);
-        if dragging || direct {
-            st.offset = st.target;
-        } else {
-            let k = 1.0 - (-20.0 * self.input.dt).exp();
-            st.offset += (st.target - st.offset) * k;
-            if (st.target - st.offset).abs() < 0.5 {
-                st.offset = st.target;
-            }
-        }
-        st.offset = st.offset.clamp(0.0, max);
-        self.animating |= st.offset != st.target || st.velocity != 0.0;
+        let by = self.interact_drag(bar_y);
+        let bx = self.interact_drag(bar_x);
+        direct_y |= drag_bar(&mut st.y, &by, Axis::Y);
+        direct_x |= drag_bar(&mut st.x, &bx, Axis::X);
+
+        st.x.settle(direct_x, self.input.dt);
+        st.y.settle(direct_y, self.input.dt);
+        self.animating |= st.x.offset != st.x.target || st.x.velocity != 0.0;
+        self.animating |= st.y.offset != st.y.target || st.y.velocity != 0.0;
         self.scroll_states.insert(id, st);
-        if bar.hovered || bar.active {
+        if by.hovered || by.active || bx.hovered || bx.active {
             self.cursor = Cursor::Default;
         }
 
-        let visible = self.animate_bool(bar_id, 0, inside || bar.active);
-        let hover = self.animate_bool(bar_id, 1, bar.hovered || bar.active);
+        let vis_y = self.animate_bool(bar_y, 0, inside || by.active);
+        let hot_y = self.animate_bool(bar_y, 1, by.hovered || by.active);
+        let vis_x = self.animate_bool(bar_x, 0, inside || bx.active);
+        let hot_x = self.animate_bool(bar_x, 1, bx.hovered || bx.active);
 
-        let layout = Layout::column().height(opts.height).gap(opts.gap).padding(opts.padding);
+        let layout = Layout::column()
+            .width(opts.width)
+            .height(opts.height)
+            .gap(opts.gap)
+            .padding(opts.padding);
         let mut n = Node::new(id, layout);
         n.clip = true;
-        n.scroll = Some(Scroll { offset: st.offset, bar_id, visible, hover, style: self.theme.scrollbar });
+        n.scroll = Some(Scroll {
+            offset: Vec2::new(st.x.offset, st.y.offset),
+            scroll_x: opts.scroll_x,
+            scroll_y: opts.scroll_y,
+            bar_x,
+            bar_y,
+            vis_x,
+            hot_x,
+            vis_y,
+            hot_y,
+            style: self.theme.scrollbar,
+        });
         let i = self.attach(n);
         self.stack.push(i);
         let r = body(self);
@@ -1539,6 +1626,7 @@ impl Ui {
             gap: opts.gap,
             padding: opts.padding,
             stick_to_end: opts.stick_to_end,
+            ..ScrollOptions::new(opts.height)
         };
         let mut built = 0..0;
         self.scroll_area_id(id, scroll, |ui| {
@@ -1547,8 +1635,8 @@ impl Ui {
             let st = ui.scroll_states.get(&id).copied().unwrap_or_default();
             // The viewport is measured at the end of a frame, so it is 0 on the
             // first one: fall back to the window rather than building nothing.
-            let viewport = if st.viewport > 1.0 { st.viewport } else { fallback_viewport };
-            let span = heights.locate(rows, opts.gap, st.offset, viewport, opts.overscan);
+            let viewport = if st.y.viewport > 1.0 { st.y.viewport } else { fallback_viewport };
+            let span = heights.locate(rows, opts.gap, st.y.offset, viewport, opts.overscan);
             built = span.first..span.end;
 
             // Spacers stand in for the rows that were not built, so layout, the
@@ -1754,31 +1842,100 @@ fn paint(nodes: &mut [Node], i: usize, p: &mut Painter, sink: &mut HitSink) {
         p.fonts.set_zoom(p.draw.xform().zoom);
     }
     if let Some(sc) = nodes[i].scroll {
-        scrollbar(p, sink, rect, nodes[i].content, sc);
+        scrollbars(p, sink, rect, nodes[i].content, sc);
     }
     if clip {
         p.draw.pop_clip();
     }
 }
 
-/// Overlay scrollbar: thin, fades in while the mouse is over the area, widens on hover.
-fn scrollbar(p: &mut Painter, sink: &mut HitSink, rect: Rect, content: f32, sc: Scroll) {
-    let max = content - rect.h;
+/// Drag or click a scrollbar track. Returns true if the offset should follow
+/// the target exactly this frame.
+fn drag_bar(st: &mut ScrollAxis, bar: &Response, axis: Axis) -> bool {
+    let max = st.max();
+    let (track_len, track_start, pointer) = match axis {
+        Axis::Y => (bar.rect.h, bar.rect.y, bar.mouse_pos.y),
+        Axis::X => (bar.rect.w, bar.rect.x, bar.mouse_pos.x),
+    };
+    if max <= 0.0 || track_len <= 0.0 {
+        return false;
+    }
+    let thumb = (track_len * st.viewport / st.content).max(24.0).min(track_len);
+    let travel = (track_len - thumb).max(1.0);
+    if bar.pressed {
+        let at = track_start + travel * (st.offset / max);
+        let on_thumb = pointer >= at && pointer <= at + thumb;
+        if !on_thumb {
+            // Jump so the thumb centres on the click.
+            let t = (pointer - track_start - thumb * 0.5) / travel;
+            st.target = t.clamp(0.0, 1.0) * max;
+            st.offset = st.target;
+        }
+    }
+    if bar.active {
+        let d = match axis {
+            Axis::Y => bar.drag_delta.y,
+            Axis::X => bar.drag_delta.x,
+        };
+        st.target += d * max / travel;
+        return true;
+    }
+    false
+}
+
+/// Overlay scrollbars: thin, fading in while the pointer is over the area and
+/// widening under it. Drawn per axis, and only where the content overflows.
+fn scrollbars(p: &mut Painter, sink: &mut HitSink, rect: Rect, content: Vec2, sc: Scroll) {
+    if sc.scroll_y {
+        bar(p, sink, rect, content.y, sc.offset.y, Axis::Y, sc.bar_y, sc.vis_y, sc.hot_y, sc.style);
+    }
+    if sc.scroll_x {
+        bar(p, sink, rect, content.x, sc.offset.x, Axis::X, sc.bar_x, sc.vis_x, sc.hot_x, sc.style);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bar(
+    p: &mut Painter,
+    sink: &mut HitSink,
+    rect: Rect,
+    content: f32,
+    offset: f32,
+    axis: Axis,
+    id: Id,
+    visible: f32,
+    hover: f32,
+    s: crate::ScrollbarStyle,
+) {
+    let viewport = match axis {
+        Axis::Y => rect.h,
+        Axis::X => rect.w,
+    };
+    let max = content - viewport;
     if max <= 0.5 {
         return;
     }
-    let track = Rect::new(rect.right() - 12.0, rect.y + 2.0, 12.0, rect.h - 4.0);
+    let track = match axis {
+        Axis::Y => Rect::new(rect.right() - 12.0, rect.y + 2.0, 12.0, rect.h - 4.0),
+        Axis::X => Rect::new(rect.x + 2.0, rect.bottom() - 12.0, rect.w - 4.0, 12.0),
+    };
     if let Some(r) = p.draw.clip().intersect(&track) {
-        sink.hits.push((sc.bar_id, r));
-        sink.rects.insert(sc.bar_id, track);
+        sink.hits.push((id, r));
+        sink.rects.insert(id, track);
     }
-    let thumb_h = (track.h * rect.h / content).max(24.0).min(track.h);
-    let y = track.y + (track.h - thumb_h) * (sc.offset / max).clamp(0.0, 1.0);
-    let s = sc.style;
-    let w = s.width + (s.width_hover - s.width) * sc.hover;
-    let thumb = Rect::new(track.right() - w - 3.0, y, w, thumb_h);
-    let alpha = s.rest_alpha + (1.0 - s.rest_alpha) * sc.visible.max(sc.hover) * 0.8;
-    let color = s.thumb.lerp(s.thumb_hover, sc.hover);
+    let (track_len, along) = match axis {
+        Axis::Y => (track.h, track.y),
+        Axis::X => (track.w, track.x),
+    };
+    let thumb_len = (track_len * viewport / content).max(24.0).min(track_len);
+    let at = along + (track_len - thumb_len) * (offset / max).clamp(0.0, 1.0);
+    let w = s.width + (s.width_hover - s.width) * hover;
+    let thumb = match axis {
+        Axis::Y => Rect::new(track.right() - w - 3.0, at, w, thumb_len),
+        Axis::X => Rect::new(at, track.bottom() - w - 3.0, thumb_len, w),
+    };
+    let alpha = s.rest_alpha + (1.0 - s.rest_alpha) * visible.max(hover) * 0.8;
+    let color = s.thumb.lerp(s.thumb_hover, hover);
     p.rect(thumb, color.with_alpha(color.a * alpha), w * 0.5);
 }
 
@@ -2654,6 +2811,89 @@ mod tests {
         run(&mut ui, &mut st);
         let (shapes, _, _) = run(&mut ui, &mut st);
         assert!(shapes.is_empty(), "content escaped the canvas: {shapes:?}");
+    }
+
+    /// Sideways scrolling: the timeline case. Wide rows inside a narrow area
+    /// move horizontally, the vertical axis is independent, and `Grow` children
+    /// span the *content* width rather than the viewport.
+    #[test]
+    fn a_scroll_area_scrolls_sideways_independently() {
+        let mut ui = ui();
+        // 10 rows, each holding one 900px-wide item, in a 300x100 viewport.
+        let frame = |ui: &mut Ui| -> Vec<Rect> {
+            let mut rects = Vec::new();
+            ui.begin_frame(FrameInfo::default());
+            let opts = ScrollOptions::both(Size::Fixed(300.0), Size::Fixed(100.0));
+            ui.scroll_area_with("grid", opts, |ui| {
+                for r in 0..10 {
+                    let id = ui.make_id(("row", r));
+                    ui.add_leaf(id, Layout::leaf(Size::Fixed(900.0), Size::Fixed(30.0)), Vec2::ZERO, true, |_, _| {});
+                    if let Some(rr) = ui.rect_of(id) {
+                        rects.push(rr);
+                    }
+                }
+            });
+            let _ = ui.end_frame();
+            rects
+        };
+        frame(&mut ui);
+        let start = frame(&mut ui);
+        assert_eq!(start[0].x, 0.0, "starts at the left");
+        assert_eq!(start[0].y, 0.0, "starts at the top");
+
+        // A sideways wheel moves x and leaves y alone.
+        for _ in 0..40 {
+            ui.push(InputEvent::PointerMoved { pos: Vec2::new(100.0, 50.0) });
+            ui.push(InputEvent::Wheel { delta: Vec2::new(-20.0, 0.0), unit: crate::WheelUnit::Pixel });
+            frame(&mut ui);
+        }
+        let moved = frame(&mut ui);
+        assert!(moved[0].x < -100.0, "did not scroll sideways: x = {}", moved[0].x);
+        assert_eq!(moved[0].y, 0.0, "a sideways wheel moved the vertical axis");
+        // Clamped at the end: content 900 - viewport 300 = 600.
+        assert!(moved[0].x >= -600.5, "scrolled past the content: x = {}", moved[0].x);
+
+        // Let the horizontal smoothing settle, or the next assertion reads an
+        // offset that is still easing towards its target.
+        for _ in 0..20 {
+            frame(&mut ui);
+        }
+        let settled = frame(&mut ui);
+        let x_before = settled[0].x;
+        for _ in 0..10 {
+            ui.push(InputEvent::PointerMoved { pos: Vec2::new(100.0, 50.0) });
+            ui.push(InputEvent::Wheel { delta: Vec2::new(0.0, -20.0), unit: crate::WheelUnit::Pixel });
+            frame(&mut ui);
+        }
+        let both = frame(&mut ui);
+        assert!(both[0].y < -50.0, "did not scroll vertically: y = {}", both[0].y);
+        assert!((both[0].x - x_before).abs() < 0.5, "a vertical wheel moved the horizontal axis");
+    }
+
+    /// A vertical-only area must not scroll sideways just because something
+    /// inside it is wide — that would make every long label shift the column.
+    #[test]
+    fn a_vertical_area_ignores_wide_content() {
+        let mut ui = ui();
+        let frame = |ui: &mut Ui| -> Rect {
+            ui.begin_frame(FrameInfo::default());
+            let mut out = Rect::default();
+            ui.scroll_area_with("list", ScrollOptions::new(Size::Fixed(100.0)), |ui| {
+                let id = ui.make_id("wide");
+                ui.add_leaf(id, Layout::leaf(Size::Fixed(900.0), Size::Fixed(30.0)), Vec2::ZERO, true, |_, _| {});
+                out = ui.rect_of(id).unwrap_or_default();
+            });
+            let _ = ui.end_frame();
+            out
+        };
+        frame(&mut ui);
+        frame(&mut ui);
+        for _ in 0..20 {
+            ui.push(InputEvent::PointerMoved { pos: Vec2::new(50.0, 50.0) });
+            ui.push(InputEvent::Wheel { delta: Vec2::new(-30.0, 0.0), unit: crate::WheelUnit::Pixel });
+            frame(&mut ui);
+        }
+        assert_eq!(frame(&mut ui).x, 0.0, "a vertical-only area scrolled sideways");
     }
 
     #[test]

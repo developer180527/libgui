@@ -22,7 +22,7 @@ cargo run -p libgui_shaders -- shaders_out   # export HLSL/MSL/GLSL/SPIR-V/WGSL
 | Version | 0.1.0, pre-1.0: the API still changes between releases |
 
 Not yet: multi-line text, font fallback, IME composition display, accessibility, tables, colour
-picker, drag-to-edit number fields, layout persistence. See the roadmap.
+picker, general drag and drop, layout persistence. See the roadmap.
 
 ## Crates
 
@@ -310,6 +310,23 @@ ui.tooltip(&r, "Double-click to rename");
 `ui.popup(id, min_width, body)` is the primitive underneath, with `open_popup`, `close_popups` and
 `popup_open` if you want to drive one yourself. Look is themed via `theme.menu` and `theme.tooltip`.
 
+## Widgets
+
+`button` · `button_primary` · `checkbox` · `radio` · `toggle` · `slider` · `slider_vertical` ·
+`drag_value` · `progress` · `combo` · `segmented` · `text_input` · `selectable` · `tree_row` ·
+`label`/`heading`/`section` · `separator` · `plot` · `viewport` · menus and `context_menu` ·
+`virtual_list`/`virtual_rows` · `canvas`.
+
+Two worth calling out:
+
+```rust
+ui.drag_value_range("Scale", &mut scale, 0.005, 0.3..=2.0);   // drag left/right to change
+ui.slider_vertical("Gain", &mut gain, 0.0, 1.0, 110.0);       // a fader: high at the top
+```
+
+`drag_value` is the control an inspector is mostly made of. It locks the pointer while dragging, so
+a drag keeps going past the screen edge; the `word` modifier gives fine control and `shift` coarse.
+
 ## Scroll areas
 
 ```rust
@@ -318,6 +335,17 @@ let opts = ScrollOptions { stick_to_end: true, ..ScrollOptions::new(Size::Grow(1
 ui.scroll_area_with("console", opts, |ui| { /* log lines */ });
 ```
 
+```rust
+ui.scroll_area_with("timeline", ScrollOptions::both(Size::Grow(1.0), Size::Grow(1.0)), |ui| { … });
+ui.scroll_area_with("ruler", ScrollOptions::horizontal(Size::Grow(1.0), Size::Fixed(28.0)), |ui| { … });
+```
+
+- **Scrolls in either or both directions.** The axes are independent — a sideways wheel does not
+  nudge the vertical offset. A vertical-only area ignores wide content, so one long label cannot make
+  a column scroll sideways. `Grow` children fill the *content* box, so rows in a horizontally
+  scrolling area span its whole width.
+- On an area that only scrolls sideways, a plain vertical wheel scrolls it: what a trackpad user
+  expects on a timeline.
 - Wheel/trackpad goes to the innermost scroll area under the mouse (nesting works), with smoothing.
 - Overlay scrollbar fades in on hover, widens under the pointer; drag the thumb or click the track to jump.
 - Clipped hit-testing: widgets scrolled out of view can't be hovered or clicked.
@@ -565,7 +593,8 @@ these are the regression guards.
 5. ~~Paths~~ ✅ `p.line` / `polyline` / `bezier` / `wire`, a `Line` primitive at `CONTRACT_VERSION` 2;
    next: stroked/filled arbitrary paths, dashes, arrowheads, and a real line/area plot (`plot` is
    still a debug bar chart).
-6. **Horizontal and 2D scrolling**, then tables/data grids with resizable and frozen columns.
+6. ~~Horizontal and 2D scrolling~~ ✅ `ScrollOptions::both` / `horizontal`; next: tables/data grids
+   with resizable and frozen columns, and general drag and drop.
 7. **Real text shaping**: replace `text.rs` internals with `cosmic-text`/`swash` or HarfBuzz
    (ligatures, bidi, font fallback, CJK), multi-page atlas with LRU eviction.
 8. ~~Theme hot-reload~~ ✅ TOML themes, per-widget styles, density presets; next: multiple fonts (UI/mono/icons) in the theme, per-widget disabled states.

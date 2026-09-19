@@ -19,6 +19,18 @@
 //!   **premultiplied** colour, blended with [`BLEND`]. Render into a UNORM (not
 //!   sRGB) target, or convert in a later pass. No depth test, no culling.
 //! - Shapes and lines do not read a texture, so the atlas may stay bound.
+//!
+//! # Embedding your own renderer
+//! `TextureId::User(n)` is opaque: map `n` to whatever your RHI uses. The host
+//! owns the texture's lifetime, so:
+//! - A `User` id the backend does not know must be **skipped silently**, not
+//!   treated as an error. A resize that retires a texture mid-frame is normal.
+//! - The image is sampled as **opaque sRGB**: `uv` selects a sub-rect, the
+//!   texture's own alpha is ignored, and no colour conversion is applied.
+//!   A linear or HDR target must be converted before it is handed over.
+//! - Whatever produced the texture must have completed before the UI pass
+//!   samples it. Recording both into one command buffer gives that ordering;
+//!   across queues or devices it is the host's to arrange.
 //! - The glyph atlas is [`ATLAS_FORMAT`] coverage; user textures
 //!   (`TextureId::User`) are [`USER_TEXTURE_FORMAT`] and composite as opaque RGB.
 //! - Textures are read with texel loads and filtered in the shader: no sampler.

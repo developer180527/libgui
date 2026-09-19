@@ -212,6 +212,13 @@ impl DrawList {
 
     /// Textured quad with rounded-corner mask, e.g. an engine viewport.
     pub fn image(&mut self, r: Rect, texture: TextureId, radius: f32, tint: Color) {
+        self.image_uv(r, texture, [0.0, 0.0, 1.0, 1.0], radius, tint);
+    }
+
+    /// [`DrawList::image`] showing only part of the texture. `uv` is
+    /// `[u0, v0, u1, v1]` in 0..1, with v increasing downwards — a frame from a
+    /// thumbnail sheet, one icon from an atlas, a tile from a sprite page.
+    pub fn image_uv(&mut self, r: Rect, texture: TextureId, uv: [f32; 4], radius: f32, tint: Color) {
         let t = self.xform();
         let (r, radius) = (t.rect(r), radius * t.zoom);
         self.push(
@@ -219,7 +226,7 @@ impl DrawList {
             r,
             Instance {
                 rect: [r.x, r.y, r.w, r.h],
-                uv: [0.0, 0.0, 1.0, 1.0],
+                uv,
                 color: tint.to_array(),
                 border_color: [0.0; 4],
                 clip: [0.0; 4],

@@ -27,6 +27,17 @@ impl Painter<'_> {
         self.draw.image(r, tex, radius, Color::WHITE);
     }
 
+    /// Part of a texture: `uv` is `[u0, v0, u1, v1]` in 0..1, v downwards.
+    /// A video thumbnail sheet, an icon atlas, a sprite page.
+    pub fn image_uv(&mut self, r: Rect, tex: TextureId, uv: [f32; 4], radius: f32) {
+        self.draw.image_uv(r, tex, uv, radius, Color::WHITE);
+    }
+
+    /// A tinted image, for icons drawn from a single-channel or white sheet.
+    pub fn image_tinted(&mut self, r: Rect, tex: TextureId, uv: [f32; 4], radius: f32, tint: Color) {
+        self.draw.image_uv(r, tex, uv, radius, tint);
+    }
+
     /// Straight line with round caps.
     pub fn line(&mut self, a: Vec2, b: Vec2, width: f32, color: Color) {
         self.draw.line(a, b, width, color);

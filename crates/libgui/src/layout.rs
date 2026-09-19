@@ -149,11 +149,17 @@ pub(crate) type PaintFn = Box<dyn FnOnce(&mut Painter, Rect)>;
 /// Scroll container state for one frame (vertical scrolling).
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Scroll {
-    pub offset: f32,
-    pub bar_id: Id,
-    /// Scrollbar visibility 0..1 and hover/drag emphasis 0..1 (animated by Ui).
-    pub visible: f32,
-    pub hover: f32,
+    /// How far the content is scrolled, per axis.
+    pub offset: Vec2,
+    pub scroll_x: bool,
+    pub scroll_y: bool,
+    pub bar_x: Id,
+    pub bar_y: Id,
+    /// Per-bar visibility 0..1 and hover/drag emphasis 0..1 (animated by Ui).
+    pub vis_x: f32,
+    pub hot_x: f32,
+    pub vis_y: f32,
+    pub hot_y: f32,
     pub style: crate::ScrollbarStyle,
 }
 
@@ -173,8 +179,8 @@ pub(crate) struct Node {
     pub clip: bool,
     pub paint: Option<PaintFn>,
     pub scroll: Option<Scroll>,
-    /// Scroll containers: full content height incl. padding, set by `place`.
-    pub content: f32,
+    /// Scroll containers: full content size incl. padding, set by `place`.
+    pub content: Vec2,
     /// Positioned at this rect (window coordinates), outside the parent's flow;
     /// painted and hit-tested above its flow siblings.
     pub absolute: Option<Rect>,
@@ -200,7 +206,7 @@ impl Node {
             clip: false,
             paint: None,
             scroll: None,
-            content: 0.0,
+            content: Vec2::ZERO,
             absolute: None,
             z: crate::Layer::Window,
             xform: None,
@@ -219,6 +225,14 @@ fn from_axes(axis: Axis, main: f32, cross: f32) -> Vec2 {
     match axis {
         Axis::X => Vec2::new(main, cross),
         Axis::Y => Vec2::new(cross, main),
+    }
+}
+
+/// Does this container scroll along `axis`?
+fn scrolls(sc: Scroll, axis: Axis) -> bool {
+    match axis {
+        Axis::X => sc.scroll_x,
+        Axis::Y => sc.scroll_y,
     }
 }
 
@@ -267,9 +281,12 @@ fn measure(nodes: &mut [Node], i: usize) -> Vec2 {
         }
     }
     // A growing scroll container can shrink below its content; that's the point.
-    if nodes[i].scroll.is_some() {
-        if let Size::Grow(_) = l.height {
+    if let Some(sc) = nodes[i].scroll {
+        if sc.scroll_y && matches!(l.height, Size::Grow(_)) {
             min.y = l.padding.along(Axis::Y);
+        }
+        if sc.scroll_x && matches!(l.width, Size::Grow(_)) {
+            min.x = l.padding.along(Axis::X);
         }
     }
     nodes[i].min = min;
@@ -312,11 +329,22 @@ fn place(nodes: &mut [Node], i: usize, rect: Rect) {
             _ => fixed += get(nodes[c].min, axis),
         }
     }
-    let scroll = nodes[i].scroll.map(|s| s.offset);
-    if scroll.is_some() {
-        // Content may exceed the viewport; lay out at its natural size.
-        let content: f32 = children.iter().map(|&c| get(nodes[c].min, axis)).sum::<f32>() + gaps;
-        inner_main = inner_main.max(content);
+    // A scroll container lays its children out in a box that is the larger of
+    // the viewport and the content, on each axis it scrolls, then slides that
+    // box by the offset. `Grow` children fill the box, not the viewport, so a
+    // row inside a horizontally scrolling area spans the whole content width.
+    let scroll = nodes[i].scroll;
+    let mut inner_cross = inner_cross;
+    if let Some(sc) = scroll {
+        let natural_main: f32 = children.iter().map(|&c| get(nodes[c].min, axis)).sum::<f32>() + gaps;
+        let natural_cross =
+            children.iter().map(|&c| get(nodes[c].min, cross_axis)).fold(0.0f32, f32::max);
+        if scrolls(sc, axis) {
+            inner_main = inner_main.max(natural_main);
+        }
+        if scrolls(sc, cross_axis) {
+            inner_cross = inner_cross.max(natural_cross);
+        }
     }
     let free = (inner_main - gaps - fixed).max(0.0);
 
@@ -338,11 +366,14 @@ fn place(nodes: &mut [Node], i: usize, rect: Rect) {
             Align::Center => slack * 0.5,
             Align::End => slack,
         };
-    if let Some(offset) = scroll {
-        cursor -= offset;
-        nodes[i].content = total + l.padding.along(axis);
+    let mut cross_start = get(Vec2::new(inner.x, inner.y), cross_axis);
+    if let Some(sc) = scroll {
+        cursor -= get(sc.offset, axis);
+        cross_start -= get(sc.offset, cross_axis);
+        let content_main = total + l.padding.along(axis);
+        let content_cross = inner_cross + l.padding.along(cross_axis);
+        nodes[i].content = from_axes(axis, content_main, content_cross);
     }
-    let cross_start = get(Vec2::new(inner.x, inner.y), cross_axis);
 
     for (k, &c) in children.iter().enumerate() {
         let main = mains[k];
@@ -410,13 +441,24 @@ mod tests {
     fn scroll_container_offsets_children_and_reports_content() {
         let mut nodes = vec![Node::new(Id::new("root"), Layout::column())];
         let mut sc = Node::new(Id::new("sc"), Layout::column().height(Size::Grow(1.0)).gap(2.0));
-        sc.scroll = Some(Scroll { offset: 30.0, bar_id: Id::new("bar"), visible: 0.0, hover: 0.0, style: crate::Theme::dark().scrollbar });
+        sc.scroll = Some(Scroll {
+            offset: Vec2::new(0.0, 30.0),
+            scroll_x: false,
+            scroll_y: true,
+            bar_x: Id::new("bx"),
+            bar_y: Id::new("by"),
+            vis_x: 0.0,
+            hot_x: 0.0,
+            vis_y: 0.0,
+            hot_y: 0.0,
+            style: crate::Theme::dark().scrollbar,
+        });
         nodes.push(sc);
         nodes[0].children.push(1);
         let rows: Vec<usize> = (0..10).map(|_| leaf(&mut nodes, 1, Size::Grow(1.0), Size::Fixed(20.0), Vec2::ZERO)).collect();
         solve(&mut nodes, 0, Rect::new(0.0, 0.0, 100.0, 100.0));
         assert_eq!(nodes[1].rect.h, 100.0, "viewport keeps parent height");
-        assert_eq!(nodes[1].content, 10.0 * 20.0 + 9.0 * 2.0);
+        assert_eq!(nodes[1].content.y, 10.0 * 20.0 + 9.0 * 2.0);
         assert_eq!(nodes[rows[0]].rect.y, -30.0);
         assert_eq!(nodes[rows[9]].rect.y, 9.0 * 22.0 - 30.0);
     }

@@ -149,6 +149,11 @@ pub struct Demo {
     pub collapsed: HashSet<String>,
     /// Node graph: interaction state, and the graph itself.
     pub graph: libgui_nodes::GraphState,
+    pub projection: usize,
+    pub shading: usize,
+    pub baking: bool,
+    pub bake: f32,
+    pub faders: [f32; 3],
     pub nodes: Vec<GraphNode>,
     pub links: Vec<libgui_nodes::Link>,
     pub playing: bool,
@@ -188,6 +193,11 @@ impl Default for Demo {
             selected: 0,
             collapsed: HashSet::new(),
             graph: libgui_nodes::GraphState::new(),
+            projection: 0,
+            shading: 0,
+            baking: false,
+            bake: 0.0,
+            faders: [0.8, 0.5, 0.65],
             nodes: graph_nodes(),
             links: graph_links(),
             playing: true,
@@ -503,14 +513,40 @@ impl Panels<'_> {
         }
         ui.space(4.0);
         ui.section("Transform");
-        ui.slider("Scale", &mut d.scale, 0.3, 2.0);
-        ui.slider("Spin speed", &mut d.spin_speed, 0.0, 3.0);
-        ui.toggle("Auto rotate", &mut d.auto_rotate);
+        // Drag-to-edit numbers, the control an inspector is mostly made of.
+        ui.drag_value_range("Scale", &mut d.scale, 0.005, 0.3..=2.0);
+        ui.drag_value_range("Spin speed", &mut d.spin_speed, 0.01, 0.0..=3.0);
+        ui.slider("Scale (slider)", &mut d.scale, 0.3, 2.0);
+        ui.checkbox("Auto rotate", &mut d.auto_rotate);
         ui.space(4.0);
         ui.section("Camera");
-        ui.slider("Distance", &mut d.distance, 3.0, 20.0);
+        ui.drag_value_range("Distance", &mut d.distance, 0.05, 3.0..=20.0);
         ui.slider("Pitch", &mut d.pitch, -0.2, 1.3);
-        ui.toggle("Stats overlay", &mut d.overlay);
+        ui.combo("Projection", &mut d.projection, &["Perspective", "Orthographic"]);
+        ui.checkbox("Stats overlay", &mut d.overlay);
+        ui.space(4.0);
+        ui.section("Shading");
+        for (i, name) in ["Solid", "Wireframe", "Normals"].iter().enumerate() {
+            ui.radio(name, &mut d.shading, i);
+        }
+        ui.space(4.0);
+        ui.section("Bake");
+        if ui.checkbox("Running", &mut d.baking).clicked && d.baking {
+            d.bake = 0.0;
+        }
+        if d.baking {
+            d.bake = (d.bake + 0.004) % 1.0;
+            ui.progress("Progress", Some(d.bake));
+        } else {
+            ui.progress("Idle", None);
+        }
+        ui.space(4.0);
+        ui.section("Mix");
+        ui.row(|ui| {
+            for (i, ch) in ["A", "B", "C"].iter().enumerate() {
+                ui.slider_vertical(ch, &mut d.faders[i], 0.0, 1.0, 110.0);
+            }
+        });
     }
 
     fn console(&mut self, ui: &mut Ui) {

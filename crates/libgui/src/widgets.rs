@@ -181,6 +181,136 @@ impl Ui {
         resp
     }
 
+    /// A box you tick. Unlike [`Ui::toggle`], which is an inspector row with the
+    /// switch pushed to the right, this sits inline with its label.
+    pub fn checkbox(&mut self, label: &str, value: &mut bool) -> Response {
+        self.checkbox_keyed(label, label, value)
+    }
+
+    /// [`Ui::checkbox`] with an explicit key. See [`Ui::with_key`].
+    pub fn checkbox_keyed(&mut self, key: impl Hash, label: &str, value: &mut bool) -> Response {
+        let s = self.theme.toggle;
+        let sel = self.theme.selectable;
+        let id = self.make_id(("checkbox", key));
+        let size = self.theme.metrics.font_size;
+        let m = self.text_size(size, label);
+        let resp = self.interact(id);
+        if resp.clicked {
+            *value = !*value;
+        }
+        if resp.hovered {
+            self.cursor = Cursor::Pointer;
+        }
+        let on = self.animate_bool(id, 0, *value);
+        let hover = self.animate_bool(id, 1, resp.hovered);
+        let box_side = (size + 4.0).round();
+        let gap = 8.0;
+        let label = label.to_string();
+        let h = self.theme.metrics.control_height.max(box_side);
+        let content = Vec2::new(box_side + gap + m.x, m.y.max(box_side));
+        let layout = Layout::leaf(Size::Fit, Size::Fixed(h));
+        self.add_leaf(id, layout, content, true, move |p, r| {
+            let b = Rect::new(r.x, r.center().y - box_side * 0.5, box_side, box_side);
+            let fill = s.track_off.lerp(s.track_on, on);
+            let border = s.border_off.lerp(s.border_on, on).lerp(s.knob, hover * 0.3);
+            p.rect_bordered(b, fill, sel.radius * 0.8, 1.0, border);
+            if on > 0.01 {
+                // A tick drawn as two strokes, scaled in as it turns on.
+                let c = b.center();
+                let k = box_side * 0.5 * on;
+                let w = (box_side * 0.14).max(1.2);
+                let a = Vec2::new(c.x - k * 0.55, c.y + k * 0.02);
+                let bend = Vec2::new(c.x - k * 0.15, c.y + k * 0.45);
+                let e = Vec2::new(c.x + k * 0.6, c.y - k * 0.5);
+                p.line(a, bend, w, s.knob);
+                p.line(bend, e, w, s.knob);
+            }
+            p.text_left(r.shrink(box_side + gap, 0.0, 0.0, 0.0), size, sel.text_hover, &label);
+        });
+        resp
+    }
+
+    /// One of a set. `value` is set to `choice` when it is clicked.
+    pub fn radio<T: PartialEq + Copy>(&mut self, label: &str, value: &mut T, choice: T) -> Response {
+        let s = self.theme.toggle;
+        let sel = self.theme.selectable;
+        let id = self.make_id(("radio", label));
+        let size = self.theme.metrics.font_size;
+        let m = self.text_size(size, label);
+        let resp = self.interact(id);
+        if resp.clicked {
+            *value = choice;
+        }
+        if resp.hovered {
+            self.cursor = Cursor::Pointer;
+        }
+        let on = self.animate_bool(id, 0, *value == choice);
+        let hover = self.animate_bool(id, 1, resp.hovered);
+        let d = (size + 4.0).round();
+        let gap = 8.0;
+        let label = label.to_string();
+        let h = self.theme.metrics.control_height.max(d);
+        let content = Vec2::new(d + gap + m.x, m.y.max(d));
+        self.add_leaf(id, Layout::leaf(Size::Fit, Size::Fixed(h)), content, true, move |p, r| {
+            let b = Rect::new(r.x, r.center().y - d * 0.5, d, d);
+            let fill = s.track_off.lerp(s.track_on, on);
+            let border = s.border_off.lerp(s.border_on, on).lerp(s.knob, hover * 0.3);
+            p.rect_bordered(b, fill, d * 0.5, 1.0, border);
+            if on > 0.01 {
+                let dot = d * 0.42 * on;
+                let c = b.center();
+                p.rect(Rect::new(c.x - dot, c.y - dot, dot * 2.0, dot * 2.0), s.knob, dot);
+            }
+            p.text_left(r.shrink(d + gap, 0.0, 0.0, 0.0), size, sel.text_hover, &label);
+        });
+        resp
+    }
+
+    /// Progress from 0 to 1, or an indeterminate sweep when `value` is `None`.
+    pub fn progress(&mut self, label: &str, value: Option<f32>) {
+        let s = self.theme.slider;
+        let id = self.make_id(("progress", label));
+        let size = self.theme.metrics.font_size;
+        let m = self.text_size(size, label);
+        let show_label = !label.is_empty();
+        let text = match value {
+            Some(v) => format!("{:.0}%", v.clamp(0.0, 1.0) * 100.0),
+            None => String::new(),
+        };
+        // An indeterminate bar animates, so it has to ask for frames.
+        if value.is_none() {
+            self.request_repaint();
+        }
+        let time = self.time as f32;
+        let label = label.to_string();
+        let track_h = s.track_height.max(6.0);
+        let h = if show_label { m.y + 6.0 + track_h } else { track_h };
+        self.add_leaf(id, Layout::leaf(Size::Grow(1.0), Size::Fixed(h)), Vec2::new(80.0, h), false, move |p, r| {
+            if show_label {
+                let top = Rect::new(r.x, r.y, r.w, m.y);
+                p.text_left(top, size, s.label, &label);
+                p.text_right(top, size, s.value, &text);
+            }
+            let track = Rect::new(r.x, r.bottom() - track_h, r.w, track_h);
+            p.rect(track, s.track, track_h * 0.5);
+            match value {
+                Some(v) => {
+                    let w = track.w * v.clamp(0.0, 1.0);
+                    if w > 0.5 {
+                        p.rect(Rect::new(track.x, track.y, w, track_h), s.fill, track_h * 0.5);
+                    }
+                }
+                None => {
+                    // A chunk sweeping back and forth, easing at each end.
+                    let span = track.w * 0.3;
+                    let t = (time * 0.9).sin() * 0.5 + 0.5;
+                    let x = track.x + (track.w - span) * t;
+                    p.rect(Rect::new(x, track.y, span, track_h), s.fill, track_h * 0.5);
+                }
+            }
+        });
+    }
+
     /// Labelled horizontal slider. Drag anywhere on it.
     pub fn slider(&mut self, label: &str, value: &mut f32, min: f32, max: f32) -> Response {
         self.slider_keyed(label, label, value, min, max)
@@ -223,6 +353,156 @@ impl Ui {
             p.shadow(Rect::new(kx - kr, cy - kr + 1.0, kr * 2.0, kr * 2.0), kr, 2.0, p.theme.palette.shadow);
             p.rect(Rect::new(kx - kr, cy - kr, kr * 2.0, kr * 2.0), s.knob, kr);
         });
+        resp
+    }
+
+    /// Drag left and right to change a number — the control every inspector is
+    /// mostly made of.
+    ///
+    /// `speed` is units per pixel dragged. Hold the `word` modifier (Option on
+    /// Apple platforms, Ctrl elsewhere) for fine control, `shift` for coarse.
+    /// Unbounded unless you pass a range to [`Ui::drag_value_range`].
+    pub fn drag_value(&mut self, label: &str, value: &mut f32, speed: f32) -> Response {
+        self.drag_value_range(label, value, speed, f32::NEG_INFINITY..=f32::INFINITY)
+    }
+
+    /// [`Ui::drag_value`] clamped to a range.
+    pub fn drag_value_range(
+        &mut self,
+        label: &str,
+        value: &mut f32,
+        speed: f32,
+        range: std::ops::RangeInclusive<f32>,
+    ) -> Response {
+        let s = self.theme.text_input;
+        let sl = self.theme.slider;
+        let id = self.make_id(("drag_value", label));
+        let size = self.theme.metrics.font_size;
+        let h = self.theme.metrics.control_height;
+        let m = self.text_size(size, label);
+        let resp = self.interact_drag(id);
+
+        if resp.active && resp.drag_delta.x != 0.0 {
+            let mods = self.input.modifiers;
+            let scale = if mods.word { 0.1 } else if mods.shift { 10.0 } else { 1.0 };
+            *value = (*value + resp.drag_delta.x * speed * scale).clamp(*range.start(), *range.end());
+        }
+        if resp.hovered || resp.active {
+            self.cursor = Cursor::ResizeHorizontal;
+        }
+        if resp.active {
+            // Lock the pointer so a drag can keep going past the screen edge
+            // instead of stopping when the cursor runs out of room.
+            self.request_pointer_lock();
+        }
+        let hover = self.animate_bool(id, 0, resp.hovered);
+        let drag = self.animate_bool(id, 1, resp.active);
+        // Show enough decimals to see a change at this speed.
+        let decimals = if speed >= 1.0 { 0 } else if speed >= 0.1 { 1 } else if speed >= 0.01 { 2 } else { 3 };
+        let text = format!("{:.*}", decimals, *value);
+        let label = label.to_string();
+        let show_label = !label.is_empty();
+        let content = Vec2::new(m.x + 64.0, m.y);
+        let layout = Layout::leaf(Size::Grow(1.0), Size::Fixed(h)).padding(Insets::xy(s.padding_x, 0.0));
+        self.add_leaf(id, layout, content, true, move |p, r| {
+            let border = s.border.lerp(s.border_hover, hover).lerp(s.border_focus, drag);
+            p.rect_bordered(r, s.fill, s.radius, 1.0, border);
+            if show_label {
+                p.text_left(r.shrink(s.padding_x, 0.0, 0.0, 0.0), size, s.placeholder, &label);
+                p.text_right(r.shrink(0.0, 0.0, s.padding_x, 0.0), size, sl.value.lerp(sl.value_active, drag), &text);
+            } else {
+                p.text_centered(r, size, sl.value.lerp(sl.value_active, drag), &text);
+            }
+        });
+        resp
+    }
+
+    /// A vertical fader: the mixer control, and the shape a level wants.
+    pub fn slider_vertical(&mut self, label: &str, value: &mut f32, min: f32, max: f32, height: f32) -> Response {
+        let s = self.theme.slider;
+        let id = self.make_id(("vslider", label));
+        let resp = self.interact_drag(id);
+        let kr0 = s.knob_radius;
+        if resp.active && resp.rect.h > 2.0 * kr0 {
+            // Up is more, which is the opposite of the y axis.
+            let frac = 1.0 - ((resp.mouse_pos.y - resp.rect.y - kr0) / (resp.rect.h - 2.0 * kr0)).clamp(0.0, 1.0);
+            *value = min + frac * (max - min);
+        }
+        if resp.hovered || resp.active {
+            self.cursor = if resp.active { Cursor::Grabbing } else { Cursor::Grab };
+        }
+        let frac = ((*value - min) / (max - min)).clamp(0.0, 1.0);
+        let hover = self.animate_bool(id, 0, resp.hovered || resp.active);
+        let drag = self.animate_bool(id, 1, resp.active);
+        let _ = label;
+        let w = (kr0 * 2.0 + 8.0).ceil();
+        self.add_leaf(id, Layout::leaf(Size::Fixed(w), Size::Fixed(height)), Vec2::new(w, height), true, move |p, r| {
+            let th = s.track_height;
+            let cx = r.center().x;
+            let track = Rect::new(cx - th * 0.5, r.y + kr0, th, r.h - 2.0 * kr0);
+            p.rect(track, s.track, th * 0.5);
+            let ky = track.bottom() - frac * track.h;
+            p.rect(Rect::new(track.x, ky, th, track.bottom() - ky), s.fill, th * 0.5);
+            let ring = kr0 + 5.0 * hover;
+            p.rect(Rect::new(cx - ring, ky - ring, ring * 2.0, ring * 2.0), s.ring.with_alpha(s.ring.a * hover), ring);
+            let kr = kr0 + drag;
+            p.shadow(Rect::new(cx - kr, ky - kr + 1.0, kr * 2.0, kr * 2.0), kr, 2.0, p.theme.palette.shadow);
+            p.rect(Rect::new(cx - kr, ky - kr, kr * 2.0, kr * 2.0), s.knob, kr);
+        });
+        resp
+    }
+
+    /// A dropdown: shows the chosen option, opens a menu of them.
+    pub fn combo(&mut self, label: &str, selected: &mut usize, options: &[&str]) -> Response {
+        let s = self.theme.text_input;
+        let menu = self.theme.menu;
+        let id = self.make_id(("combo", label));
+        let popup_id = id.with("menu");
+        let size = self.theme.metrics.font_size;
+        let h = self.theme.metrics.control_height;
+        let idx = (*selected).min(options.len().saturating_sub(1));
+        let shown = options.get(idx).copied().unwrap_or("").to_string();
+        let m = self.text_size(size, &shown);
+        let resp = self.interact(id);
+        let open = self.popup_open(popup_id);
+        if resp.clicked {
+            if open {
+                self.close_popups();
+            } else {
+                let anchor = self.xform().rect(resp.rect);
+                self.open_popup(popup_id, anchor);
+            }
+        }
+        if resp.hovered {
+            self.cursor = Cursor::Pointer;
+        }
+        let hover = self.animate_bool(id, 0, resp.hovered);
+        let hot = self.animate_bool(id, 1, open);
+        let arrow_w = h;
+        let content = Vec2::new(m.x + arrow_w + s.padding_x * 2.0, m.y);
+        let layout = Layout::leaf(Size::Grow(1.0), Size::Fixed(h)).padding(Insets::xy(s.padding_x, 0.0));
+        self.add_leaf(id, layout, content, true, move |p, r| {
+            let border = s.border.lerp(s.border_hover, hover).lerp(s.border_focus, hot);
+            p.rect_bordered(r, s.fill, s.radius, 1.0, border);
+            p.text_left(r.shrink(s.padding_x, 0.0, arrow_w, 0.0), size, s.text, &shown);
+            let a = Rect::new(r.right() - arrow_w, r.y, arrow_w, r.h);
+            p.text_centered(a, size, menu.shortcut, "\u{25BE}");
+        });
+
+        // The menu is a popup, so it escapes any clipping the combo sits in.
+        let opts: Vec<String> = options.iter().map(|o| o.to_string()).collect();
+        let width = resp.rect.w.max(120.0);
+        let mut picked = None;
+        self.popup(popup_id, width, |ui| {
+            for (i, o) in opts.iter().enumerate() {
+                if ui.menu_item_ex(o, None, true).clicked {
+                    picked = Some(i);
+                }
+            }
+        });
+        if let Some(i) = picked {
+            *selected = i;
+        }
         resp
     }
 
@@ -590,6 +870,15 @@ impl Ui {
     /// Engine viewport: shows a host-rendered texture and gives you input over it.
     /// `overlay` runs in the immediate paint layer on top of the image
     /// (gizmo labels, stats, selection boxes).
+    ///
+    /// Render your scene at [`Ui::physical_px`] of the returned rect and hand
+    /// the texture back through `texture`; anything else is resampled and looks
+    /// soft. The rect is one frame old, like every [`Response`], so resize your
+    /// target when it changes rather than every frame.
+    ///
+    /// The image is composited as **opaque sRGB**: its alpha is ignored and no
+    /// colour conversion happens, so a linear or HDR target must be converted
+    /// before it gets here. See `libgui::render_contract`.
     pub fn viewport(&mut self, key: &str, texture: TextureId, overlay: impl FnOnce(&mut Painter, Rect) + 'static) -> Response {
         let s = self.theme.viewport;
         let id = self.make_id(("viewport", key));
@@ -622,6 +911,138 @@ mod tests {
     fn click_at(ui: &mut Ui, x: f32, y: f32, down: bool) {
         ui.push(InputEvent::PointerMoved { pos: Vec2::new(x, y) });
         ui.push(InputEvent::PointerButton { button: PointerButton::Primary, pressed: down });
+    }
+
+    /// Checkbox and radio toggle their own value; radio is exclusive.
+    #[test]
+    fn checkbox_and_radio_set_their_values() {
+        #[derive(Clone, Copy, PartialEq, Debug)]
+        enum Mode {
+            A,
+            B,
+        }
+        let mut ui = ui();
+        let (mut checked, mut mode) = (false, Mode::A);
+        let frame = |ui: &mut Ui, checked: &mut bool, mode: &mut Mode| -> (Rect, Rect) {
+            ui.begin_frame(FrameInfo::default());
+            let c = ui.checkbox("Visible", checked).rect;
+            let r = ui.radio("Mode B", mode, Mode::B).rect;
+            let _ = ui.end_frame();
+            (c, r)
+        };
+        frame(&mut ui, &mut checked, &mut mode);
+        let (cbox, rbox) = frame(&mut ui, &mut checked, &mut mode);
+
+        // Click the checkbox: on, then off again.
+        for expected in [true, false] {
+            click_at(&mut ui, cbox.x + 8.0, cbox.center().y, true);
+            frame(&mut ui, &mut checked, &mut mode);
+            click_at(&mut ui, cbox.x + 8.0, cbox.center().y, false);
+            frame(&mut ui, &mut checked, &mut mode);
+            assert_eq!(checked, expected, "checkbox did not toggle to {expected}");
+        }
+
+        // Radio sets its choice and, unlike a checkbox, does not unset it.
+        for _ in 0..2 {
+            click_at(&mut ui, rbox.x + 8.0, rbox.center().y, true);
+            frame(&mut ui, &mut checked, &mut mode);
+            click_at(&mut ui, rbox.x + 8.0, rbox.center().y, false);
+            frame(&mut ui, &mut checked, &mut mode);
+            assert_eq!(mode, Mode::B, "radio should stay on its choice");
+        }
+    }
+
+    /// Dragging a number field changes it by distance times speed, with the
+    /// modifiers scaling it, and a range clamping it.
+    #[test]
+    fn drag_value_tracks_the_pointer_and_clamps() {
+        let mut ui = ui();
+        let mut v = 0.0f32;
+        let frame = |ui: &mut Ui, v: &mut f32| -> Rect {
+            ui.begin_frame(FrameInfo::default());
+            let r = ui.drag_value_range("X", v, 1.0, -50.0..=50.0).rect;
+            let _ = ui.end_frame();
+            r
+        };
+        frame(&mut ui, &mut v);
+        let r = frame(&mut ui, &mut v);
+        let y = r.center().y;
+
+        // Press, then drag 30px right: +30 at speed 1.
+        click_at(&mut ui, r.x + 20.0, y, true);
+        frame(&mut ui, &mut v);
+        ui.push(InputEvent::PointerMoved { pos: Vec2::new(r.x + 50.0, y) });
+        frame(&mut ui, &mut v);
+        assert!((v - 30.0).abs() < 0.01, "expected 30, got {v}");
+
+        // Keep going past the range: clamped, not run away.
+        for i in 1..20 {
+            ui.push(InputEvent::PointerMoved { pos: Vec2::new(r.x + 50.0 + i as f32 * 20.0, y) });
+            frame(&mut ui, &mut v);
+        }
+        assert_eq!(v, 50.0, "range did not clamp");
+        click_at(&mut ui, r.x + 400.0, y, false);
+        frame(&mut ui, &mut v);
+
+        // Releasing stops it following the pointer.
+        let held = v;
+        ui.push(InputEvent::PointerMoved { pos: Vec2::new(r.x + 10.0, y) });
+        frame(&mut ui, &mut v);
+        assert_eq!(v, held, "value moved after the drag ended");
+    }
+
+    /// A vertical fader is high at the top, unlike the y axis it is drawn on.
+    #[test]
+    fn a_vertical_slider_is_high_at_the_top() {
+        let mut ui = ui();
+        let mut v = 0.5f32;
+        let frame = |ui: &mut Ui, v: &mut f32| -> Rect {
+            ui.begin_frame(FrameInfo::default());
+            let r = ui.slider_vertical("Gain", v, 0.0, 1.0, 200.0).rect;
+            let _ = ui.end_frame();
+            r
+        };
+        frame(&mut ui, &mut v);
+        let r = frame(&mut ui, &mut v);
+
+        click_at(&mut ui, r.center().x, r.y + 2.0, true);
+        frame(&mut ui, &mut v);
+        assert!(v > 0.95, "dragging to the top should be the maximum, got {v}");
+        click_at(&mut ui, r.center().x, r.bottom() - 2.0, true);
+        frame(&mut ui, &mut v);
+        assert!(v < 0.05, "dragging to the bottom should be the minimum, got {v}");
+    }
+
+    /// A combo opens a menu and picking an item sets the index.
+    #[test]
+    fn a_combo_picks_from_its_menu() {
+        let mut ui = ui();
+        let mut sel = 0usize;
+        let frame = |ui: &mut Ui, sel: &mut usize| -> (Rect, bool) {
+            ui.begin_frame(FrameInfo::default());
+            let r = ui.combo("Blend", sel, &["Normal", "Add", "Multiply"]).rect;
+            let open = ui.any_popup_open();
+            let _ = ui.end_frame();
+            (r, open)
+        };
+        frame(&mut ui, &mut sel);
+        let (r, _) = frame(&mut ui, &mut sel);
+
+        click_at(&mut ui, r.center().x, r.center().y, true);
+        frame(&mut ui, &mut sel);
+        click_at(&mut ui, r.center().x, r.center().y, false);
+        assert!(frame(&mut ui, &mut sel).1, "the combo did not open");
+        frame(&mut ui, &mut sel);
+
+        // Pick the third item.
+        let menu = ui.rect_of(Id::new("root").with(("combo", "Blend")).with("menu")).expect("no menu");
+        let item_y = menu.y + menu.h - 14.0;
+        click_at(&mut ui, menu.x + 20.0, item_y, true);
+        frame(&mut ui, &mut sel);
+        click_at(&mut ui, menu.x + 20.0, item_y, false);
+        let (_, open) = frame(&mut ui, &mut sel);
+        assert_eq!(sel, 2, "picked the wrong option");
+        assert!(!open, "the menu stayed open after picking");
     }
 
     /// The core of a menu: it opens on a click, sizes itself to its items,
