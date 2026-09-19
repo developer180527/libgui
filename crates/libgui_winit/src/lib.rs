@@ -14,7 +14,8 @@
 //! platform.apply(&window, &out.platform);
 //! ```
 
-use libgui::{Cursor, InputEvent, Key, Modifiers, PlatformOutput, PointerButton, TouchPhase, Ui, Vec2, WheelUnit};
+use libgui::{Cursor, InputEvent, Key, Modifiers, Payload, PlatformOutput, PointerButton, TouchPhase, Ui, Vec2, WheelUnit};
+use std::path::PathBuf;
 use winit::dpi::{LogicalPosition, LogicalSize};
 use winit::event::{DeviceEvent, ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::keyboard::{Key as WKey, KeyCode, NamedKey, PhysicalKey};
@@ -250,6 +251,86 @@ impl PlatformState {
         }
         if let Some(r) = out.text_input {
             window.set_ime_cursor_area(LogicalPosition::new(r.x, r.y), LogicalSize::new(r.w.max(1.0), r.h));
+        }
+    }
+}
+
+/// Payload kind for a file drag from the OS, carrying `Vec<PathBuf>`.
+pub const FILES: &str = "files";
+
+/// Turns winit's per-file drag events into one libgui drag.
+///
+/// winit reports a file drag one path at a time — `HoveredFile` for each file
+/// as it comes over the window, then `DroppedFile` for each when it lands — and
+/// none of those events carry a position. That is exactly the kind of
+/// platform-shaped detail libgui keeps out of its core: this accumulates the
+/// paths and hands the result over with
+/// [`Ui::begin_external_drag`](libgui::Ui::begin_external_drag), and the
+/// pointer position it routes against is the one the ordinary `CursorMoved`
+/// events already established.
+///
+/// ```ignore
+/// // once, next to the Ui:
+/// let mut files = FileDrop::default();
+/// // in window_event, before push_window_event:
+/// files.push_window_event(&mut ui, &event);
+/// // in the UI, wherever files are welcome:
+/// if let Some(p) = ui.drop_zone(&[libgui_winit::FILES]).dropped {
+///     if let Ok(paths) = p.take::<Vec<std::path::PathBuf>>() { /* open them */ }
+/// }
+/// ```
+#[derive(Default)]
+pub struct FileDrop {
+    /// Paths seen so far in this gesture, in the order winit reported them.
+    paths: Vec<PathBuf>,
+    /// The drop has been handed over; the remaining `DroppedFile` events for
+    /// the same gesture are the tail of it, not a new drag.
+    done: bool,
+}
+
+impl FileDrop {
+    /// Feed it every window event. Returns true if it consumed one, in which
+    /// case [`push_window_event`] has nothing to do with it.
+    pub fn push_window_event(&mut self, ui: &mut Ui, event: &WindowEvent) -> bool {
+        match event {
+            WindowEvent::HoveredFile(path) => {
+                if self.done {
+                    self.reset();
+                }
+                self.paths.push(path.clone());
+                ui.begin_external_drag(Payload::new(FILES, self.paths.clone()).with_label(self.label()));
+            }
+            WindowEvent::HoveredFileCancelled => {
+                self.reset();
+                ui.end_external_drag(false);
+            }
+            WindowEvent::DroppedFile(path) => {
+                if self.done {
+                    return true;
+                }
+                // Some platforms drop without ever hovering; then this event is
+                // the whole gesture.
+                if self.paths.is_empty() {
+                    self.paths.push(path.clone());
+                    ui.begin_external_drag(Payload::new(FILES, self.paths.clone()).with_label(self.label()));
+                }
+                self.done = true;
+                ui.end_external_drag(true);
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    fn reset(&mut self) {
+        self.paths.clear();
+        self.done = false;
+    }
+
+    fn label(&self) -> String {
+        match self.paths.as_slice() {
+            [one] => one.file_name().unwrap_or(one.as_os_str()).to_string_lossy().into_owned(),
+            many => format!("{} files", many.len()),
         }
     }
 }

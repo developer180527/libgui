@@ -6,6 +6,7 @@
 //! backend-agnostic [`DrawList`]. It never touches the GPU; see [`Backend`].
 
 mod backend;
+mod dnd;
 mod dock;
 mod draw;
 mod font;
@@ -29,6 +30,7 @@ mod widgets;
 
 pub use backend::{Backend, Globals, INSTANCE_STRIDE, VERTICES_PER_INSTANCE};
 pub use dock::{DockConfig, FloatingMode, DockNode, DockState, DropKind, DropTarget, Side, Surface, SurfaceId, TabViewer};
+pub use dnd::{DragSource, DropZone, Payload};
 pub use draw::{Batch, DrawList, Instance, TextureId};
 pub use id::{Id, StableHasher};
 pub use input::{

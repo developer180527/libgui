@@ -120,6 +120,8 @@ struct Win {
     title: String,
     /// Fingers down (id, logical pos): the dock follows the first one.
     fingers: Vec<(u64, Vec2)>,
+    /// Turns the OS's per-file drag events into one libgui drag.
+    files: libgui_winit::FileDrop,
 }
 
 struct App {
@@ -233,6 +235,7 @@ impl App {
                 visible: true,
                 title: title.to_string(),
                 fingers: Vec::new(),
+                files: libgui_winit::FileDrop::default(),
             },
         );
         id
@@ -427,6 +430,8 @@ impl App {
                     status_bar(ui, demo);
                 }
             });
+            // Above everything, so it is the last thing built.
+            ui.drag_ghost();
         }
         let out = w.ui.end_frame();
         let platform = out.platform.clone();
@@ -598,7 +603,9 @@ impl ApplicationHandler for App {
     fn window_event(&mut self, el: &ActiveEventLoop, wid: WindowId, event: WindowEvent) {
         let Some(w) = self.wins.get_mut(&wid) else { return };
         // All input goes to this window's UI; the arms below are host-only concerns.
-        libgui_winit::push_window_event(&mut w.ui, &event, w.window.scale_factor());
+        if !w.files.push_window_event(&mut w.ui, &event) {
+            libgui_winit::push_window_event(&mut w.ui, &event, w.window.scale_factor());
+        }
         match event {
             WindowEvent::CloseRequested => {
                 if w.dock_id == SurfaceId::MAIN {

@@ -35,6 +35,8 @@ pub enum Pointer {
     ClickAndType(&'static str),
     /// Rest over it and wheel by this many pixels.
     Wheel(f32),
+    /// Press on it, then move by this much and hold: a drag in flight.
+    DragBy(Vec2),
 }
 
 pub struct Scene {
@@ -101,6 +103,16 @@ impl Scene {
                 ui.push(InputEvent::PointerMoved { pos: at });
                 ui.push(InputEvent::Wheel { delta: Vec2::new(0.0, dy), unit: WheelUnit::Pixel });
             }
+            Pointer::DragBy(_) => {
+                ui.push(InputEvent::PointerMoved { pos: at });
+                press(&mut ui, true);
+            }
+        }
+        // The move has to be a frame after the press: a drag needs travel, and
+        // `drag_delta` is deliberately zero on the frame a press lands.
+        if let Pointer::DragBy(d) = self.pointer {
+            frame(&mut ui);
+            ui.push(InputEvent::PointerMoved { pos: at + d });
         }
         for _ in 0..3 {
             frame(&mut ui);
@@ -286,6 +298,31 @@ fn scroll_target(ui: &mut Ui) {
     });
 }
 
+/// A list being reordered: a drag in flight, its ghost above everything, and
+/// the insertion line where it would land.
+fn drag_reorder(ui: &mut Ui) {
+    const NAMES: [&str; 5] = ["Camera", "Key Light", "Fill Light", "Mesh", "Material"];
+    panel(ui, |ui| {
+        ui.section("Outliner");
+        for (i, name) in NAMES.iter().enumerate() {
+            let row = ui.make_id(("row", i));
+            ui.container_id(row, Layout::column().height(Size::Fit), Frame::none(), |ui| {
+                let zone = ui.drop_zone(&["object"]);
+                let mid = ui.rect_of(row).map_or(f32::MAX, |r| r.y + r.h * 0.5);
+                if zone.hovered {
+                    ui.insertion_line(row, Axis::Y, zone.pointer.y >= mid);
+                }
+                let r = ui.selectable(name, false);
+                if i == 0 {
+                    target(r.rect);
+                }
+                ui.drag_source_from(&r, || Payload::new("object", i).with_label(*name));
+            });
+        }
+    });
+    ui.drag_ghost();
+}
+
 pub const SCENES: &[Scene] = &[
     Scene { name: "widgets", size: (320.0, 640.0), pointer: Pointer::None, build: widgets },
     Scene { name: "tree", size: (240.0, 230.0), pointer: Pointer::None, build: tree },
@@ -299,6 +336,8 @@ pub const SCENES: &[Scene] = &[
     Scene { name: "combo_open", size: (260.0, 160.0), pointer: Pointer::ClickAndType(""), build: combo_target },
     // 37px: not a multiple of anything, so a fractional offset would show.
     Scene { name: "scroll_mid", size: (240.0, 180.0), pointer: Pointer::Wheel(-37.0), build: scroll_target },
+    // Down past three rows, and sideways, so the ghost is clear of the list.
+    Scene { name: "drag_reorder", size: (240.0, 200.0), pointer: Pointer::DragBy(Vec2::new(24.0, 74.0)), build: drag_reorder },
 ];
 
 pub fn scene(name: &str) -> &'static Scene {

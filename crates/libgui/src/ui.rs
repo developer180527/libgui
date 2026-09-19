@@ -384,15 +384,15 @@ pub struct Ui {
     prev_down: bool,
     pub(crate) pressed: bool,
     pub(crate) released: bool,
-    nodes: Vec<Node>,
-    stack: Vec<usize>,
+    pub(crate) nodes: Vec<Node>,
+    pub(crate) stack: Vec<usize>,
     // Retained state
     rects: FxMap<Id, Rect>,
     hits: Vec<(Id, Rect)>,
     hovered: Option<Id>,
     active: Option<Id>,
     anims: FxMap<(Id, u8), f32>,
-    seen: FxSet<Id>,
+    pub(crate) seen: FxSet<Id>,
     /// Next free suffix per colliding base id, so N widgets sharing a key cost
     /// O(N) to disambiguate rather than O(N^2).
     dup_next: FxMap<Id, u32>,
@@ -419,7 +419,7 @@ pub struct Ui {
     /// Fitted size of each floating node, measured last frame. A popup sizes
     /// itself to its content, but its rect is also what positions it, so the
     /// content size has to come from the previous frame's measure.
-    layer_min: FxMap<Id, Vec2>,
+    pub(crate) layer_min: FxMap<Id, Vec2>,
     draw: DrawList,
     pub(crate) time: f64,
     // Keyboard focus
@@ -431,6 +431,14 @@ pub struct Ui {
     pub(crate) ime_rect: Option<Rect>,
     // Scrolling
     scroll_states: FxMap<Id, ScrollState>,
+    // Drag and drop
+    pub(crate) dnd: crate::dnd::Dnd,
+    /// Zones that accepted the current drag, in paint order; the innermost one
+    /// under the pointer is resolved at the next frame's start.
+    pub(crate) drop_hits: Vec<(Id, Rect)>,
+    pub(crate) drop_hot: Option<Id>,
+    /// Pointer travel (logical px) before a press on a drag source becomes a drag.
+    pub drag_threshold: f32,
     scroll_hits: Vec<(Id, Rect)>,
     scroll_target: Option<Id>,
     /// Hit rects that win over normal widgets (splitters).
@@ -539,6 +547,10 @@ impl Ui {
             scroll_states: FxMap::default(),
             scroll_hits: Vec::new(),
             scroll_target: None,
+            dnd: crate::dnd::Dnd::Idle,
+            drop_hits: Vec::new(),
+            drop_hot: None,
+            drag_threshold: 4.0,
             top_hits: Vec::new(),
             overlays: Vec::new(),
             touch_slop: 8.0,
@@ -1008,6 +1020,7 @@ impl Ui {
         // the same one-frame-late rule the rest of the input model uses.
         self.typing = self.focused.is_some();
         self.sheet_done = false;
+        self.dnd_begin_frame();
         self.popup_stack.clear();
         self.xform_stack.clear();
         let s = self.input.screen_size;
@@ -1035,12 +1048,14 @@ impl Ui {
         self.rects.clear();
         self.scroll_hits.clear();
         self.top_hits.clear();
+        self.drop_hits.clear();
         let mut painter = Painter { draw: &mut self.draw, fonts: &mut self.fonts, theme: &self.theme, font: self.font };
         let mut sink = HitSink {
             hits: &mut self.hits,
             rects: &mut self.rects,
             scroll_hits: &mut self.scroll_hits,
             top_hits: &mut self.top_hits,
+            drop_hits: &mut self.drop_hits,
         };
         paint(&mut self.nodes, 0, &mut painter, &mut sink);
         for overlay in self.overlays.drain(..) {
@@ -1086,6 +1101,8 @@ impl Ui {
         if self.focused.is_some_and(|f| !seen.contains(&f)) {
             self.focused = None;
         }
+
+        self.dnd_end_frame();
 
         let busy = self.active.is_some() || self.touch_scroll.is_some() || self.animating;
         let platform = PlatformOutput {
@@ -1384,10 +1401,35 @@ impl Ui {
         self.layer_in(id, Layer::Window, rect, frame, body)
     }
 
+    /// [`Ui::layer`] that sizes itself to its content: `place` is handed the
+    /// fitted size and returns where to put it. Returns the rect it used.
+    ///
+    /// The layer's rect is also what positions it, so the size can only come
+    /// from the previous frame's measure: on the frame it first appears it is
+    /// zero-sized and invisible, and it settles on the next — the same
+    /// one-frame rule as [`Response::rect`]. Used by [`Ui::drag_ghost`].
+    pub fn layer_fit_in<R>(
+        &mut self,
+        id: Id,
+        z: Layer,
+        place: impl FnOnce(Vec2) -> Rect,
+        frame: Frame,
+        body: impl FnOnce(&mut Self) -> R,
+    ) -> (Rect, R) {
+        let fitted = self.layer_min.get(&id).copied().unwrap_or(Vec2::ZERO);
+        let rect = place(fitted);
+        let layout = Layout::column().width(Size::Fit).height(Size::Fit);
+        (rect, self.layer_with(id, z, rect, layout, frame, body))
+    }
+
     /// [`Ui::layer`] in an explicit stacking [`Layer`].
     pub fn layer_in<R>(&mut self, id: Id, z: Layer, rect: Rect, frame: Frame, body: impl FnOnce(&mut Self) -> R) -> R {
+        self.layer_with(id, z, rect, Layout::column().shrink(), frame, body)
+    }
+
+    fn layer_with<R>(&mut self, id: Id, z: Layer, rect: Rect, layout: Layout, frame: Frame, body: impl FnOnce(&mut Self) -> R) -> R {
         self.seen.insert(id);
-        let mut n = Node::new(id, Layout::column().shrink());
+        let mut n = Node::new(id, layout);
         n.absolute = Some(rect);
         n.z = z;
         n.clip = frame.clip;
@@ -1800,6 +1842,7 @@ struct HitSink<'a> {
     top_hits: &'a mut Vec<(Id, Rect)>,
     rects: &'a mut FxMap<Id, Rect>,
     scroll_hits: &'a mut Vec<(Id, Rect)>,
+    drop_hits: &'a mut Vec<(Id, Rect)>,
 }
 
 fn paint(nodes: &mut [Node], i: usize, p: &mut Painter, sink: &mut HitSink) {
@@ -1823,6 +1866,9 @@ fn paint(nodes: &mut [Node], i: usize, p: &mut Painter, sink: &mut HitSink) {
     }
     if let (Some(_), Some(r)) = (nodes[i].scroll, visible) {
         sink.scroll_hits.push((id, r));
+    }
+    if let (true, Some(r)) = (nodes[i].drop_zone, visible) {
+        sink.drop_hits.push((id, r));
     }
     if let Some(f) = nodes[i].paint.take() {
         f(p, rect);

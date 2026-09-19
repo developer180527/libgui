@@ -22,7 +22,7 @@ cargo run -p libgui_shaders -- shaders_out   # export HLSL/MSL/GLSL/SPIR-V/WGSL
 | Version | 0.1.0, pre-1.0: the API still changes between releases |
 
 Not yet: multi-line text, font fallback, IME composition display, accessibility, tables, colour
-picker, general drag and drop, layout persistence. See the roadmap.
+picker, layout persistence. See the roadmap.
 
 ## Crates
 
@@ -417,12 +417,68 @@ ui.virtual_list("tree", rows.len(), row_h, |ui, i| {
 
 `tree_row` draws the indentation, a disclosure arrow and a label styled like `selectable`.
 `toggled` and `response.clicked` are never both true, so expanding a node never also selects it.
-Indent width is `theme.metrics.indent`. The arrow is a glyph (`▸`/`▾`) because the shader has no
-triangle primitive.
+Indent width is `theme.metrics.indent`. The arrow is drawn as two strokes (`Painter::chevron`), not
+a glyph, so it does not depend on the font having `▸`/`▾`.
 
 The demo's outliner is a worked example of all of it: a variable-height tree (group headers are
 taller than leaves), virtualised, that flattens to a plain list of hits while the search box is in
 use — see `libgui_demo/src/panels.rs::outliner_rows`.
+
+## Drag and drop
+
+Any widget can be a drag source, any container a drop zone. A drag carries a `Payload`: a `kind`
+that zones filter on, a `label` for the ghost, and a value only your app understands.
+
+```rust
+// source: a row that is both selectable and draggable resolves its input once
+let r = ui.tree_row(("o", i), depth, Branch::Leaf, &names[i], i == selected);
+let drag = ui.drag_source_from(&r.response, || Payload::new("object", i).with_label(&names[i]));
+if r.response.clicked && !drag.dragging { selected = i; }
+
+// zone: the innermost open container
+let zone = ui.drop_zone(&["object"]);
+if zone.hovered { ui.insertion_line(row_id, Axis::Y, zone.pointer.y >= mid); }
+if let Some(p) = zone.dropped {
+    if let Ok(from) = p.take::<usize>() { reorder(from, at); }
+}
+
+// once per frame, last: the ghost that follows the pointer in `Layer::Drag`
+ui.drag_ghost();
+```
+
+The rules:
+
+- A press becomes a drag only past `ui.drag_threshold` (4 logical px), so a click is still a click.
+  The payload closure runs at that moment, not on every frame of hovering.
+- Zones nest. The **innermost** zone under the pointer that accepts the drag wins, and a zone that
+  does not accept the kind is not in the running at all — so a list of `"object"` rows inside a
+  panel that accepts `"file"` does not swallow the file. One container is one zone.
+- Releasing offers the payload to that zone for exactly one frame. `dropped` hands you the value by
+  move; nobody takes it, it is gone. `Escape` cancels.
+- `zone.pointer` is in the space the zone was built in (canvas coordinates inside a canvas), so
+  working out an insertion index is the same arithmetic at any zoom.
+- `zone.rect` and `ui.drop_highlight(rect)` draw the whole-zone highlight; `ui.insertion_line` draws
+  the between-rows one. Both are ordinary nodes, so a scroll area clips them.
+
+Drags from **outside** the UI are the host's to detect, and the core only routes them:
+
+```rust
+// host: winit reports a file drag one path at a time, with no position
+let mut files = libgui_winit::FileDrop::default();
+files.push_window_event(&mut ui, &event);          // -> ui.begin_external_drag(..)
+
+// UI: identical to any other drag
+if let Some(p) = ui.drop_zone(&[libgui_winit::FILES]).dropped {
+    if let Ok(paths) = p.take::<Vec<PathBuf>>() { open(paths); }
+}
+```
+
+`Ui::begin_external_drag` / `end_external_drag` is the whole seam. `libgui` itself never sees a
+`PathBuf`, a clipboard format or an OS drag session: `libgui_winit::FileDrop` is one small,
+replaceable host adapter, and any other host writes its own.
+
+The demo's outliner does both: rows reorder by dragging, and files dropped from Finder or Explorer
+become objects.
 
 ## Docking (Unity-style, multi-window)
 
@@ -639,8 +695,9 @@ lag, fling, easing) stay as frame-trace tests like
 5. ~~Paths~~ ✅ `p.line` / `polyline` / `bezier` / `wire`, a `Line` primitive at `CONTRACT_VERSION` 2;
    next: stroked/filled arbitrary paths, dashes, arrowheads, and a real line/area plot (`plot` is
    still a debug bar chart).
-6. ~~Horizontal and 2D scrolling~~ ✅ `ScrollOptions::both` / `horizontal`; next: tables/data grids
-   with resizable and frozen columns, and general drag and drop.
+6. ~~Horizontal and 2D scrolling~~ ✅ ~~general drag and drop~~ ✅ `ScrollOptions::both` /
+   `horizontal`, `drag_source` / `drop_zone` / `Payload` with a host seam for OS drags; next:
+   tables/data grids with resizable and frozen columns, and auto-scroll while dragging near an edge.
 7. **Real text shaping**: replace `text.rs` internals with `cosmic-text`/`swash` or HarfBuzz
    (ligatures, bidi, font fallback, CJK), multi-page atlas with LRU eviction.
 8. ~~Theme hot-reload~~ ✅ TOML themes, per-widget styles, density presets; next: multiple fonts (UI/mono/icons) in the theme, per-widget disabled states.

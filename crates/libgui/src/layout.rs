@@ -179,6 +179,9 @@ pub(crate) struct Node {
     pub clip: bool,
     pub paint: Option<PaintFn>,
     pub scroll: Option<Scroll>,
+    /// Registered as a drop zone this frame (only when it accepts the drag in
+    /// flight, so rejecting zones do not shadow accepting ones beneath them).
+    pub drop_zone: bool,
     /// Scroll containers: full content size incl. padding, set by `place`.
     pub content: Vec2,
     /// Positioned at this rect (window coordinates), outside the parent's flow;
@@ -206,6 +209,7 @@ impl Node {
             clip: false,
             paint: None,
             scroll: None,
+            drop_zone: false,
             content: Vec2::ZERO,
             absolute: None,
             z: crate::Layer::Window,

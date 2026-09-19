@@ -1,7 +1,10 @@
 //! App state and panel UI. Panels don't know which window they live in; the
 //! dock decides that.
 
-use libgui::{Axis, Branch, Color, DockConfig, DockNode, DockState, Insets, Key, ListOptions, Painter, Rect, ScrollOptions, Size, StateColors, TabViewer, TextureId, Ui, Vec2};
+use libgui::{
+    Axis, Branch, Color, DockConfig, DockNode, DockState, Frame, Insets, Key, Layout, ListOptions, Painter, Payload, Rect, ScrollOptions,
+    Size, StateColors, TabViewer, TextureId, Ui, Vec2,
+};
 use libgui_keymap::{Chord, Keymap};
 use std::collections::{HashSet, VecDeque};
 
@@ -414,6 +417,21 @@ impl Panels<'_> {
         // and never while the search box below is being typed into.
         let delete_selected = d.keys.triggered(ui, Action::DeleteObject);
         let delete_hint = d.keys.label(Action::DeleteObject);
+        // Files dragged in from the OS land here as objects. libgui_winit turned
+        // the platform's drag events into the drag; the core only routed it.
+        let dropped_files = {
+            let zone = ui.drop_zone(&[libgui_winit::FILES]);
+            if zone.hovered {
+                ui.drop_highlight(zone.rect);
+            }
+            zone.dropped.and_then(|p| p.take::<Vec<std::path::PathBuf>>().ok())
+        };
+        for path in dropped_files.into_iter().flatten() {
+            let name = path.file_stem().map_or_else(|| "file".to_string(), |s| s.to_string_lossy().into_owned());
+            d.objects.push(name.clone());
+            d.log(format!("imported {name}"));
+        }
+
         ui.text_input("search", &mut d.filter, "Search objects…");
         let filter = d.filter.to_lowercase();
 
@@ -427,6 +445,8 @@ impl Panels<'_> {
         let mut picked = None;
         let mut toggled = None;
         let mut remove = None;
+        // Drag-to-reorder: (dragged object, index to insert it before).
+        let mut reorder: Option<(usize, usize)> = None;
         {
             let (objects, selected) = (&d.objects, d.selected);
             let opts = ListOptions { gap: 1.0, ..ListOptions::new(0.0) };
@@ -444,21 +464,49 @@ impl Panels<'_> {
                 }
                 Row::Object { index, depth } => {
                     let i = *index;
-                    let r = ui.tree_row(("o", i), *depth, Branch::Leaf, &objects[i], selected == i);
-                    ui.context_menu(&r.response, |ui| {
-                        if ui.menu_item("Select").clicked {
+                    // One container per row, so the row is both a drag source
+                    // and the drop zone that decides where the drag lands.
+                    let row_id = ui.make_id(("row", i));
+                    ui.container_id(row_id, Layout::column().height(Size::Fit), Frame::none(), |ui| {
+                        let zone = ui.drop_zone(&["object"]);
+                        let mid = ui.rect_of(row_id).map_or(f32::MAX, |r| r.y + r.h * 0.5);
+                        // Above the midpoint inserts before this row, below after it.
+                        let at = if zone.pointer.y < mid { i } else { i + 1 };
+                        if zone.hovered {
+                            ui.insertion_line(row_id, Axis::Y, zone.pointer.y >= mid);
+                        }
+                        if let Some(p) = zone.dropped {
+                            if let Ok(from) = p.take::<usize>() {
+                                reorder = Some((from, at));
+                            }
+                        }
+                        let r = ui.tree_row(("o", i), *depth, Branch::Leaf, &objects[i], selected == i);
+                        let name = objects[i].clone();
+                        let drag = ui.drag_source_from(&r.response, || Payload::new("object", i).with_label(name));
+                        ui.context_menu(&r.response, |ui| {
+                            if ui.menu_item("Select").clicked {
+                                picked = Some(i);
+                            }
+                            ui.menu_separator();
+                            if ui.menu_item_shortcut("Delete", &delete_hint).clicked {
+                                remove = Some(i);
+                            }
+                        });
+                        if r.response.clicked && !drag.dragging {
                             picked = Some(i);
                         }
-                        ui.menu_separator();
-                        if ui.menu_item_shortcut("Delete", &delete_hint).clicked {
-                            remove = Some(i);
-                        }
                     });
-                    if r.response.clicked {
-                        picked = Some(i);
-                    }
                 }
             });
+        }
+        if let Some((from, at)) = reorder {
+            if from < d.objects.len() && at <= d.objects.len() && at != from && at != from + 1 {
+                let name = d.objects.remove(from);
+                let at = if at > from { at - 1 } else { at };
+                d.objects.insert(at, name.clone());
+                d.selected = at;
+                d.log(format!("moved {name}"));
+            }
         }
         if let Some(name) = toggled {
             if !d.collapsed.remove(&name) {

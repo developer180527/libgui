@@ -4,7 +4,7 @@
 //!   4. copy its style from `self.theme` (so `with_style` scopes work)
 //!   5. `add_leaf` with a layout + a paint closure that runs after layout.
 
-use crate::{ButtonStyle, Chevron, Color, Cursor, Insets, Layout, Painter, Rect, Response, Size, TextureId, Theme, Ui, Vec2};
+use crate::{Axis, ButtonStyle, Chevron, Color, Cursor, Id, Insets, Layout, Painter, Rect, Response, Size, TextureId, Theme, Ui, Vec2};
 use std::hash::Hash;
 
 /// Whether a tree row can be expanded, and whether it is.
@@ -71,6 +71,24 @@ impl Ui {
         self.add_leaf(id, Layout::leaf(Size::Fit, Size::Fit), m, false, move |p, r| {
             p.text(Vec2::new(r.x, r.y), size, color, &text);
         });
+    }
+
+    /// A 2px accent line along the leading (or trailing) edge of `over`'s rect:
+    /// the "it goes here" marker for a reorderable list, a tab strip, or a
+    /// timeline. Built as an absolute leaf inside the current container, so a
+    /// scroll area clips it like any other content.
+    pub fn insertion_line(&mut self, over: Id, axis: Axis, after: bool) {
+        let Some(r) = self.rect_of(over) else { return };
+        let w = 2.0;
+        let rect = match (axis, after) {
+            (Axis::Y, false) => Rect::new(r.x, r.y - w * 0.5, r.w, w),
+            (Axis::Y, true) => Rect::new(r.x, r.bottom() - w * 0.5, r.w, w),
+            (Axis::X, false) => Rect::new(r.x - w * 0.5, r.y, w, r.h),
+            (Axis::X, true) => Rect::new(r.right() - w * 0.5, r.y, w, r.h),
+        };
+        let color = self.theme.palette.accent;
+        let id = self.make_id(("insertion_line", over));
+        self.add_leaf_at(id, rect, crate::LeafOptions::default(), move |p, r| p.rect(r, color, w * 0.5));
     }
 
     pub fn space(&mut self, px: f32) {
