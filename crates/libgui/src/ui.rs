@@ -301,16 +301,19 @@ impl ScrollAxis {
         (self.content - self.viewport).max(0.0)
     }
 
-    /// Wheel, fling and smoothing for one axis. `direct` means the offset
-    /// should track the target exactly (a finger or a thumb drag), rather than
-    /// easing towards it.
-    fn update(&mut self, wheel: f32, touch: Option<f32>, friction: f32, dt: f32) -> bool {
+    /// Wheel, fling and smoothing for one axis. Returns whether the offset
+    /// should track the target exactly this frame (a finger, a trackpad),
+    /// rather than easing towards it (a wheel notch).
+    ///
+    /// `wheel` is the whole wheel delta; `precise` is the part of it that came
+    /// in pixels. Easing a trackpad's already-smooth stream only adds lag.
+    fn update(&mut self, wheel: f32, precise: f32, touch: Option<f32>, friction: f32, dt: f32) -> bool {
         let max = self.max();
         if wheel != 0.0 {
             self.target -= wheel;
             self.velocity = 0.0;
         }
-        let mut direct = false;
+        let mut direct = precise != 0.0 && wheel == precise;
         match touch {
             Some(d) => {
                 self.target = (self.target - d).clamp(0.0, max);
@@ -1486,17 +1489,18 @@ impl Ui {
         // A wheel with no sideways component still scrolls sideways when the
         // area only scrolls that way, which is what a trackpad user expects
         // on a timeline.
-        let wheel = if inside { self.input.scroll } else { Vec2::ZERO };
-        let wheel_x = if opts.scroll_x && !opts.scroll_y && wheel.x == 0.0 { wheel.y } else { wheel.x };
+        let (wheel, precise) = if inside { (self.input.scroll, self.input.scroll_precise) } else { (Vec2::ZERO, Vec2::ZERO) };
+        let sideways = opts.scroll_x && !opts.scroll_y && wheel.x == 0.0;
+        let (wheel_x, precise_x) = if sideways { (wheel.y, precise.y) } else { (wheel.x, precise.x) };
         let touch = touching.then_some(self.mouse_delta);
 
         let mut direct_x = false;
         let mut direct_y = false;
         if opts.scroll_x {
-            direct_x = st.x.update(wheel_x, touch.map(|d| d.x), friction, dt);
+            direct_x = st.x.update(wheel_x, precise_x, touch.map(|d| d.x), friction, dt);
         }
         if opts.scroll_y {
-            direct_y = st.y.update(wheel.y, touch.map(|d| d.y), friction, dt);
+            direct_y = st.y.update(wheel.y, precise.y, touch.map(|d| d.y), friction, dt);
         }
         if opts.stick_to_end && at_end && st.y.max() > 0.0 {
             st.y.target = f32::INFINITY;
@@ -1526,10 +1530,15 @@ impl Ui {
             .height(opts.height)
             .gap(opts.gap)
             .padding(opts.padding);
+        let scale = self.input.scale.max(0.01);
+        let snap = |v: f32| (v * scale).round() / scale;
         let mut n = Node::new(id, layout);
         n.clip = true;
         n.scroll = Some(Scroll {
-            offset: Vec2::new(st.x.offset, st.y.offset),
+            // Whole physical pixels: text snaps its baseline to the pixel
+            // grid, so a fractional offset would slide row boxes under their
+            // labels and the two would jitter against each other.
+            offset: Vec2::new(snap(st.x.offset), snap(st.y.offset)),
             scroll_x: opts.scroll_x,
             scroll_y: opts.scroll_y,
             bar_x,
@@ -2015,6 +2024,61 @@ mod tests {
         build(&mut ui, outside);
         let r = build(&mut ui, base);
         assert_eq!(r[19].rect.bottom(), 100.0);
+    }
+
+    /// Trackpad (pixel) deltas are already smooth, so the content follows them
+    /// exactly; easing them again only made the list trail the fingers. Wheel
+    /// notches (lines) still ease. Either way the applied offset is whole
+    /// physical pixels, so row boxes and their pixel-snapped text move together.
+    #[test]
+    fn trackpad_scroll_is_exact_and_offsets_land_on_pixels() {
+        let frame = |ui: &mut Ui, delta: f32, unit: crate::WheelUnit, scale: f32| -> f32 {
+            ui.push(InputEvent::PointerMoved { pos: Vec2::new(20.0, 50.0) });
+            if delta != 0.0 {
+                ui.push(InputEvent::Wheel { delta: Vec2::new(0.0, delta), unit });
+            }
+            ui.begin_frame(FrameInfo { dt: 1.0 / 60.0, scale, ..FrameInfo::default() });
+            let mut first = Rect::default();
+            ui.scroll_area_with("list", ScrollOptions::new(Size::Fixed(100.0)), |ui| {
+                for i in 0..40 {
+                    let r = ui.button(&format!("item {i}"));
+                    if i == 0 {
+                        first = r.rect;
+                    }
+                }
+            });
+            let _ = ui.end_frame();
+            first.y
+        };
+        use crate::WheelUnit::{Line, Pixel};
+
+        // Trackpad: each frame's delta is applied in full, the same frame.
+        let mut ui = ui();
+        let y0 = (0..3).map(|_| frame(&mut ui, 0.0, Pixel, 1.0)).last().unwrap();
+        frame(&mut ui, -30.0, Pixel, 1.0);
+        assert_eq!(frame(&mut ui, -30.0, Pixel, 1.0), y0 - 30.0, "trackpad scroll lagged");
+        assert_eq!(frame(&mut ui, 0.0, Pixel, 1.0), y0 - 60.0, "trackpad scroll kept moving after the fingers stopped");
+        assert_eq!(frame(&mut ui, 0.0, Pixel, 1.0), y0 - 60.0);
+
+        // Wheel notch: eases in over several frames rather than jumping.
+        let mut ui = self::ui();
+        let y0 = (0..3).map(|_| frame(&mut ui, 0.0, Line, 1.0)).last().unwrap();
+        frame(&mut ui, -1.0, Line, 1.0);
+        let first_step = y0 - frame(&mut ui, 0.0, Line, 1.0);
+        assert!(first_step > 0.0 && first_step < 24.0, "a wheel notch should ease, moved {first_step}");
+
+        // At a fractional DPI scale, every frame of the ease lands on a
+        // physical pixel.
+        let mut ui = self::ui();
+        let scale = 1.5;
+        for _ in 0..3 {
+            frame(&mut ui, 0.0, Line, scale);
+        }
+        frame(&mut ui, -1.0, Line, scale);
+        for _ in 0..20 {
+            let y = frame(&mut ui, 0.0, Line, scale) * scale;
+            assert!((y - y.round()).abs() < 1e-3, "row at {y} physical px, between pixels");
+        }
     }
 
     /// `segmented`'s thumb position is retained across frames, so it can point

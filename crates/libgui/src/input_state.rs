@@ -114,6 +114,9 @@ impl InputState {
                         WheelUnit::Page => PAGE,
                     };
                     out.scroll += delta * k;
+                    if unit == WheelUnit::Pixel {
+                        out.scroll_precise += delta;
+                    }
                 }
                 InputEvent::Touch { id, phase, pos } => {
                     self.kind = PointerKind::Touch;

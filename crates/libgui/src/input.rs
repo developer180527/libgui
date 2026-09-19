@@ -448,6 +448,10 @@ pub struct FrameInput {
     pub buttons_pressed: [bool; 5],
     /// Scroll since last frame, logical px.
     pub scroll: Vec2,
+    /// The part of `scroll` that arrived in pixels (trackpads, precise
+    /// wheels). It is already smooth, often with the OS's own momentum, so
+    /// scroll areas follow it exactly; the rest (wheel notches) is eased.
+    pub scroll_precise: Vec2,
     /// Sum of `PointerDelta`s since last frame, if any arrived.
     pub raw_delta: Option<Vec2>,
     pub modifiers: Modifiers,
@@ -474,6 +478,7 @@ impl Default for FrameInput {
             buttons_down: [false; 5],
             buttons_pressed: [false; 5],
             scroll: Vec2::ZERO,
+            scroll_precise: Vec2::ZERO,
             raw_delta: None,
             modifiers: Modifiers::default(),
             pointer_kind: PointerKind::Mouse,
