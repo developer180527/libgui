@@ -226,7 +226,7 @@ impl Theme {
                     let slot = full.as_table_mut().unwrap().get_mut(key).ok_or_else(|| {
                         err(format!(
                             "unknown section [{key}] (styles: button, button_primary, toggle, slider, selectable, \
-                             text_input, segmented, scrollbar, tab, splitter, panel, plot, viewport, drop_preview)"
+                             text_input, segmented, scrollbar, tab, splitter, panel, plot, table, viewport, drop_preview)"
                         ))
                     })?;
                     merge(slot, value, &palette_table, key).map_err(err)?;

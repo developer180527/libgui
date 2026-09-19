@@ -402,7 +402,7 @@ pub struct Ui {
     lock_request: bool,
     locked: bool,
     /// Something is still moving: ask the host for another frame.
-    animating: bool,
+    pub(crate) animating: bool,
     mouse_prev: Vec2,
     pub(crate) mouse_delta: Vec2,
     prev_down: bool,
@@ -490,7 +490,7 @@ pub struct Ui {
     dup_ids: FxSet<Id>,
     cost: crate::testing::FrameCost,
     scroll_hits: Vec<(Id, Rect)>,
-    scroll_target: Option<Id>,
+    pub(crate) scroll_target: Option<Id>,
     /// Hit rects that win over normal widgets (splitters).
     top_hits: Vec<(Id, Rect)>,
     overlays: Vec<OverlayFn>,
@@ -1131,8 +1131,9 @@ impl Ui {
         self.scroll_hits.clear();
         self.top_hits.clear();
         self.drop_hits.clear();
+        let scale = self.input.scale.max(0.01);
         let mut painter =
-            Painter { draw: &mut self.draw, fonts: &mut self.fonts, theme: &self.theme, font: self.font, strs: self.strs.bytes() };
+            Painter { draw: &mut self.draw, fonts: &mut self.fonts, theme: &self.theme, font: self.font, strs: self.strs.bytes(), scale };
         let mut sink = HitSink {
             hits: &mut self.hits,
             rects: &mut self.rects,
@@ -1572,6 +1573,58 @@ impl Ui {
                 p.rect_bordered(r, frame.fill, frame.radius, frame.border_width, frame.border);
             }));
         }
+        let i = self.attach(n);
+        self.open(i);
+        let r = body(self);
+        self.close();
+        r
+    }
+
+    /// A container whose children are laid out shifted by `offset`, and
+    /// clipped to it — a scroll area's displacement without a scroll area's
+    /// state, input or scrollbars.
+    ///
+    /// The point is *shared* displacement. A table's header, its frozen
+    /// columns and every one of its rows have to agree on one horizontal
+    /// offset to the exact pixel, and giving each of them a scroll area of its
+    /// own would mean keeping N of them in sync. Instead the caller owns the
+    /// number and hands it to each pane.
+    ///
+    /// `snap_text` follows the same rule as [`Ui::scroll_area`]: false while
+    /// the offset is moving, so the text inside tracks it sub-pixel instead of
+    /// shearing against the boxes it sits in.
+    pub(crate) fn offset_container<R>(
+        &mut self,
+        id: Id,
+        offset: Vec2,
+        snap_text: bool,
+        layout: Layout,
+        frame: Frame,
+        body: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        self.seen.insert(id);
+        let mut n = Node::new(id, layout);
+        n.clip = frame.clip;
+        if frame.fill.a > 0.0 || frame.border_width > 0.0 {
+            n.paint = Some(self.paints.push(move |p: &mut Painter, r: Rect| {
+                p.rect_bordered(r, frame.fill, frame.radius, frame.border_width, frame.border);
+            }));
+        }
+        // Neither axis scrolls, so `place` applies the offset without growing
+        // the content box and `paint` draws no bars.
+        n.scroll = Some(Scroll {
+            offset,
+            scroll_x: false,
+            scroll_y: false,
+            bar_x: id.with("nobar_x"),
+            bar_y: id.with("nobar_y"),
+            vis_x: 0.0,
+            hot_x: 0.0,
+            vis_y: 0.0,
+            hot_y: 0.0,
+            style: self.theme.scrollbar,
+            snap: snap_text,
+        });
         let i = self.attach(n);
         self.open(i);
         let r = body(self);
@@ -2097,8 +2150,13 @@ fn paint(
             }
         }
     }
-    if let (Some(_), Some(r)) = (nodes[i].scroll, visible) {
-        sink.scroll_hits.push((id, r));
+    // Only a node that actually scrolls takes the wheel. An offset container
+    // carries a `Scroll` to displace its children and nothing else, so it must
+    // not swallow the gesture from the scroll area it sits inside.
+    if let (Some(sc), Some(r)) = (nodes[i].scroll, visible) {
+        if sc.scroll_x || sc.scroll_y {
+            sink.scroll_hits.push((id, r));
+        }
     }
     if let (true, Some(r)) = (nodes[i].drop_zone, visible) {
         sink.drop_hits.push((id, r));

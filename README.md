@@ -21,8 +21,8 @@ cargo run -p libgui_shaders -- shaders_out   # export HLSL/MSL/GLSL/SPIR-V/WGSL
 | Licence | **not yet chosen** — see `LICENSING.md` |
 | Version | 0.1.0, pre-1.0: the API still changes between releases |
 
-Not yet: multi-line text, font fallback, IME composition display, accessibility, tables, colour
-picker, layout persistence. See the roadmap.
+Not yet: multi-line text, font fallback, IME composition display, accessibility, colour picker,
+layout persistence. See the roadmap.
 
 ## Crates
 
@@ -541,6 +541,44 @@ replaceable host adapter, and any other host writes its own.
 The demo's outliner does both: rows reorder by dragging, and files dropped from Finder or Explorer
 become objects.
 
+## Tables and data grids
+
+Virtualised rows, resizable and sortable columns, a header that stays put, and columns that can be
+frozen against horizontal scrolling. Like the tree, libgui does not own your rows: it asks for the
+cells it can actually see, by row and column index, and reports what the user did.
+
+```rust
+let mut cols = TableState::new([
+    Column::new("Name").width(180.0).grow(1.0),
+    Column::new("Kind").width(90.0),
+    Column::new("Size").width(90.0).align(Align::End),
+]).frozen(1);                                    // Name stays put when scrolled
+
+let t = ui.table("assets", &mut cols, assets.len(), |ui, row, col| match col {
+    0 => ui.label(&assets[row].name),
+    1 => ui.label_muted(assets[row].kind),
+    _ => ui.label_muted(&assets[row].size),
+});
+if let Some((col, order)) = t.sort_changed { sort(&mut assets, col, order); }
+if let Some(i) = t.clicked_row { selected = Some(i); }
+```
+
+- **Rows are virtualised**, so 250,000 of them cost what fifty do. **Columns are not**: every column
+  of every visible row is built and clipped if it is off to the side, which is the right trade for
+  the tens of columns a table has and the wrong one for hundreds.
+- **Sideways scrolling belongs to the table**, not to a scroll area, because the header, the frozen
+  pane and every row have to agree on one offset to the exact pixel. A sideways gesture scrolls it,
+  and so does a plain one with Shift held. The offset lives in `TableState`, so it saves and
+  restores with the rest of your layout — as do the column widths and the sort order.
+- **Cells hold widgets**, not just text: a toggle, a drag value, a colour swatch, anything.
+- The same sub-pixel rule as scroll areas: a moving table draws its text sub-pixel, a still one
+  snaps back to the grid. Row bands and column rules snap always — a band is a boundary, not a
+  shape, and a half-pixel one is a smear at odd DPIs (`Painter::snap_rect` and `Painter::hairline`
+  are public, for custom widgets that draw either).
+- **A 250,000-row table allocates nothing per frame**, which `perf_alloc.rs` asserts.
+
+The demo's Assets tab is a worked example: 200,000 rows, a frozen first column, sortable headers.
+
 ## Docking (Unity-style, multi-window)
 
 ```rust
@@ -897,9 +935,10 @@ lag, fling, easing) stay as frame-trace tests like
 5. ~~Paths~~ ✅ `p.line` / `polyline` / `bezier` / `wire`, a `Line` primitive at `CONTRACT_VERSION` 2;
    next: stroked/filled arbitrary paths, dashes, arrowheads, and a real line/area plot (`plot` is
    still a debug bar chart).
-6. ~~Horizontal and 2D scrolling~~ ✅ ~~general drag and drop~~ ✅ `ScrollOptions::both` /
-   `horizontal`, `drag_source` / `drop_zone` / `Payload` with a host seam for OS drags; next:
-   tables/data grids with resizable and frozen columns, and auto-scroll while dragging near an edge.
+6. ~~Horizontal and 2D scrolling~~ ✅ ~~general drag and drop~~ ✅ ~~tables/data grids with
+   resizable and frozen columns~~ ✅ `ScrollOptions::both`, `drag_source` / `drop_zone` / `Payload`
+   with a host seam for OS drags, `ui.table` with `TableState`; next: column reordering by drag,
+   cell selection and keyboard navigation, and auto-scroll while dragging near an edge.
 7. **Real text shaping**: replace `text.rs` internals with `cosmic-text`/`swash` or HarfBuzz
    (ligatures, bidi, font fallback, CJK), multi-page atlas with LRU eviction.
 8. ~~Theme hot-reload~~ ✅ TOML themes, per-widget styles, density presets; next: multiple fonts (UI/mono/icons) in the theme, per-widget disabled states.

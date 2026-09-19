@@ -94,6 +94,7 @@ fn a_frame_stays_within_its_allocation_budget() {
     assert!(empty <= 8, "an empty frame allocated {empty} times");
 
     nesting_is_free(&mut ui);
+    a_table_costs_nothing_per_frame(&mut ui);
     a_frame_without_text_allocates_nothing(false);
     a_frame_without_text_allocates_nothing(true);
 }
@@ -141,6 +142,38 @@ fn a_frame_without_text_allocates_nothing(reserve: bool) {
         // The number that matters is that it is a constant, not per widget.
         assert!(first <= 2, "reserve() left {first} allocations on the first frame");
     }
+}
+
+/// A data grid is the widest thing a pro app builds, and the easiest place to
+/// lose the arenas again: a header that clones its column titles, or a cell
+/// that formats a `String` per frame, is invisible until someone opens a table
+/// with a hundred thousand rows in it.
+fn a_table_costs_nothing_per_frame(ui: &mut Ui) {
+    let mut cols = TableState::new([
+        Column::new("Name").width(160.0),
+        Column::new("Kind").width(90.0),
+        Column::new("Size").width(80.0).align(Align::End),
+        Column::new("Modified").width(140.0),
+        Column::new("Owner").width(120.0),
+    ]);
+    cols.frozen = 1;
+    // Pre-rendered cell text, as an app with real data would have.
+    let cells: Vec<String> = (0..64).map(|i| format!("cell {i}")).collect();
+    let mut frame = |ui: &mut Ui| {
+        ui.begin_frame(FrameInfo::default());
+        ui.table("files", &mut cols, 250_000, |ui, row, col| {
+            ui.label(&cells[(row * 5 + col) % cells.len()]);
+        });
+        let _ = ui.end_frame();
+    };
+    for _ in 0..30 {
+        frame(ui);
+    }
+    ALLOCS.store(0, Relaxed);
+    frame(ui);
+    let a = ALLOCS.load(Relaxed);
+    println!("a 250,000-row table: {a} allocations");
+    assert_eq!(a, 0, "a steady table frame allocated {a} times");
 }
 
 /// Nesting is free: a container's children are a range into one arena that is

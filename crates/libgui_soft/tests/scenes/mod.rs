@@ -53,6 +53,11 @@ thread_local! {
     /// The text field's contents in `text_focused`: app state, which must
     /// start empty on every run.
     static FIELD: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+    /// The `table` scene's columns. App state like any other table's, and it
+    /// has to persist across the scene's frames: a table that is handed a new
+    /// state every frame believes it is permanently mid-scroll, and never
+    /// settles its text back onto the pixel grid.
+    static COLUMNS: std::cell::RefCell<Option<TableState>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Mark `r` as the widget the scene's [`Pointer`] acts on.
@@ -71,6 +76,7 @@ impl Scene {
         let mut ui = Ui::new(theme, FONT).expect("font");
         TARGET.with(|t| t.set(Rect::default()));
         FIELD.with(|t| t.borrow_mut().clear());
+        COLUMNS.with(|t| *t.borrow_mut() = None);
         // A whole second per frame, so every hover fade and ease has finished
         // by the time it is captured.
         let info = FrameInfo { screen_size: Vec2::new(self.size.0, self.size.1), scale, dt: 1.0 };
@@ -323,6 +329,55 @@ fn drag_reorder(ui: &mut Ui) {
     ui.drag_ghost();
 }
 
+/// A data grid: a frozen first column, a sorted header, a selected row,
+/// striping and column rules. Scrolled sideways so the frozen column is
+/// visibly holding its place while the rest have moved.
+fn table(ui: &mut Ui) {
+    const ROWS: [(&str, &str, &str); 6] = [
+        ("Rock_01", "Mesh", "12.4 MB"),
+        ("Rock_02", "Mesh", "9.1 MB"),
+        ("Bark", "Texture", "4.0 MB"),
+        ("Leaves", "Texture", "6.2 MB"),
+        ("Wind", "Audio", "1.8 MB"),
+        ("Foliage", "Shader", "0.4 MB"),
+    ];
+    let s = ui.theme.table;
+    let opts = TableOptions {
+        row_height: 22.0,
+        header_height: s.header_height,
+        height: Size::Grow(1.0),
+        selected: Some(2),
+        striped: true,
+        grid_lines: true,
+    };
+    COLUMNS.with(|cell| {
+        let mut held = cell.borrow_mut();
+        let cols = held.get_or_insert_with(|| {
+            let mut c = TableState::new([
+                Column::new("Name").width(110.0),
+                Column::new("Type").width(80.0),
+                Column::new("Size").width(80.0).align(Align::End),
+                Column::new("Path").width(150.0),
+            ])
+            .frozen(1)
+            .sorted_by(1, Sort::Ascending);
+            c.scroll_x = 40.0;
+            c
+        });
+        panel(ui, |ui| {
+        ui.table_with("assets", cols, ROWS.len(), opts, |ui, row, col| {
+            let (name, kind, size) = ROWS[row];
+            match col {
+                0 => ui.label(name),
+                1 => ui.label_muted(kind),
+                2 => ui.label_muted(size),
+                _ => ui.label_muted("Assets/Env"),
+            }
+        });
+        });
+    });
+}
+
 pub const SCENES: &[Scene] = &[
     Scene { name: "widgets", size: (320.0, 640.0), pointer: Pointer::None, build: widgets },
     Scene { name: "tree", size: (240.0, 230.0), pointer: Pointer::None, build: tree },
@@ -336,6 +391,7 @@ pub const SCENES: &[Scene] = &[
     Scene { name: "combo_open", size: (260.0, 160.0), pointer: Pointer::ClickAndType(""), build: combo_target },
     // 37px: not a multiple of anything, so a fractional offset would show.
     Scene { name: "scroll_mid", size: (240.0, 180.0), pointer: Pointer::Wheel(-37.0), build: scroll_target },
+    Scene { name: "table", size: (300.0, 220.0), pointer: Pointer::None, build: table },
     // Down past three rows, and sideways, so the ghost is clear of the list.
     Scene { name: "drag_reorder", size: (240.0, 200.0), pointer: Pointer::DragBy(Vec2::new(24.0, 74.0)), build: drag_reorder },
 ];

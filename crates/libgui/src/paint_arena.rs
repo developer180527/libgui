@@ -267,7 +267,7 @@ mod tests {
         let mut fonts = crate::Fonts::new();
         let theme = crate::Theme::dark();
         let mut p =
-            Painter { draw: &mut draw, fonts: &mut fonts, theme: &theme, font: crate::FontId(0), strs: &[] };
+            Painter { draw: &mut draw, fonts: &mut fonts, theme: &theme, font: crate::FontId(0), strs: &[], scale: 1.0 };
         f(&mut p);
     }
 }

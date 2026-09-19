@@ -2,7 +2,7 @@
 //! dock decides that.
 
 use libgui::{
-    Axis, Branch, Color, DockConfig, DockNode, DockState, Frame, Insets, Key, Layout, ListOptions, Painter, Payload, Rect, ScrollOptions,
+    Align, Axis, Branch, Column, Sort, TableOptions, TableState, Color, DockConfig, DockNode, DockState, Frame, Insets, Key, Layout, ListOptions, Painter, Payload, Rect, ScrollOptions,
     Size, StateColors, TabViewer, TextureId, Ui, Vec2,
 };
 use libgui_keymap::{Chord, Keymap};
@@ -14,6 +14,7 @@ pub enum Tab {
     Outliner,
     Graph,
     Inspector,
+    Assets,
     Console,
     Stats,
     Appearance,
@@ -37,6 +38,7 @@ impl Tab {
             Tab::Outliner => "Outliner",
             Tab::Graph => "Node Graph",
             Tab::Inspector => "Inspector",
+            Tab::Assets => "Assets",
             Tab::Console => "Console",
             Tab::Stats => "Stats",
             Tab::Appearance => "Appearance",
@@ -51,7 +53,7 @@ pub fn default_layout(dock: &mut DockState<Tab>) {
     let inspector = dock.leaf(vec![Tab::Inspector]);
     let left = dock.split(Axis::Y, 0.45, outliner, inspector);
     let scene = dock.leaf(vec![Tab::Viewport, Tab::Graph]);
-    let console = dock.leaf(vec![Tab::Console]);
+    let console = dock.leaf(vec![Tab::Console, Tab::Assets]);
     let center = dock.split(Axis::Y, 0.72, scene, console);
     let stats = dock.leaf(vec![Tab::Stats]);
     let tuning = dock.leaf(vec![Tab::Appearance, Tab::DockTuning]);
@@ -194,6 +196,11 @@ pub struct Demo {
     pub ui_instances: usize,
     pub ui_batches: usize,
     pub windows: usize,
+    /// The Assets table: 200k rows of nothing much, to show what virtualised
+    /// rows and frozen columns cost (nothing).
+    pub assets: Vec<Asset>,
+    pub asset_cols: TableState,
+    pub asset_selected: Option<usize>,
     /// Viewport size in physical px, reported by whichever window shows it.
     pub viewport_px: (u32, u32),
     /// Edited by the Dock Tuning panel; the host copies it into the dock.
@@ -217,6 +224,17 @@ impl Default for Demo {
             console: vec!["libgui console ready".into(), "type 'help' for commands".into()],
             command: String::new(),
             selected: 0,
+            assets: assets(),
+            asset_cols: TableState::new([
+                Column::new("Name").width(180.0).grow(1.0),
+                Column::new("Type").width(90.0),
+                Column::new("Size").width(90.0).align(Align::End),
+                Column::new("Tris").width(80.0).align(Align::End),
+                Column::new("Modified").width(140.0),
+                Column::new("Path").width(260.0),
+            ])
+            .frozen(1),
+            asset_selected: None,
             collapsed: HashSet::new(),
             graph: libgui_nodes::GraphState::new(),
             projection: 0,
@@ -369,6 +387,7 @@ impl TabViewer for Panels<'_> {
             Tab::Graph => self.graph(ui),
             Tab::Inspector => self.inspector(ui),
             Tab::Console => self.console(ui),
+            Tab::Assets => self.assets(ui),
             Tab::Stats => self.stats(ui),
             Tab::Appearance => appearance(ui, self.d),
             Tab::DockTuning => dock_tuning(ui, &mut self.d.dock_cfg),
@@ -523,6 +542,55 @@ impl Panels<'_> {
             d.selected = i;
             let name = d.objects[i].clone();
             d.log(format!("selected {name}"));
+        }
+    }
+
+    /// A data grid: 200,000 assets, virtualised rows, a frozen first column,
+    /// resizable and sortable headers. The rows are the app's; the table only
+    /// asks for the cells it can see.
+    fn assets(&mut self, ui: &mut Ui) {
+        let d = &mut *self.d;
+        ui.row(|ui| {
+            ui.label_muted(&format!("{} assets", d.assets.len()));
+            ui.flex();
+            if let Some((c, o)) = d.asset_cols.sort {
+                let arrow = if o == Sort::Ascending { "ascending" } else { "descending" };
+                ui.label_muted(&format!("sorted by {} {arrow}", d.asset_cols.columns[c].title));
+            }
+        });
+        let opts = TableOptions { selected: d.asset_selected, ..default_table(ui) };
+        let assets = &d.assets;
+        let t = ui.table_with("assets", &mut d.asset_cols, assets.len(), opts, |ui, row, col| {
+            let a = &assets[row];
+            match col {
+                0 => ui.label(&a.name),
+                1 => ui.label_muted(a.kind),
+                2 => ui.label_muted(&a.size),
+                3 => ui.label_muted(&a.tris),
+                4 => ui.label_muted(&a.modified),
+                _ => ui.label_muted(&a.path),
+            }
+        });
+        if let Some(i) = t.clicked_row {
+            d.asset_selected = Some(i);
+            let name = d.assets[i].name.clone();
+            d.log(format!("selected {name}"));
+        }
+        if let Some((col, order)) = t.sort_changed {
+            let key = |a: &Asset| match col {
+                0 => a.name.clone(),
+                1 => a.kind.to_string(),
+                2 => a.size.clone(),
+                3 => a.tris.clone(),
+                4 => a.modified.clone(),
+                _ => a.path.clone(),
+            };
+            d.assets.sort_by_key(key);
+            if order == Sort::Descending {
+                d.assets.reverse();
+            }
+            d.asset_selected = None;
+            d.log(format!("sorted by {}", d.asset_cols.columns[col].title));
         }
     }
 
@@ -734,4 +802,47 @@ fn appearance(ui: &mut Ui, d: &mut Demo) {
             |ui| ui.button("Square"),
         );
     });
+}
+
+/// One row of the Assets table. Plain app data: the table never sees it.
+pub struct Asset {
+    pub name: String,
+    pub kind: &'static str,
+    pub size: String,
+    pub tris: String,
+    pub modified: String,
+    pub path: String,
+}
+
+/// 200,000 of them, so the table's cost is visibly independent of the count.
+fn assets() -> Vec<Asset> {
+    const KINDS: [&str; 6] = ["Mesh", "Material", "Texture", "Audio", "Shader", "Prefab"];
+    const DIRS: [&str; 4] = ["Environment", "Characters", "Props", "FX"];
+    (0..200_000)
+        .map(|i| {
+            let kind = KINDS[i % KINDS.len()];
+            let dir = DIRS[(i / 7) % DIRS.len()];
+            Asset {
+                name: format!("{kind}_{:05}", i),
+                kind,
+                size: format!("{}.{} MB", i % 90 + 1, i % 10),
+                tris: format!("{}", (i * 37) % 250_000),
+                modified: format!("2026-{:02}-{:02} {:02}:{:02}", i % 12 + 1, i % 28 + 1, i % 24, i % 60),
+                path: format!("Assets/{dir}/{kind}s/{kind}_{:05}.asset", i),
+            }
+        })
+        .collect()
+}
+
+/// The demo's table shape, so the panel and the golden scene agree.
+fn default_table(ui: &Ui) -> TableOptions {
+    let s = ui.theme.table;
+    TableOptions {
+        row_height: s.row_height,
+        header_height: s.header_height,
+        height: Size::Grow(1.0),
+        selected: None,
+        striped: true,
+        grid_lines: true,
+    }
 }

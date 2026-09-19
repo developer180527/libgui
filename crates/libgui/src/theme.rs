@@ -380,6 +380,31 @@ pub struct ViewportStyle {
 
 serde_struct! {
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TableStyle {
+    pub header_height: f32,
+    pub header_fill: Color,
+    pub header_text: Color,
+    /// Header under the pointer, and the sorted column's header.
+    pub header_text_active: Color,
+    pub row_height: f32,
+    /// Every other row, for tracking a value across a wide table. Transparent
+    /// turns striping off.
+    pub row_fill_alt: Color,
+    pub row_fill_hover: Color,
+    pub row_fill_selected: Color,
+    pub text: Color,
+    pub text_selected: Color,
+    /// Vertical rules between columns, and the line under the header.
+    pub grid: Color,
+    /// Width of the drag zone on a column edge, each side.
+    pub resize_grip: f32,
+    pub resize_hover: Color,
+    pub cell_padding_x: f32,
+}
+}
+
+serde_struct! {
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DropPreviewStyle {
     pub fill: Color,
     pub border: Color,
@@ -410,6 +435,7 @@ pub struct Theme {
     pub panel: PanelStyle,
     pub plot: PlotStyle,
     pub viewport: ViewportStyle,
+    pub table: TableStyle,
     pub drop_preview: DropPreviewStyle,
 }
 }
@@ -473,6 +499,22 @@ impl Theme {
                 value_active: p.accent_hover,
                 track_height: 4.0 * k,
                 knob_radius: 7.0 * k,
+            },
+            table: TableStyle {
+                header_height: (m.row_height * 1.2).round(),
+                header_fill: p.bg_panel,
+                header_text: p.text_muted,
+                header_text_active: p.text,
+                row_height: m.row_height,
+                row_fill_alt: p.surface.with_alpha(0.35),
+                row_fill_hover: p.surface.with_alpha(0.6),
+                row_fill_selected: p.accent.with_alpha(0.16),
+                text: p.text,
+                text_selected: p.text,
+                grid: p.border,
+                resize_grip: 4.0,
+                resize_hover: p.accent,
+                cell_padding_x: m.space,
             },
             selectable: SelectableStyle {
                 fill_hover: p.surface.with_alpha(0.6),

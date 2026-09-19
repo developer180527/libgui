@@ -19,6 +19,8 @@ pub struct Painter<'a> {
     pub font: FontId,
     /// This frame's text arena, which a [`FrameText`](crate::FrameText) names a range in.
     pub strs: &'a [u8],
+    /// Physical px per logical px, for [`Painter::hairline`].
+    pub scale: f32,
 }
 
 impl<'a> Painter<'a> {
@@ -126,6 +128,30 @@ impl<'a> Painter<'a> {
         };
         self.line(a, tip, stroke, color);
         self.line(tip, b, stroke, color);
+    }
+
+    /// A rule `px` physical pixels wide, snapped to the pixel grid: the rect
+    /// you would draw for a 1px line is 1.5 physical px at a 1.5x scale, and a
+    /// blurry line is not a hairline. Returns the rect to draw.
+    ///
+    /// Grid rules, separators and column edges should go through this; a
+    /// border that is part of a shape should not, because rounding it
+    /// separately would part it from the shape.
+    pub fn hairline(&self, x: f32, y: f32, px: f32, height: f32) -> Rect {
+        let s = self.scale.max(0.01);
+        let w = (px.max(1.0)).round() / s;
+        Rect::new((x * s).round() / s, y, w, height)
+    }
+
+    /// `r` snapped out to whole physical pixels: a solid or translucent fill
+    /// that should have a hard edge rather than an antialiased one. A row
+    /// background, a selection band, a ruler cell — anything whose edge the
+    /// eye reads as a boundary rather than as part of a shape.
+    pub fn snap_rect(&self, r: Rect) -> Rect {
+        let s = self.scale.max(0.01);
+        let (x, y) = ((r.x * s).round(), (r.y * s).round());
+        let (x1, y1) = (((r.x + r.w) * s).round(), ((r.y + r.h) * s).round());
+        Rect::new(x / s, y / s, (x1 - x) / s, (y1 - y) / s)
     }
 
     pub fn measure(&self, size: f32, text: impl PaintText) -> Vec2 {
