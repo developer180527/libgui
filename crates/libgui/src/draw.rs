@@ -171,31 +171,64 @@ impl DrawList {
         // A segment's quad is its bounding box, which for a long diagonal is
         // enormous next to the line itself: an 800x600 diagonal rasterises
         // ~480k fragments to draw a 2px line, nearly all of them discarded.
-        // Splitting it into k pieces divides that area by k, and the extra
+        // Splitting it into k strips divides that area by k, and the extra
         // instances cost far less than the fragments they save.
         let (dx, dy) = ((a.x - b.x).abs(), (a.y - b.y).abs());
         let length = dx.hypot(dy);
         let useful = (length * hw * 2.0).max(1.0);
         let k = ((dx * dy) / (4.0 * useful)).ceil().clamp(1.0, 32.0) as usize;
-        for i in 0..k {
-            let (t0, t1) = (i as f32 / k as f32, (i + 1) as f32 / k as f32);
-            let p0 = Vec2::new(a.x + (b.x - a.x) * t0, a.y + (b.y - a.y) * t0);
-            let p1 = Vec2::new(a.x + (b.x - a.x) * t1, a.y + (b.y - a.y) * t1);
-            self.segment(p0, p1, hw, color);
-        }
-    }
-
-    /// One capsule instance, already in window coordinates.
-    fn segment(&mut self, a: Vec2, b: Vec2, hw: f32, color: Color) {
         // Bounding box grown for the width and for anti-aliasing, so the
         // vertex shader needs no padding of its own.
         let pad = hw + 2.0;
-        let bounds = Rect::new(
-            a.x.min(b.x) - pad,
-            a.y.min(b.y) - pad,
-            (a.x - b.x).abs() + pad * 2.0,
-            (a.y - b.y).abs() + pad * 2.0,
-        );
+        if k == 1 {
+            let bounds = Rect::new(a.x.min(b.x) - pad, a.y.min(b.y) - pad, dx + pad * 2.0, dy + pad * 2.0);
+            self.segment(a, b, hw, color, bounds);
+            return;
+        }
+
+        // Strips side by side across the longer axis, each evaluating the
+        // distance to the *whole* segment. Every pixel is then drawn exactly
+        // once, so the result is the same as one quad. (Splitting into shorter
+        // capsules instead overlapped their round caps, and a translucent line
+        // showed a darker blob wherever two met.)
+        //
+        // Neighbouring strips must share a bit-identical edge, or the
+        // rasteriser could cover a pixel twice or skip it along the seam. The
+        // shader rebuilds each edge as `center ± half`; with edges on a 1/64 px
+        // grid that arithmetic is exact (for coordinates under 65536 px), so
+        // both strips land on the same value.
+        let along_x = dx >= dy;
+        let split = |p: Vec2| if along_x { (p.x, p.y) } else { (p.y, p.x) };
+        let ((am, an), (bm, bn)) = (split(a), split(b));
+        let (lo, hi) = (am.min(bm) - pad, am.max(bm) + pad);
+        let edge = |i: usize| -> f32 {
+            match i {
+                0 => (lo * 64.0).floor() / 64.0,
+                _ if i == k => (hi * 64.0).ceil() / 64.0,
+                _ => ((lo + (hi - lo) * i as f32 / k as f32) * 64.0).round() / 64.0,
+            }
+        };
+        // The segment's cross-axis position at `m` along it, clamped to its ends.
+        let across = |m: f32| an + (bn - an) * ((m - am) / (bm - am)).clamp(0.0, 1.0);
+        let mut e0 = edge(0);
+        for i in 1..=k {
+            let e1 = edge(i);
+            if e1 <= e0 {
+                continue;
+            }
+            // Anything within `pad` of the segment and inside this strip lies
+            // over the part of the segment within `pad` of the strip.
+            let (n0, n1) = (across(e0 - pad), across(e1 + pad));
+            let (c0, c1) = (n0.min(n1) - pad, n0.max(n1) + pad);
+            let bounds = if along_x { Rect::new(e0, c0, e1 - e0, c1 - c0) } else { Rect::new(c0, e0, c1 - c0, e1 - e0) };
+            self.segment(a, b, hw, color, bounds);
+            e0 = e1;
+        }
+    }
+
+    /// One `Line` instance for the segment `a`-`b`, drawn over `bounds`
+    /// (already in window coordinates).
+    fn segment(&mut self, a: Vec2, b: Vec2, hw: f32, color: Color, bounds: Rect) {
         self.push(
             TextureId::Atlas,
             bounds,

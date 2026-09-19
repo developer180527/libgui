@@ -254,6 +254,23 @@ fn combo_target(ui: &mut Ui) {
     });
 }
 
+/// An open menu: plain items, a shortcut, a separator and a submenu arrow.
+fn menu_target(ui: &mut Ui) {
+    panel(ui, |ui| {
+        // menu_button returns no response; it is the panel's first child, so
+        // its rect starts at the panel padding. Aim a little inside it.
+        target(Rect::new(12.0, 12.0, 24.0, 20.0));
+        ui.menu_button("File", |ui| {
+            let _ = ui.menu_item("New");
+            let _ = ui.menu_item_shortcut("Open…", Shortcut::command(Key::O));
+            ui.menu_separator();
+            ui.submenu("Recent", |ui| {
+                let _ = ui.menu_item("scene.lvl");
+            });
+        });
+    });
+}
+
 fn scroll_target(ui: &mut Ui) {
     panel(ui, |ui| {
         ui.scroll_area_with("list", ScrollOptions::new(Size::Fixed(150.0)), |ui| {
@@ -276,6 +293,7 @@ pub const SCENES: &[Scene] = &[
     Scene { name: "button_pressed", size: (240.0, 90.0), pointer: Pointer::Press, build: button_target },
     Scene { name: "tooltip", size: (300.0, 110.0), pointer: Pointer::Hover, build: tooltip_target },
     Scene { name: "text_focused", size: (240.0, 60.0), pointer: Pointer::ClickAndType("Hello"), build: text_input_target },
+    Scene { name: "menu_open", size: (260.0, 190.0), pointer: Pointer::ClickAndType(""), build: menu_target },
     Scene { name: "combo_open", size: (260.0, 160.0), pointer: Pointer::ClickAndType(""), build: combo_target },
     // 37px: not a multiple of anything, so a fractional offset would show.
     Scene { name: "scroll_mid", size: (240.0, 180.0), pointer: Pointer::Wheel(-37.0), build: scroll_target },

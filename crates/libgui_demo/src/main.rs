@@ -578,7 +578,7 @@ fn status_bar(ui: &mut Ui, d: &Demo) {
     let status = Layout::row().height(Size::Fixed(26.0)).padding(Insets::xy(12.0, 0.0)).gap(12.0);
     ui.container(status, Frame { clip: false, ..Frame::panel(&t) }, |ui| {
         let (s, c) = (t.metrics.font_size_small, t.palette.text_faint);
-        ui.text_with(if d.playing { "● Playing" } else { "❚❚ Paused" }, s, c);
+        ui.text_with(if d.playing { "● Playing" } else { "‖ Paused" }, s, c);
         ui.flex();
         ui.text_with(&format!("{} window(s)  ·  libgui 0.1  ·  wgpu backend", d.windows), s, c);
     });

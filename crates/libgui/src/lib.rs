@@ -37,7 +37,7 @@ pub use input::{
 };
 pub use layout::{Align, Axis, Insets, Layout, Size};
 pub use math::{Color, Rect, Transform, Vec2};
-pub use painter::Painter;
+pub use painter::{Chevron, Painter};
 pub use font::{FontRasterizer, GlyphBitmap, LineMetrics, ShapedGlyph};
 #[cfg(feature = "fontdue")]
 pub use font::FontdueRasterizer;

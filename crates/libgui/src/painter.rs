@@ -3,6 +3,15 @@ use crate::{Color, DrawList, FontId, Fonts, Rect, TextureId, Theme, Vec2};
 /// Handed to paint callbacks after layout is solved. This is the
 /// "immediate" drawing layer: widgets and custom overlays (gizmo labels, graphs,
 /// debug text) draw here with final rects.
+/// Which way a [`Painter::chevron`] points.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Chevron {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
 pub struct Painter<'a> {
     pub draw: &'a mut DrawList,
     pub fonts: &'a mut Fonts,
@@ -76,6 +85,45 @@ impl Painter<'_> {
         // Control polygon length is an upper bound on the arc length.
         let screen_len = (len(p0, c0) + len(c0, c1) + len(c1, p1)) * zoom;
         (screen_len.max(1.0).sqrt() * 1.2) as usize + 2
+    }
+
+    /// A small open arrow (⌄ ›) centred in `r`, sized for text of `size`:
+    /// disclosure triangles, combo boxes, submenus.
+    ///
+    /// Drawn as two strokes rather than a glyph, so it never depends on the
+    /// font having arrow characters (Inter, for one, has none of ▾▸). The two
+    /// strokes overlap at the tip, so a translucent colour is slightly
+    /// stronger there.
+    pub fn chevron(&mut self, r: Rect, size: f32, dir: Chevron, color: Color) {
+        let c = r.center();
+        // Half the span across the arrow, and how far it points.
+        let half = size * 0.26;
+        let depth = size * 0.14;
+        let stroke = (size * 0.11).max(1.0);
+        let (a, tip, b) = match dir {
+            Chevron::Down => (
+                Vec2::new(c.x - half, c.y - depth),
+                Vec2::new(c.x, c.y + depth),
+                Vec2::new(c.x + half, c.y - depth),
+            ),
+            Chevron::Up => (
+                Vec2::new(c.x - half, c.y + depth),
+                Vec2::new(c.x, c.y - depth),
+                Vec2::new(c.x + half, c.y + depth),
+            ),
+            Chevron::Right => (
+                Vec2::new(c.x - depth, c.y - half),
+                Vec2::new(c.x + depth, c.y),
+                Vec2::new(c.x - depth, c.y + half),
+            ),
+            Chevron::Left => (
+                Vec2::new(c.x + depth, c.y - half),
+                Vec2::new(c.x - depth, c.y),
+                Vec2::new(c.x + depth, c.y + half),
+            ),
+        };
+        self.line(a, tip, stroke, color);
+        self.line(tip, b, stroke, color);
     }
 
     pub fn measure(&self, size: f32, text: &str) -> Vec2 {

@@ -2725,15 +2725,29 @@ mod tests {
             p.line(Vec2::new(10.0, 20.0), Vec2::new(110.0, 220.0), 2.0, Color::WHITE);
         });
         let out = ui.end_frame();
-        // A long diagonal is split to keep each quad tight (see DrawList::line),
-        // so check the chain runs end to end rather than counting instances.
+        // A long diagonal is split into strips to keep each quad tight (see
+        // DrawList::line). Every strip carries the whole segment, and the
+        // strips tile the longer axis: each edge bit-identical to the next
+        // strip's, so no pixel is drawn twice (a translucent line would show
+        // it) and none is skipped.
         let segs = seg(&out);
-        assert!(!segs.is_empty(), "no line instance emitted");
-        assert_eq!([segs[0][0], segs[0][1]], [10.0, 20.0], "chain does not start at the line's start");
-        let last = segs.last().unwrap();
-        assert_eq!([last[2], last[3]], [110.0, 220.0], "chain does not end at the line's end");
-        for w in segs.windows(2) {
-            assert_eq!([w[0][2], w[0][3]], [w[1][0], w[1][1]], "a gap between split segments");
+        assert!(segs.len() > 1, "a long diagonal should be split, got {} instance(s)", segs.len());
+        for s in &segs {
+            assert_eq!(*s, [10.0, 20.0, 110.0, 220.0], "a strip lost the segment's endpoints");
+        }
+        let rects: Vec<[f32; 4]> = out
+            .draw
+            .instances
+            .iter()
+            .filter(|i| PrimitiveKind::from_code(i.params[3]) == Some(PrimitiveKind::Line))
+            .map(|i| i.rect)
+            .collect();
+        // dy > dx here, so the strips stack vertically. Rebuild each edge the
+        // way the shader does, as centre ± half.
+        for w in rects.windows(2) {
+            let bottom = (w[0][1] + w[0][3] * 0.5) + w[0][3] * 0.5;
+            let top = (w[1][1] + w[1][3] * 0.5) - w[1][3] * 0.5;
+            assert_eq!(bottom.to_bits(), top.to_bits(), "strips {w:?} do not meet exactly");
         }
 
         // Inside a 2x canvas panned by (30, 40): endpoints map to the window.

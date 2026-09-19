@@ -155,7 +155,7 @@ macro_rules! goldens {
     };
 }
 
-goldens!(widgets, tree, shapes, text, button_hover, button_pressed, tooltip, text_focused, combo_open, scroll_mid);
+goldens!(widgets, tree, shapes, text, button_hover, button_pressed, tooltip, text_focused, combo_open, menu_open, scroll_mid);
 
 /// The same scene renders to the same bytes twice in one process: nothing in
 /// the pipeline depends on the clock, hashing seeds or allocation order.

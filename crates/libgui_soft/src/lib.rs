@@ -481,6 +481,20 @@ mod tests {
         }
     }
 
+    /// A long line is drawn as several strips, and a translucent one must
+    /// still blend once per pixel: anything brighter than one 50% blend over
+    /// black is a pixel drawn twice where two strips overlap.
+    #[test]
+    fn a_split_translucent_line_blends_once() {
+        let t = paint(200.0, 160.0, 1.5, |p, _| {
+            p.line(Vec2::new(10.0, 10.0), Vec2::new(190.0, 150.0), 8.0, Color::rgba(1.0, 1.0, 1.0, 0.5))
+        });
+        let brightest = t.data.chunks(4).map(|p| p[0]).max().unwrap();
+        assert_eq!(brightest, 128, "a pixel was blended more than once");
+        // And the middle of the line really is covered.
+        assert_eq!(t.pixel(150, 120)[0], 128);
+    }
+
     /// Lines are capsules: the centre of a thick line is fully covered and a
     /// point well off it is untouched.
     #[test]

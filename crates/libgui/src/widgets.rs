@@ -4,7 +4,7 @@
 //!   4. copy its style from `self.theme` (so `with_style` scopes work)
 //!   5. `add_leaf` with a layout + a paint closure that runs after layout.
 
-use crate::{ButtonStyle, Color, Cursor, Insets, Layout, Painter, Rect, Response, Shortcut, Size, TextureId, Theme, Ui, Vec2};
+use crate::{ButtonStyle, Chevron, Color, Cursor, Insets, Layout, Painter, Rect, Response, Shortcut, Size, TextureId, Theme, Ui, Vec2};
 use std::hash::Hash;
 
 /// Whether a tree row can be expanded, and whether it is.
@@ -486,7 +486,7 @@ impl Ui {
             p.rect_bordered(r, s.fill, s.radius, 1.0, border);
             p.text_left(r.shrink(s.padding_x, 0.0, arrow_w, 0.0), size, s.text, &shown);
             let a = Rect::new(r.right() - arrow_w, r.y, arrow_w, r.h);
-            p.text_centered(a, size, menu.shortcut, "\u{25BE}");
+            p.chevron(a, size, Chevron::Down, menu.shortcut);
         });
 
         // The menu is a popup, so it escapes any clipping the combo sits in.
@@ -602,13 +602,12 @@ impl Ui {
                 p.rect(Rect::new(r.x + 3.0, r.center().y - bar_h * 0.5, w, bar_h), s.indicator, w * 0.5);
             }
             let fg = s.text.lerp(s.text_hover, hover).lerp(s.text_selected, sel);
-            // The shader has no triangle, so the arrow is a glyph. Switched,
-            // not cross-faded: two overlapping triangles read as a smudge.
+            // Switched, not cross-faded: two overlapping arrows read as a smudge.
             if branch != Branch::Leaf {
-                let glyph = if branch == Branch::Expanded { "\u{25BE}" } else { "\u{25B8}" };
+                let dir = if branch == Branch::Expanded { Chevron::Down } else { Chevron::Right };
                 let c = faint.lerp(fg, arrow_hot.max(sel));
                 let a = Rect::new(r.x + s.padding_x + depth as f32 * indent, r.y, indent, r.h);
-                p.text_centered(a, size, c, glyph);
+                p.chevron(a, size, dir, c);
             }
             p.text_left(r.shrink(text_x, 0.0, s.padding_x, 0.0), size, fg, &label);
         });
@@ -762,7 +761,7 @@ impl Ui {
             }
             let fg = s.text.lerp(s.text_hover, hot);
             p.text_left(r.shrink(s.gutter, 0.0, 0.0, 0.0), size, fg, &label);
-            p.text_right(r, size, s.shortcut, "\u{25B8}");
+            p.chevron(Rect::new(r.right() - arrow_w, r.y, arrow_w, r.h), size, Chevron::Right, s.shortcut);
         });
         self.popup(child, 140.0, body)
     }
