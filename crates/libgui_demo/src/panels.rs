@@ -1,7 +1,8 @@
 //! App state and panel UI. Panels don't know which window they live in; the
 //! dock decides that.
 
-use libgui::{Axis, Branch, Color, DockConfig, DockNode, DockState, Insets, Key, ListOptions, Painter, Rect, ScrollOptions, Shortcut, Size, StateColors, TabViewer, TextureId, Ui, Vec2};
+use libgui::{Axis, Branch, Color, DockConfig, DockNode, DockState, Insets, Key, ListOptions, Painter, Rect, ScrollOptions, Size, StateColors, TabViewer, TextureId, Ui, Vec2};
+use libgui_keymap::{Chord, Keymap};
 use std::collections::{HashSet, VecDeque};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -139,7 +140,28 @@ fn outliner_rows(objects: &[String], collapsed: &HashSet<String>, filter: &str) 
 }
 
 /// Application state the UI edits. Owned by the app, not the UI.
+/// The demo's own commands. libgui binds none of these: the keymap does, per
+/// platform, and they could be rebound at runtime.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Action {
+    TogglePlay,
+    ResetLayout,
+    DeleteObject,
+}
+
+/// Space plays/pauses, Cmd/Ctrl+Shift+R resets the layout, Delete removes
+/// the selected object from the outliner.
+pub fn keymap() -> Keymap<Action> {
+    let mut k = Keymap::for_current_platform();
+    k.bind(Key::Space, Action::TogglePlay)
+        .bind(Chord::primary(Key::R).shift(), Action::ResetLayout)
+        .bind(Key::Delete, Action::DeleteObject)
+        .bind(Key::Backspace, Action::DeleteObject);
+    k
+}
+
 pub struct Demo {
+    pub keys: Keymap<Action>,
     pub objects: Vec<String>,
     pub filter: String,
     pub console: Vec<String>,
@@ -186,6 +208,7 @@ pub struct Demo {
 impl Default for Demo {
     fn default() -> Self {
         Self {
+            keys: keymap(),
             objects: scene_objects(),
             filter: String::new(),
             console: vec!["libgui console ready".into(), "type 'help' for commands".into()],
@@ -389,7 +412,8 @@ impl Panels<'_> {
         let d = &mut *self.d;
         // Panel-scoped: Delete only reaches here while the outliner has focus,
         // and never while the search box below is being typed into.
-        let delete_selected = ui.consume_shortcut(Shortcut::plain(Key::Delete));
+        let delete_selected = d.keys.triggered(ui, Action::DeleteObject);
+        let delete_hint = d.keys.label(Action::DeleteObject);
         ui.text_input("search", &mut d.filter, "Search objects…");
         let filter = d.filter.to_lowercase();
 
@@ -426,7 +450,7 @@ impl Panels<'_> {
                             picked = Some(i);
                         }
                         ui.menu_separator();
-                        if ui.menu_item_shortcut("Delete", Shortcut::plain(Key::Delete)).clicked {
+                        if ui.menu_item_shortcut("Delete", &delete_hint).clicked {
                             remove = Some(i);
                         }
                     });

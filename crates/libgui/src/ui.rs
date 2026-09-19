@@ -3,7 +3,7 @@ use crate::text_edit::TextState;
 use crate::hash::{FxMap, FxSet};
 use crate::input::UiEvent;
 use crate::input_state::InputState;
-use crate::{Align, Axis, Atlas, Color, Cursor, DrawList, FontId, Fonts, FrameInfo, FrameInput, Gesture, Id, InputEvent, Insets, Key, Layout, Painter, PlatformOutput, PointerButton, PointerKind, Rect, Shortcut, Size, Theme, Transform, Vec2};
+use crate::{Align, Axis, Atlas, Color, Cursor, DrawList, FontId, Fonts, FrameInfo, FrameInput, Gesture, Id, InputEvent, Insets, Key, KeyBindings, Layout, Painter, PlatformOutput, PointerButton, PointerKind, Rect, Shortcut, Size, Theme, Transform, UiAction, Vec2};
 use std::hash::Hash;
 
 /// Paint callback run after the tree (drag previews, tooltips).
@@ -559,10 +559,19 @@ impl Ui {
         self.input_state.push(event);
     }
 
-    /// Use Apple-style shortcuts (Cmd; Option for words) instead of Ctrl.
-    /// Defaults to the platform libgui was built for.
-    pub fn set_mac_shortcuts(&mut self, mac: bool) {
-        self.input_state.mac = mac;
+    /// Install the chords that perform libgui's widget actions (caret
+    /// movement, deletion, clipboard, Submit/Cancel, focus traversal).
+    ///
+    /// libgui has no defaults and no idea what platform it is on: until this
+    /// is called, keys are only keys, and a text field takes typed text but
+    /// does nothing on Backspace. `libgui_keymap` builds per-platform tables;
+    /// a host with its own keymap can instead send [`InputEvent::Action`].
+    pub fn set_key_bindings(&mut self, bindings: KeyBindings) {
+        self.input_state.bindings = bindings;
+    }
+
+    pub fn key_bindings(&self) -> &KeyBindings {
+        &self.input_state.bindings
     }
 
     /// This frame's input (after `begin_frame`).
@@ -583,28 +592,31 @@ impl Ui {
     /// Claim a shortcut for this frame.
     ///
     /// Returns true at most once per press: the first caller wins, so one key
-    /// cannot drive two commands. Refuses while a text field has focus and the
-    /// shortcut is one the field handles itself (`Delete` edits text, but
-    /// `Cmd+S` still saves), and refuses inside a
-    /// [`shortcut_scope`](Ui::shortcut_scope) that is not active.
+    /// cannot drive two commands. Refuses inside a
+    /// [`shortcut_scope`](Ui::shortcut_scope) that is not active, and while a
+    /// text field has focus refuses the keys that belong to the field: any
+    /// key the [`KeyBindings`] turned into an action this frame (Backspace,
+    /// arrows, Cmd+A…) and any chord that types a character (`Space`, `F`).
+    /// A chord with Ctrl or Cmd that the field does not use (`Cmd+S`) still
+    /// gets through.
     ///
-    /// libgui supplies no bindings: what `Cmd+S` means is your app's keymap.
+    /// The chord is concrete. Choosing Cmd+S on a Mac and Ctrl+S elsewhere is
+    /// the app's keymap (`libgui_keymap::Keymap::triggered` does it):
     ///
     /// ```ignore
-    /// if ui.consume_shortcut(Shortcut::command(Key::S)) { save(); }
-    /// if ui.consume_shortcut(Shortcut::command(Key::Z).shift()) { redo(); }
+    /// if ui.consume_shortcut(Shortcut::plain(Key::S).ctrl()) { save(); }
     /// ```
     pub fn consume_shortcut(&mut self, sc: Shortcut) -> bool {
         if !self.shortcut_scopes.iter().all(|&a| a) {
             return false;
         }
-        if self.typing && sc.is_text_editing() {
+        if self.typing && (sc.types_text() || self.input.keys_bound.contains(&sc.key)) {
             return false;
         }
         if !self.input.keys_pressed.contains(&sc.key) || self.consumed_keys.contains(&sc.key) {
             return false;
         }
-        if !sc.matches(&self.input.modifiers, self.input_state.mac) {
+        if !sc.matches(sc.key, &self.input.modifiers) {
             return false;
         }
         self.consumed_keys.push(sc.key);
@@ -690,7 +702,7 @@ impl Ui {
             return None;
         }
         self.popup_sheet();
-        if self.input.keys_pressed.contains(&Key::Escape) {
+        if self.input.events.contains(&UiEvent::Action(UiAction::Cancel)) {
             // Innermost first: Escape backs out one level.
             if self.open_chain.last() == Some(&id) {
                 self.open_chain.pop();
@@ -825,11 +837,6 @@ impl Ui {
     /// True while an enclosing [`Ui::shortcut_scope`] is inactive.
     pub fn shortcuts_blocked(&self) -> bool {
         !self.shortcut_scopes.iter().all(|&a| a)
-    }
-
-    /// How a shortcut should read in a menu on this platform: `⌘S` or `Ctrl+S`.
-    pub fn shortcut_label(&self, sc: Shortcut) -> String {
-        sc.label(self.input_state.mac)
     }
 
     /// `key` went down this frame (not a repeat).
@@ -980,7 +987,8 @@ impl Ui {
             }
         }
         self.pending_tab = input.events.iter().rev().find_map(|e| match e {
-            UiEvent::Key(Key::Tab, m) => Some(m.shift),
+            UiEvent::Action(UiAction::FocusNext) => Some(false),
+            UiEvent::Action(UiAction::FocusPrevious) => Some(true),
             _ => None,
         });
         self.time += input.dt as f64;
@@ -2395,8 +2403,7 @@ mod tests {
     #[test]
     fn a_shortcut_fires_once_and_matches_exactly() {
         let mut ui = ui();
-        ui.set_mac_shortcuts(false);
-        let save = Shortcut::command(Key::S);
+        let save = Shortcut::plain(Key::S).ctrl();
 
         press(&mut ui, Key::S, &[Key::ControlLeft]);
         ui.begin_frame(FrameInfo::default());
@@ -2422,29 +2429,18 @@ mod tests {
         release(&mut ui, Key::S, &[]);
     }
 
-    /// `command` must resolve to the platform's key, and the *other* one must
-    /// not work: Ctrl+S on a Mac is not Save.
+    /// Chords are physical and exact: libgui has no idea which of Ctrl and
+    /// Cmd is "the" shortcut key. Cmd+S is not Ctrl+S; the keymap picks.
     #[test]
-    fn command_is_platform_correct() {
-        let save = Shortcut::command(Key::S);
+    fn chords_are_physical_and_exact() {
+        let (ctrl_s, cmd_s) = (Shortcut::plain(Key::S).ctrl(), Shortcut::plain(Key::S).logo());
         let mut ui = ui();
-        ui.set_mac_shortcuts(true);
         press(&mut ui, Key::S, &[Key::SuperLeft]);
         ui.begin_frame(FrameInfo::default());
-        assert!(ui.consume_shortcut(save), "Cmd+S did not fire on mac");
+        assert!(!ui.consume_shortcut(ctrl_s), "Cmd+S fired a Ctrl+S shortcut");
+        assert!(ui.consume_shortcut(cmd_s), "Cmd+S did not fire");
         let _ = ui.end_frame();
         release(&mut ui, Key::S, &[Key::SuperLeft]);
-
-        press(&mut ui, Key::S, &[Key::ControlLeft]);
-        ui.begin_frame(FrameInfo::default());
-        assert!(!ui.consume_shortcut(save), "Ctrl+S fired a command shortcut on mac");
-        let _ = ui.end_frame();
-        release(&mut ui, Key::S, &[Key::ControlLeft]);
-
-        assert_eq!(save.label(true), "\u{2318}S");
-        assert_eq!(save.shift().label(false), "Ctrl+Shift+S");
-        assert_eq!(Shortcut::plain(Key::F2).label(false), "F2");
-        assert_eq!(Shortcut::plain(Key::Delete).label(true), "Del");
     }
 
     /// While the user is typing, the keys the field handles belong to the
@@ -2452,15 +2448,16 @@ mod tests {
     #[test]
     fn typing_keeps_its_keys_but_not_all_of_them() {
         let mut ui = ui();
-        ui.set_mac_shortcuts(false);
+        ui.set_key_bindings(crate::input::test_bindings());
         let mut text = String::from("hello");
-        let frame = |ui: &mut Ui, text: &mut String| -> (bool, bool) {
+        let frame = |ui: &mut Ui, text: &mut String| -> (bool, bool, bool) {
             ui.begin_frame(FrameInfo::default());
             let del = ui.consume_shortcut(Shortcut::plain(Key::Delete));
-            let save = ui.consume_shortcut(Shortcut::command(Key::S));
+            let save = ui.consume_shortcut(Shortcut::plain(Key::S).ctrl());
+            let play = ui.consume_shortcut(Shortcut::plain(Key::Space));
             ui.text_input("field", text, "");
             let _ = ui.end_frame();
-            (del, save)
+            (del, save, play)
         };
         frame(&mut ui, &mut text);
 
@@ -2481,6 +2478,12 @@ mod tests {
         assert!(!frame(&mut ui, &mut text).0, "Delete fired an app command while typing");
         release(&mut ui, Key::Delete, &[]);
 
+        // A bare key that types a character is the field's too: typing a
+        // space must not also toggle playback.
+        press(&mut ui, Key::Space, &[]);
+        assert!(!frame(&mut ui, &mut text).2, "Space fired an app shortcut while typing");
+        release(&mut ui, Key::Space, &[]);
+
         press(&mut ui, Key::S, &[Key::ControlLeft]);
         assert!(frame(&mut ui, &mut text).1, "Ctrl+S must still save while typing");
         release(&mut ui, Key::S, &[Key::ControlLeft]);
@@ -2490,7 +2493,6 @@ mod tests {
     #[test]
     fn scopes_route_shortcuts_by_focus() {
         let mut ui = ui();
-        ui.set_mac_shortcuts(false);
         let sc = Shortcut::plain(Key::F2);
         let run = |ui: &mut Ui, outer: bool, inner: bool| -> (bool, bool, bool) {
             ui.begin_frame(FrameInfo::default());

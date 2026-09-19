@@ -236,7 +236,10 @@ impl GraphUi<'_> {
     }
 
     fn press_node(&mut self, id: NodeId) {
-        let additive = self.ui.input().modifiers.shift || self.ui.input().modifiers.command;
+        // Shift, Ctrl or Cmd adds to the selection: the platforms disagree on
+        // Ctrl vs Cmd, and accepting both costs nothing.
+        let m = self.ui.input().modifiers;
+        let additive = m.shift || m.ctrl || m.logo;
         if additive {
             if !self.selection.insert(id) {
                 self.selection.remove(&id);

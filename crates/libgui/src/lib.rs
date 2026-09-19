@@ -32,8 +32,8 @@ pub use dock::{DockConfig, FloatingMode, DockNode, DockState, DropKind, DropTarg
 pub use draw::{Batch, DrawList, Instance, TextureId};
 pub use id::{Id, StableHasher};
 pub use input::{
-    Cursor, FrameInfo, FrameInput, Gesture, InputEvent, Key, Modifiers, PlatformOutput, PointerButton, PointerKind, Shortcut, Touch,
-    TouchPhase, VirtualCursor, WheelUnit,
+    Cursor, FrameInfo, FrameInput, Gesture, InputEvent, Key, KeyBindings, Modifiers, Motion, PlatformOutput, PointerButton,
+    PointerKind, Shortcut, Touch, TouchPhase, UiAction, VirtualCursor, WheelUnit,
 };
 pub use layout::{Align, Axis, Insets, Layout, Size};
 pub use math::{Color, Rect, Transform, Vec2};

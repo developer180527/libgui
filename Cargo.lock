@@ -806,12 +806,20 @@ dependencies = [
  "arboard",
  "bytemuck",
  "libgui",
+ "libgui_keymap",
  "libgui_nodes",
  "libgui_wgpu",
  "libgui_winit",
  "pollster",
  "wgpu",
  "winit",
+]
+
+[[package]]
+name = "libgui_keymap"
+version = "0.1.0"
+dependencies = [
+ "libgui",
 ]
 
 [[package]]

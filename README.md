@@ -17,7 +17,7 @@ cargo run -p libgui_shaders -- shaders_out   # export HLSL/MSL/GLSL/SPIR-V/WGSL
 | Also builds for | wasm32, Android (aarch64), iOS + simulator, 32-bit x86 |
 | Portability | `Id` values verified under emulation on 32-bit **and big-endian** targets |
 | Not tested | Android and iOS run on device, physical iPad, mixed-DPI multi-monitor docking |
-| Rust | **1.90** for the GPU crates (`wgpu-hal` on Linux/Windows/Android), **1.87** for `libgui`, `libgui_nodes` and `libgui_soft` |
+| Rust | **1.90** for the GPU crates (`wgpu-hal` on Linux/Windows/Android), **1.87** for `libgui`, `libgui_nodes`, `libgui_soft` and `libgui_keymap` |
 | Licence | **not yet chosen** — see `LICENSING.md` |
 | Version | 0.1.0, pre-1.0: the API still changes between releases |
 
@@ -31,6 +31,7 @@ picker, general drag and drop, layout persistence. See the roadmap.
 | `crates/libgui` | Core. **No GPU code.** IDs, retained state, layout, input, theme, text, draw list, widgets, and the `Backend` trait. |
 | `crates/libgui_shaders` | The one UI shader. Authored in WGSL, validated + cross-compiled by naga at build time to HLSL (SM 5.1), MSL 2.0, GLSL 4.50, SPIR-V. |
 | `crates/libgui_wgpu` | `Backend` implementation for wgpu. Also the reference for writing your own. |
+| `crates/libgui_keymap` | Cross-platform keymaps: each platform's bindings for libgui's widget actions, rebindable app actions, menu spelling (`⇧⌘S` / `Ctrl+Shift+S`). Optional. |
 | `crates/libgui_soft` | CPU reference `Backend`: renders a frame to an RGBA8 image, the same bytes on every machine. Golden-image tests live here. |
 | `crates/libgui_nodes` | Node-graph editing: nodes, ports, links, selection, routing. Built *on* libgui, not in it. |
 | `crates/libgui_demo` | winit host + editor layout + an "engine" scene rendered offscreen and shown via `ui.viewport`. |
@@ -118,13 +119,14 @@ if r.changed { /* refilter */ }
 if r.submitted { /* Enter pressed */ }
 ```
 
-- Caret + selection (mouse drag, Shift+arrows), word jumps/deletes (`Modifiers::word`), line start/end and
-  select-all (`Modifiers::command`), horizontal auto-scroll, placeholder, focus ring, blinking caret.
-- Keyboard focus: click to focus, click elsewhere / Esc / Enter to release, **Tab / Shift+Tab** cycles fields.
-  `ui.wants_keyboard()` tells the host not to route keys to the game.
-- The host translates OS input into `Input::events` (`Event::Key`, `Text`, `Paste`, `Copy`, `Cut`) and writes
-  `ui.take_copied()` to the clipboard, so the core has no platform or clipboard dependency.
-  See `key_event` in `libgui_demo/src/main.rs` for a winit + arboard reference mapping.
+- Caret + selection (mouse drag, or `Move { select: true }`), word and line movement and deletion,
+  select-all, horizontal auto-scroll, placeholder, focus ring, blinking caret.
+- The field acts on `UiAction`s, never on keys: which chords move by word or delete to the line start is
+  the keymap's (see below). Without installed bindings it takes typed text but ignores Backspace.
+- Keyboard focus: click to focus, click elsewhere / `Cancel` / `Submit` to release, `FocusNext` /
+  `FocusPrevious` cycle fields. `ui.wants_keyboard()` tells the host not to route keys to the game.
+- The host sends `Text` and `Paste` events and writes `PlatformOutput::copied_text` to the clipboard,
+  so the core has no platform or clipboard dependency. `libgui_demo` is a winit + arboard reference.
 - `ui.ime_rect()` gives the caret rect for positioning an IME candidate window.
 
 ## Widget identity
@@ -147,31 +149,50 @@ scopes combine. `button_keyed`, `button_styled_keyed`, `toggle_keyed`, `slider_k
 `selectable_keyed` take a key for a single widget; `segmented`, `text_input`, `scroll_area` and
 `viewport` already take one.
 
-## Keyboard shortcuts
+## Keyboard shortcuts and keymaps
 
-libgui supplies the **mechanism** — matching, platform-correct modifiers, routing by focus, and
-consumption so one press cannot drive two commands. It supplies **no bindings**: what `Cmd+S` means
-is your app's keymap, and your users will want to rebind it.
+libgui has **no keymap** and no idea which OS it is on. It works in three layers:
+
+- **Physical input.** `Key`s are layout-independent (USB HID usages), `Modifiers` are the four physical
+  modifier keys, and a `Shortcut` is a concrete chord like Ctrl+Shift+S, matched exactly.
+- **Widget actions.** libgui's own widgets respond to `UiAction`s (`Move { motion, select }`,
+  `Delete(motion)`, `SelectAll`, `Copy`/`Cut`/`Paste`, `Submit`, `Cancel`, `FocusNext`/`FocusPrevious`),
+  never to keys. The chord → action table is a `KeyBindings` the app installs with
+  `ui.set_key_bindings(..)`; it is **empty by default**. A host with its own input layer (raw HID, a
+  gamepad, an OS Edit menu) can push `InputEvent::Action(..)` instead.
+- **Policy lives in `libgui_keymap`**, an optional crate: each platform's native widget bindings
+  (Option-word, Cmd-line and the Emacs keys on macOS; Ctrl-word and Ctrl+Insert / Shift+Insert on
+  Windows and Linux), platform-neutral chords for your own actions, rebinding, and menu spelling.
 
 ```rust
-if ui.consume_shortcut(Shortcut::command(Key::S)) { save(); }             // Cmd+S / Ctrl+S
-if ui.consume_shortcut(Shortcut::command(Key::Z).shift()) { redo(); }
-ui.shortcut_label(Shortcut::command(Key::S));                             // "⌘S" or "Ctrl+S"
+#[derive(Clone, Copy, PartialEq)]
+enum Action { Save, Redo, Frame }
+
+let mut keys = Keymap::for_current_platform();          // or Keymap::new(Platform::Mac)
+keys.bind(Chord::primary(Key::S), Action::Save)         // Cmd+S on a Mac, Ctrl+S elsewhere
+    .bind(Chord::primary(Key::Z).shift(), Action::Redo)
+    .bind(Key::F, Action::Frame);
+keys.install(&mut ui);                                   // widget bindings, once per Ui/window
+
+if keys.triggered(&mut ui, Action::Save) { save(); }    // routed through ui.consume_shortcut
+ui.menu_item_shortcut("Save", &keys.label(Action::Save)); // "⌘S" / "Ctrl+S"
+keys.rebind(Action::Frame, Key::Period);                 // a keymap editor's "set"
 ```
 
-- **`command` is Cmd on Apple platforms and Ctrl elsewhere**, so one declaration is right on both,
-  and the wrong one is rejected: `Ctrl+S` on a Mac does not fire a `command` shortcut. Matching is
-  exact, so `Cmd+S` never fires on `Cmd+Shift+S`.
-- **Typing wins.** While a text field has focus, keys it handles itself (`Delete`, arrows, `Enter`,
-  `Cmd+A/C/X/V`) never reach an app shortcut — but `Cmd+S` still saves.
+Routing, which is libgui's:
+
+- **Exact matching.** Ctrl+S never fires on Ctrl+Shift+S, and Cmd+S is not Ctrl+S.
+- **Typing wins.** While a text field has focus, `consume_shortcut` refuses any key the bindings turned
+  into an action this frame (Backspace, arrows, Cmd+A…) and any chord that types a character (`Space`,
+  `F`). A chord with Ctrl or Cmd the field does not use (`Cmd+S`) still gets through.
 - **Panels are scoped automatically.** A shortcut declared inside a dock panel only fires while that
   pane has focus, so the same key can mean different things in the outliner and the viewport. Wrap
   anything else in `ui.shortcut_scope(active, |ui| …)`; scopes nest, and an inactive one disables
   everything within it.
 - **Consumption is first-come, first-served,** so check panel shortcuts before global ones — build
-  the panels, then the app's keymap. `libgui_demo` does exactly that: `Delete` in the outliner
-  deletes the selected object (and does nothing while you type in its search box), while `Space`
-  toggles playback globally.
+  the panels, then the app's global actions. `libgui_demo` does exactly that: Delete in the outliner
+  deletes the selected object (and does nothing while you type in its search box), while Space
+  toggles playback globally (and types a space while you are in a field).
 
 `ui.key_pressed` / `key_down` stay raw and unrouted, for held-key state like a viewport's fly
 controls — gate those on `ui.wants_keyboard()`.
@@ -284,7 +305,7 @@ order, so a menu is above a torn-off panel however early the panel was built.
 
 ```rust
 ui.menu_button("File", |ui| {
-    if ui.menu_item_shortcut("Save", Shortcut::command(Key::S)).clicked { save(); }
+    if ui.menu_item_shortcut("Save", &keys.label(Action::Save)).clicked { save(); }
     ui.menu_item_ex("Undo", None, can_undo);            // greyed out when it cannot run
     ui.menu_separator();
     ui.submenu("Export", |ui| { /* … */ });

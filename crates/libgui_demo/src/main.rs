@@ -6,10 +6,10 @@ mod panels;
 mod scene;
 
 use libgui::{
-    Backend, Color, Density, DockState, FloatingMode, FrameInfo, Frame, InputEvent, Insets, Key, Layout, PointerButton, Shortcut,
+    Backend, Color, Density, DockState, FloatingMode, FrameInfo, Frame, InputEvent, Insets, Layout, PointerButton,
     Size, SurfaceId, TextureId, Theme, ThemeWatcher, Ui, Vec2,
 };
-use panels::{default_layout, Demo, Panels, Tab, THEMES};
+use panels::{default_layout, Action, Demo, Panels, Tab, THEMES};
 use scene::{Scene, SceneParams};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -216,6 +216,9 @@ impl App {
             }
         }
         let id = window.id();
+        // Every window has its own Ui, and each needs the widget bindings.
+        let mut ui = Ui::new(libgui::Theme::dark(), FONT).expect("bundled font");
+        self.demo.keys.install(&mut ui);
         self.wins.insert(
             id,
             Win {
@@ -223,7 +226,7 @@ impl App {
                 surface,
                 config,
                 renderer,
-                ui: Ui::new(libgui::Theme::dark(), FONT).expect("bundled font"),
+                ui,
                 platform: libgui_winit::PlatformState::default(),
                 dock_id,
                 last: Instant::now(),
@@ -501,17 +504,18 @@ impl App {
     }
 }
 
-/// The app's keymap: libgui supplies the matching and routing, never the
-/// bindings. Checked after the panels so a focused panel wins.
+/// App-wide commands, from the demo's keymap (`panels::keymap`): libgui
+/// supplies the matching and routing, never the bindings. Checked after the
+/// panels so a focused panel wins.
 fn app_shortcuts(ui: &mut Ui, d: &mut Demo) {
-    if ui.consume_shortcut(Shortcut::plain(Key::Space)) {
+    if d.keys.triggered(ui, Action::TogglePlay) {
         d.playing = !d.playing;
         let state = if d.playing { "playing" } else { "paused" };
-        d.log(format!("{state} (Space)"));
+        d.log(format!("{state} ({})", d.keys.label(Action::TogglePlay)));
     }
-    if ui.consume_shortcut(Shortcut::command(Key::R).shift()) {
+    if d.keys.triggered(ui, Action::ResetLayout) {
         d.reset_layout = true;
-        d.log(format!("reset layout ({})", ui.shortcut_label(Shortcut::command(Key::R).shift())));
+        d.log(format!("reset layout ({})", d.keys.label(Action::ResetLayout)));
     }
 }
 
@@ -528,7 +532,7 @@ fn top_bar(ui: &mut Ui, d: &mut Demo) {
         });
         ui.heading("libgui");
         ui.menu_button("View", |ui| {
-            if ui.menu_item_shortcut("Reset layout", Shortcut::command(Key::R).shift()).clicked {
+            if ui.menu_item_shortcut("Reset layout", &d.keys.label(Action::ResetLayout)).clicked {
                 d.reset_layout = true;
             }
             if ui.menu_item("Reset view").clicked {
@@ -536,7 +540,7 @@ fn top_bar(ui: &mut Ui, d: &mut Demo) {
             }
             ui.menu_separator();
             let play = if d.playing { "Pause" } else { "Play" };
-            if ui.menu_item_shortcut(play, Shortcut::plain(Key::Space)).clicked {
+            if ui.menu_item_shortcut(play, &d.keys.label(Action::TogglePlay)).clicked {
                 d.playing = !d.playing;
             }
             if ui.menu_item_ex("Auto-rotate", None, d.playing).clicked {

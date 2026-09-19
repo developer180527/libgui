@@ -4,7 +4,7 @@
 //!   4. copy its style from `self.theme` (so `with_style` scopes work)
 //!   5. `add_leaf` with a layout + a paint closure that runs after layout.
 
-use crate::{ButtonStyle, Chevron, Color, Cursor, Insets, Layout, Painter, Rect, Response, Shortcut, Size, TextureId, Theme, Ui, Vec2};
+use crate::{ButtonStyle, Chevron, Color, Cursor, Insets, Layout, Painter, Rect, Response, Size, TextureId, Theme, Ui, Vec2};
 use std::hash::Hash;
 
 /// Whether a tree row can be expanded, and whether it is.
@@ -359,8 +359,8 @@ impl Ui {
     /// Drag left and right to change a number — the control every inspector is
     /// mostly made of.
     ///
-    /// `speed` is units per pixel dragged. Hold the `word` modifier (Option on
-    /// Apple platforms, Ctrl elsewhere) for fine control, `shift` for coarse.
+    /// `speed` is units per pixel dragged. Hold Alt (Option) for fine
+    /// control, Shift for coarse.
     /// Unbounded unless you pass a range to [`Ui::drag_value_range`].
     pub fn drag_value(&mut self, label: &str, value: &mut f32, speed: f32) -> Response {
         self.drag_value_range(label, value, speed, f32::NEG_INFINITY..=f32::INFINITY)
@@ -384,7 +384,9 @@ impl Ui {
 
         if resp.active && resp.drag_delta.x != 0.0 {
             let mods = self.input.modifiers;
-            let scale = if mods.word { 0.1 } else if mods.shift { 10.0 } else { 1.0 };
+            // Alt (Option) for fine, Shift for coarse: the same physical keys
+            // on every platform, as DCC tools do.
+            let scale = if mods.alt { 0.1 } else if mods.shift { 10.0 } else { 1.0 };
             *value = (*value + resp.drag_delta.x * speed * scale).clamp(*range.start(), *range.end());
         }
         if resp.hovered || resp.active {
@@ -622,7 +624,7 @@ impl Ui {
     /// ```ignore
     /// ui.row(|ui| {
     ///     ui.menu_button("File", |ui| {
-    ///         if ui.menu_item_shortcut("Save", Shortcut::command(Key::S)).clicked { save(); }
+    ///         if ui.menu_item_shortcut("Save", &keymap.label(Save)).clicked { save(); }
     ///         ui.menu_separator();
     ///         if ui.menu_item("Quit").clicked { quit(); }
     ///     });
@@ -673,20 +675,22 @@ impl Ui {
         self.menu_item_ex(label, None, true)
     }
 
-    /// A menu row showing the shortcut that also triggers it, right-aligned and
-    /// spelled for this platform (`⌘S` / `Ctrl+S`). Declaring the shortcut here
-    /// does not bind it: handle it with [`Ui::consume_shortcut`] as usual.
-    pub fn menu_item_shortcut(&mut self, label: &str, sc: Shortcut) -> Response {
-        self.menu_item_ex(label, Some(sc), true)
+    /// A menu row with a right-aligned shortcut hint (`⌘S`, `Ctrl+S`).
+    ///
+    /// The hint is only text: how a chord is spelled on each platform is the
+    /// keymap's (`libgui_keymap::Keymap::label`), and showing it here does not
+    /// bind it; handle the chord with [`Ui::consume_shortcut`] as usual.
+    pub fn menu_item_shortcut(&mut self, label: &str, hint: &str) -> Response {
+        self.menu_item_ex(label, Some(hint), true)
     }
 
     /// A menu row that can be greyed out.
-    pub fn menu_item_ex(&mut self, label: &str, sc: Option<Shortcut>, enabled: bool) -> Response {
+    pub fn menu_item_ex(&mut self, label: &str, hint: Option<&str>, enabled: bool) -> Response {
         let s = self.theme.menu;
         let size = self.theme.metrics.font_size;
         let id = self.make_id(("menu_item", label));
         let m = self.text_size(size, label);
-        let hint = sc.map(|sc| self.shortcut_label(sc)).unwrap_or_default();
+        let hint = hint.unwrap_or_default().to_string();
         let hint_w = if hint.is_empty() { 0.0 } else { self.text_size(size, &hint).x + s.item_padding_x };
         let mut resp = self.interact(id);
         if !enabled {
@@ -903,7 +907,7 @@ mod tests {
 
     fn ui() -> Ui {
         let mut ui = Ui::new(Theme::dark(), include_bytes!("../../../assets/Inter.ttf")).unwrap();
-        ui.set_mac_shortcuts(false);
+        ui.set_key_bindings(crate::input::test_bindings());
         ui
     }
 

@@ -2,6 +2,12 @@
 //! Android, raw HID…) with [`crate::Ui::push`]; libgui turns them into a
 //! per-frame [`FrameInput`] when the frame begins. Nothing here knows about a
 //! platform: a host's only job is translating its native events.
+//!
+//! libgui has no keymap. Keys are physical ([`Key`], [`Modifiers`]), app
+//! shortcuts are concrete chords ([`Shortcut`]) the app chooses, and libgui's
+//! own widgets act on semantic [`UiAction`]s rather than on keys. Which chord
+//! performs which action on which platform is a table the app installs
+//! ([`KeyBindings`], empty by default), typically built by `libgui_keymap`.
 
 use crate::{Rect, Vec2};
 
@@ -87,38 +93,30 @@ pub enum InputEvent {
     Text(String),
     /// Clipboard contents, typically sent in response to `PlatformOutput::paste_requested`.
     Paste(String),
-    /// Explicit copy/cut (e.g. from an OS menu). Cmd/Ctrl+C/X are handled from `Key` events.
-    Copy,
-    Cut,
+    /// A widget action from outside the key bindings: an OS Edit menu's Copy,
+    /// a gamepad's "confirm", or a host that resolves its own keymap.
+    Action(UiAction),
     /// The window lost focus: every button and key is released.
     FocusLost,
 }
 
-/// Modifier state. `shift`/`ctrl`/`alt`/`logo` are the real keys; `command`
-/// and `word` are what they mean on this platform (see [`Modifiers::from_keys`]).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// Modifier keys held: the physical keys, with no meaning attached. What
+/// Ctrl or Cmd *does* is the keymap's business.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Modifiers {
     pub shift: bool,
     pub ctrl: bool,
+    /// Alt; Option on Apple keyboards.
     pub alt: bool,
-    /// Cmd on macOS, Windows key elsewhere.
+    /// Cmd on Apple keyboards, the Windows key, Super on Linux.
     pub logo: bool,
-    /// Shortcut modifier: Cmd on Apple platforms, Ctrl elsewhere.
-    pub command: bool,
-    /// Word-wise caret movement: Option on Apple platforms, Ctrl elsewhere.
-    pub word: bool,
 }
 
 impl Modifiers {
-    pub fn from_keys(shift: bool, ctrl: bool, alt: bool, logo: bool, mac: bool) -> Self {
-        Self {
-            shift,
-            ctrl,
-            alt,
-            logo,
-            command: if mac { logo } else { ctrl },
-            word: if mac { alt } else { ctrl },
-        }
+    pub const NONE: Modifiers = Modifiers { shift: false, ctrl: false, alt: false, logo: false };
+
+    pub fn is_empty(&self) -> bool {
+        *self == Self::NONE
     }
 }
 
@@ -140,224 +138,167 @@ pub enum Key {
     ControlLeft, ShiftLeft, AltLeft, SuperLeft, ControlRight, ShiftRight, AltRight, SuperRight,
 }
 
-/// A keyboard shortcut, written in terms of what the modifiers *mean* rather
-/// than which keys they are: `command` is Cmd on Apple platforms and Ctrl
-/// elsewhere, so one declaration is right on both.
+/// A key chord: one key and exactly these modifiers, e.g. Ctrl+Shift+S.
 ///
-/// libgui does not define what a shortcut *does* — that is your app's keymap,
-/// and your users will want to rebind it. What libgui provides is matching,
-/// platform-correct modifiers, routing by focus, and consumption so a
-/// shortcut cannot fire twice. See [`crate::Ui::consume_shortcut`].
+/// Concrete, not platform-abstract: whether Save is Cmd+S or Ctrl+S is the
+/// app's keymap (see `libgui_keymap`), which hands libgui the chord to match.
+/// libgui provides exact matching, routing by focus and scope, and
+/// consumption so one press cannot fire twice. See
+/// [`crate::Ui::consume_shortcut`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Shortcut {
     pub key: Key,
-    /// Cmd on Apple platforms, Ctrl elsewhere.
-    pub command: bool,
-    pub shift: bool,
-    pub alt: bool,
+    pub mods: Modifiers,
 }
 
 impl Shortcut {
     /// A bare key: `F2`, `Delete`.
     pub const fn plain(key: Key) -> Self {
-        Self { key, command: false, shift: false, alt: false }
+        Self { key, mods: Modifiers::NONE }
     }
 
-    /// Cmd+key on Apple platforms, Ctrl+key elsewhere.
-    pub const fn command(key: Key) -> Self {
-        Self { key, command: true, shift: false, alt: false }
+    pub const fn new(key: Key, mods: Modifiers) -> Self {
+        Self { key, mods }
+    }
+
+    pub const fn ctrl(mut self) -> Self {
+        self.mods.ctrl = true;
+        self
     }
 
     pub const fn shift(mut self) -> Self {
-        self.shift = true;
+        self.mods.shift = true;
         self
     }
 
     pub const fn alt(mut self) -> Self {
-        self.alt = true;
+        self.mods.alt = true;
         self
     }
 
-    /// Exact match: `Cmd+S` must not fire on `Cmd+Shift+S`, and on a Mac
-    /// `Ctrl+S` must not fire a `command` shortcut.
-    pub fn matches(&self, m: &Modifiers, mac: bool) -> bool {
-        let (primary, other) = if mac { (m.logo, m.ctrl) } else { (m.ctrl, m.logo) };
-        primary == self.command && !other && m.shift == self.shift && m.alt == self.alt
+    /// Cmd on Apple keyboards, the Windows/Super key elsewhere.
+    pub const fn logo(mut self) -> Self {
+        self.mods.logo = true;
+        self
     }
 
-    /// Keys a focused text field handles itself, which therefore must not also
-    /// trigger an app shortcut while the user is typing.
-    pub(crate) fn is_text_editing(&self) -> bool {
-        match self.key {
-            Key::Backspace
-            | Key::Delete
-            | Key::ArrowLeft
-            | Key::ArrowRight
-            | Key::ArrowUp
-            | Key::ArrowDown
-            | Key::Home
-            | Key::End
-            | Key::Enter
-            | Key::Escape
-            | Key::Tab => true,
-            // Only as shortcuts: plain C is typing, Cmd+C is copy.
-            Key::A | Key::C | Key::X | Key::V => self.command,
-            _ => false,
-        }
+    /// Exact match: Ctrl+S does not fire on Ctrl+Shift+S.
+    pub fn matches(&self, key: Key, m: &Modifiers) -> bool {
+        self.key == key && self.mods == *m
     }
 
-    /// How this shortcut should be written in a menu: `⌘⇧S` on Apple
-    /// platforms, `Ctrl+Shift+S` elsewhere.
-    pub fn label(&self, mac: bool) -> String {
-        let name = self.key.label();
-        if mac {
-            let mut s = String::new();
-            if self.command {
-                s.push('\u{2318}');
-            }
-            if self.alt {
-                s.push('\u{2325}');
-            }
-            if self.shift {
-                s.push('\u{21E7}');
-            }
-            s + name
-        } else {
-            let mut parts: Vec<&str> = Vec::new();
-            if self.command {
-                parts.push("Ctrl");
-            }
-            if self.alt {
-                parts.push("Alt");
-            }
-            if self.shift {
-                parts.push("Shift");
-            }
-            parts.push(name);
-            parts.join("+")
-        }
+    /// Would pressing this chord type a character? True for a key that makes
+    /// text when no Ctrl or Cmd is held (letters, digits, punctuation,
+    /// Space). While a text field has focus these belong to the field, so an
+    /// app's `Space` or `F`-for-frame shortcut does not also fire.
+    pub(crate) fn types_text(&self) -> bool {
+        !self.mods.ctrl && !self.mods.logo && self.key.makes_text()
     }
 }
 
-impl Key {
-    /// Short display name, for menus and keymap editors.
-    pub fn label(self) -> &'static str {
-        use Key::*;
-        match self {
-            Enter => "Enter",
-            Escape => "Esc",
-            Backspace => "Backspace",
-            Tab => "Tab",
-            Space => "Space",
-            Delete => "Del",
-            Home => "Home",
-            End => "End",
-            PageUp => "PgUp",
-            PageDown => "PgDn",
-            Insert => "Ins",
-            ArrowLeft => "Left",
-            ArrowRight => "Right",
-            ArrowUp => "Up",
-            ArrowDown => "Down",
-            Minus => "-",
-            Equal => "=",
-            BracketLeft => "[",
-            BracketRight => "]",
-            Backslash => "\\",
-            Semicolon => ";",
-            Quote => "'",
-            Backquote => "`",
-            Comma => ",",
-            Period => ".",
-            Slash => "/",
-            A => "A",
-            B => "B",
-            C => "C",
-            D => "D",
-            E => "E",
-            F => "F",
-            G => "G",
-            H => "H",
-            I => "I",
-            J => "J",
-            K => "K",
-            L => "L",
-            M => "M",
-            N => "N",
-            O => "O",
-            P => "P",
-            Q => "Q",
-            R => "R",
-            S => "S",
-            T => "T",
-            U => "U",
-            V => "V",
-            W => "W",
-            X => "X",
-            Y => "Y",
-            Z => "Z",
-            Num0 => "0",
-            Num1 => "1",
-            Num2 => "2",
-            Num3 => "3",
-            Num4 => "4",
-            Num5 => "5",
-            Num6 => "6",
-            Num7 => "7",
-            Num8 => "8",
-            Num9 => "9",
-            F1 => "F1",
-            F2 => "F2",
-            F3 => "F3",
-            F4 => "F4",
-            F5 => "F5",
-            F6 => "F6",
-            F7 => "F7",
-            F8 => "F8",
-            F9 => "F9",
-            F10 => "F10",
-            F11 => "F11",
-            F12 => "F12",
-            F13 => "F13",
-            F14 => "F14",
-            F15 => "F15",
-            F16 => "F16",
-            F17 => "F17",
-            F18 => "F18",
-            F19 => "F19",
-            F20 => "F20",
-            F21 => "F21",
-            F22 => "F22",
-            F23 => "F23",
-            F24 => "F24",
-            Numpad0 => "Num0",
-            Numpad1 => "Num1",
-            Numpad2 => "Num2",
-            Numpad3 => "Num3",
-            Numpad4 => "Num4",
-            Numpad5 => "Num5",
-            Numpad6 => "Num6",
-            Numpad7 => "Num7",
-            Numpad8 => "Num8",
-            Numpad9 => "Num9",
-            NumpadDivide => "Num/",
-            NumpadMultiply => "Num*",
-            NumpadSubtract => "Num-",
-            NumpadAdd => "Num+",
-            NumpadEnter => "NumEnter",
-            NumpadDecimal => "Num.",
-            NumLock => "NumLock",
-            CapsLock => "CapsLock",
-            PrintScreen => "PrtSc",
-            ScrollLock => "ScrLk",
-            Pause => "Pause",
-            ContextMenu => "Menu",
-            ControlLeft | ControlRight => "Ctrl",
-            ShiftLeft | ShiftRight => "Shift",
-            AltLeft | AltRight => "Alt",
-            SuperLeft | SuperRight => "Super",
-        }
+/// What a caret move or deletion covers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Motion {
+    Left,
+    Right,
+    WordLeft,
+    WordRight,
+    LineStart,
+    LineEnd,
+    /// Up/down a line; in a single-line field, the start/end.
+    Up,
+    Down,
+    DocStart,
+    DocEnd,
+}
+
+/// Something libgui's own widgets do in response to the keyboard. Widgets
+/// never look at keys for these, so every binding is the keymap's to choose,
+/// and a host can send them without a keyboard at all
+/// ([`InputEvent::Action`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum UiAction {
+    /// Move the caret; with `select`, extend the selection.
+    Move { motion: Motion, select: bool },
+    /// Delete from the caret to where `motion` would move it (or the
+    /// selection, if there is one).
+    Delete(Motion),
+    SelectAll,
+    Copy,
+    Cut,
+    /// Ask the host for the clipboard (`PlatformOutput::paste_requested`);
+    /// the text arrives as [`InputEvent::Paste`].
+    Paste,
+    /// Commit a text field (Enter).
+    Submit,
+    /// Back out: unfocus a field, close the innermost popup (Escape).
+    Cancel,
+    /// Move keyboard focus (Tab / Shift+Tab).
+    FocusNext,
+    FocusPrevious,
+}
+
+/// Which chords perform which [`UiAction`]: the part of the keymap libgui's
+/// widgets need. Empty by default, so a text field does nothing on Backspace
+/// until the app installs bindings (`libgui_keymap` has per-platform
+/// defaults). Install with [`crate::Ui::set_key_bindings`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct KeyBindings {
+    bindings: Vec<(Shortcut, UiAction)>,
+}
+
+impl KeyBindings {
+    pub fn new() -> Self {
+        Self::default()
     }
+
+    /// Add a binding. Several chords may perform one action; a chord bound
+    /// twice performs the first.
+    pub fn bind(&mut self, chord: Shortcut, action: UiAction) -> &mut Self {
+        self.bindings.push((chord, action));
+        self
+    }
+
+    /// Remove every binding of `chord`.
+    pub fn unbind(&mut self, chord: Shortcut) -> &mut Self {
+        self.bindings.retain(|(c, _)| *c != chord);
+        self
+    }
+
+    /// The action `key` performs with `mods` held, if any.
+    pub fn resolve(&self, key: Key, mods: &Modifiers) -> Option<UiAction> {
+        self.bindings.iter().find(|(c, _)| c.matches(key, mods)).map(|&(_, a)| a)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (Shortcut, UiAction)> + '_ {
+        self.bindings.iter().copied()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.bindings.is_empty()
+    }
+}
+
+/// A small Mac-style table for libgui's own tests. libgui ships no bindings;
+/// `libgui_keymap` has the real per-platform ones.
+#[cfg(test)]
+pub(crate) fn test_bindings() -> KeyBindings {
+    let mut b = KeyBindings::new();
+    let cmd = |k| Shortcut::plain(k).logo();
+    b.bind(Shortcut::plain(Key::Backspace), UiAction::Delete(Motion::Left))
+        .bind(Shortcut::plain(Key::Delete), UiAction::Delete(Motion::Right))
+        .bind(Shortcut::plain(Key::ArrowLeft), UiAction::Move { motion: Motion::Left, select: false })
+        .bind(Shortcut::plain(Key::ArrowRight), UiAction::Move { motion: Motion::Right, select: false })
+        .bind(cmd(Key::A), UiAction::SelectAll)
+        .bind(cmd(Key::C), UiAction::Copy)
+        .bind(cmd(Key::X), UiAction::Cut)
+        .bind(cmd(Key::V), UiAction::Paste)
+        .bind(Shortcut::plain(Key::Enter), UiAction::Submit)
+        .bind(Shortcut::plain(Key::Escape), UiAction::Cancel)
+        .bind(Shortcut::plain(Key::Tab), UiAction::FocusNext)
+        .bind(Shortcut::plain(Key::Tab).shift(), UiAction::FocusPrevious);
+    b
 }
 
 /// (HID usage on page 0x07, key), in usage order.
@@ -405,17 +346,29 @@ impl Key {
         use Key::*;
         matches!(self, ControlLeft | ControlRight | ShiftLeft | ShiftRight | AltLeft | AltRight | SuperLeft | SuperRight)
     }
+
+    /// Keys that type a character without Ctrl or Cmd, on any layout.
+    pub fn makes_text(self) -> bool {
+        use Key::*;
+        matches!(
+            self,
+            A | B | C | D | E | F | G | H | I | J | K | L | M | N | O | P | Q | R | S | T | U | V | W | X | Y | Z
+                | Num0 | Num1 | Num2 | Num3 | Num4 | Num5 | Num6 | Num7 | Num8 | Num9
+                | Space | Minus | Equal | BracketLeft | BracketRight | Backslash | Semicolon | Quote | Backquote
+                | Comma | Period | Slash
+                | Numpad0 | Numpad1 | Numpad2 | Numpad3 | Numpad4 | Numpad5 | Numpad6 | Numpad7 | Numpad8 | Numpad9
+                | NumpadDivide | NumpadMultiply | NumpadSubtract | NumpadAdd | NumpadDecimal
+        )
+    }
 }
 
-/// Keyboard/text/clipboard events delivered to widgets this frame (derived from
-/// `InputEvent`s: presses and repeats only, shortcuts already resolved).
+/// Text and actions delivered to widgets this frame, in order: typed text,
+/// clipboard contents, and key presses already resolved to actions.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum UiEvent {
-    Key(Key, Modifiers),
     Text(String),
     Paste(String),
-    Copy,
-    Cut,
+    Action(UiAction),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -462,6 +415,10 @@ pub struct FrameInput {
     pub keys_down: Vec<Key>,
     /// Keys that went down this frame (not repeats).
     pub keys_pressed: Vec<Key>,
+    /// Keys whose press (or repeat) this frame was resolved to a [`UiAction`]
+    /// by the key bindings. While a text field has focus, these are the
+    /// field's, not the app's.
+    pub keys_bound: Vec<Key>,
     pub(crate) events: Vec<UiEvent>,
 }
 
@@ -485,6 +442,7 @@ impl Default for FrameInput {
             touches: Vec::new(),
             keys_down: Vec::new(),
             keys_pressed: Vec::new(),
+            keys_bound: Vec::new(),
             events: Vec::new(),
         }
     }

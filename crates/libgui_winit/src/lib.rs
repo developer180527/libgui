@@ -59,15 +59,12 @@ pub fn push_window_event(ui: &mut Ui, event: &WindowEvent, scale_factor: f64) ->
         }
         WindowEvent::ModifiersChanged(m) => {
             let st = m.state();
-            // `from_keys`' platform flag is irrelevant here: libgui re-derives
-            // command/word with its own shortcut style.
-            ui.push(InputEvent::ModifiersChanged(Modifiers::from_keys(
-                st.shift_key(),
-                st.control_key(),
-                st.alt_key(),
-                st.super_key(),
-                false,
-            )));
+            ui.push(InputEvent::ModifiersChanged(Modifiers {
+                shift: st.shift_key(),
+                ctrl: st.control_key(),
+                alt: st.alt_key(),
+                logo: st.super_key(),
+            }));
         }
         WindowEvent::KeyboardInput { event, .. } => {
             let pressed = event.state == ElementState::Pressed;

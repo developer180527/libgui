@@ -6,11 +6,12 @@
 //! - fingers that land and lift inside one frame likewise;
 //! - modifiers follow `ModifiersChanged`, or are derived from modifier `Key`
 //!   events (raw HID hosts send only keys);
-//! - Cmd/Ctrl+C/X/V become copy/cut/paste requests, and text typed while a
-//!   shortcut modifier is held is not inserted.
+//! - key presses the installed [`KeyBindings`] map to a [`UiAction`] become
+//!   that action (libgui has no bindings of its own), and text typed while
+//!   Ctrl or Cmd is held is not inserted.
 
 use crate::input::UiEvent;
-use crate::{FrameInfo, FrameInput, InputEvent, Key, Modifiers, PointerKind, Touch, TouchPhase, Vec2, WheelUnit};
+use crate::{FrameInfo, FrameInput, InputEvent, Key, KeyBindings, Modifiers, PointerKind, Touch, TouchPhase, UiAction, Vec2, WheelUnit};
 
 /// Logical px per wheel line / page.
 const LINE: f32 = 24.0;
@@ -41,8 +42,8 @@ pub(crate) struct InputState {
     fingers: Vec<Finger>,
     keys_down: Vec<Key>,
     mods: Modifiers,
-    /// Apple-style shortcuts (Cmd) vs Ctrl.
-    pub mac: bool,
+    /// Chords for libgui's widget actions: the app's, empty until installed.
+    pub bindings: KeyBindings,
     pub paste_requested: bool,
 }
 
@@ -57,7 +58,7 @@ impl InputState {
             fingers: Vec::new(),
             keys_down: Vec::new(),
             mods: Modifiers::default(),
-            mac: cfg!(any(target_os = "macos", target_os = "ios")),
+            bindings: KeyBindings::default(),
             paste_requested: false,
         }
     }
@@ -68,13 +69,21 @@ impl InputState {
 
     fn derive_mods(&mut self) {
         let k = |a: Key, b: Key| self.keys_down.contains(&a) || self.keys_down.contains(&b);
-        self.mods = Modifiers::from_keys(
-            k(Key::ShiftLeft, Key::ShiftRight),
-            k(Key::ControlLeft, Key::ControlRight),
-            k(Key::AltLeft, Key::AltRight),
-            k(Key::SuperLeft, Key::SuperRight),
-            self.mac,
-        );
+        self.mods = Modifiers {
+            shift: k(Key::ShiftLeft, Key::ShiftRight),
+            ctrl: k(Key::ControlLeft, Key::ControlRight),
+            alt: k(Key::AltLeft, Key::AltRight),
+            logo: k(Key::SuperLeft, Key::SuperRight),
+        };
+    }
+
+    fn action(&mut self, action: UiAction, out: &mut FrameInput) {
+        if action == UiAction::Paste {
+            // The contents come back from the host as `InputEvent::Paste`.
+            self.paste_requested = true;
+        } else {
+            out.events.push(UiEvent::Action(action));
+        }
     }
 
     /// Consume the queued events and produce this frame's input.
@@ -156,20 +165,20 @@ impl InputState {
                     if !repeat {
                         out.keys_pressed.push(key);
                     }
-                    let m = self.mods;
-                    match key {
-                        Key::C if m.command => out.events.push(UiEvent::Copy),
-                        Key::X if m.command => out.events.push(UiEvent::Cut),
-                        Key::V if m.command => self.paste_requested = true,
-                        _ => out.events.push(UiEvent::Key(key, m)),
+                    // Repeats resolve too, so a held Backspace keeps deleting.
+                    if let Some(action) = self.bindings.resolve(key, &self.mods) {
+                        if !out.keys_bound.contains(&key) {
+                            out.keys_bound.push(key);
+                        }
+                        self.action(action, &mut out);
                     }
                 }
-                InputEvent::ModifiersChanged(m) => {
-                    self.mods = Modifiers::from_keys(m.shift, m.ctrl, m.alt, m.logo, self.mac);
-                }
+                InputEvent::ModifiersChanged(m) => self.mods = m,
+                InputEvent::Action(action) => self.action(action, &mut out),
                 InputEvent::Text(s) => {
-                    // Shortcut chords (Cmd+S) aren't text; AltGr (Ctrl+Alt) still is.
-                    if self.mods.command && !self.mods.alt {
+                    // Chords (Cmd+S, Ctrl+S) aren't text; AltGr, which
+                    // Windows reports as Ctrl+Alt, still is.
+                    if (self.mods.ctrl || self.mods.logo) && !self.mods.alt {
                         continue;
                     }
                     let s: String = s.chars().filter(|c| !c.is_control()).collect();
@@ -178,8 +187,6 @@ impl InputState {
                     }
                 }
                 InputEvent::Paste(s) => out.events.push(UiEvent::Paste(s)),
-                InputEvent::Copy => out.events.push(UiEvent::Copy),
-                InputEvent::Cut => out.events.push(UiEvent::Cut),
                 InputEvent::FocusLost => {
                     for b in &mut self.buttons {
                         b.release_after_frame = b.pressed;
@@ -276,18 +283,61 @@ mod tests {
     #[test]
     fn modifiers_come_from_raw_modifier_keys() {
         let mut ui = ui();
-        ui.set_mac_shortcuts(false);
         let key = |key, pressed| IE::Key { key, pressed, repeat: false };
         let mut nothing = |ui: &mut Ui| ui.interact(crate::Id::new("x"));
         frame(&mut ui, vec![key(Key::ControlLeft, true), key(Key::ShiftRight, true)], &mut nothing);
         let m = ui.input().modifiers;
-        assert!(m.ctrl && m.shift && m.command && m.word && !m.alt);
+        assert!(m.ctrl && m.shift && !m.alt && !m.logo);
         frame(&mut ui, vec![key(Key::ControlLeft, false)], &mut nothing);
         let m = ui.input().modifiers;
-        assert!(!m.command && m.shift);
+        assert!(!m.ctrl && m.shift);
         frame(&mut ui, vec![IE::FocusLost], &mut nothing);
         assert_eq!(ui.input().modifiers, Default::default(), "focus loss releases everything");
         assert!(ui.input().keys_down.is_empty());
+    }
+
+    /// libgui binds nothing itself: without bindings a key press is only a
+    /// key. With them, a press (and its repeats) becomes the bound action.
+    #[test]
+    fn keys_become_actions_only_through_installed_bindings() {
+        use crate::input::UiEvent;
+        use crate::{KeyBindings, Motion, Shortcut, UiAction};
+        let mut ui = ui();
+        let mut nothing = |ui: &mut Ui| ui.interact(crate::Id::new("x"));
+        let back = UiAction::Delete(Motion::Left);
+        let press = |repeat| IE::Key { key: Key::Backspace, pressed: true, repeat };
+
+        frame(&mut ui, vec![press(false)], &mut nothing);
+        assert!(ui.input().events.is_empty(), "a key did something with no bindings installed");
+        assert_eq!(ui.input().keys_pressed, vec![Key::Backspace], "but it is still a key press");
+
+        let mut b = KeyBindings::new();
+        b.bind(Shortcut::plain(Key::Backspace), back);
+        b.bind(Shortcut::plain(Key::V).ctrl(), UiAction::Paste);
+        ui.set_key_bindings(b);
+        frame(&mut ui, vec![press(true), press(true)], &mut nothing);
+        assert_eq!(ui.input().events, vec![UiEvent::Action(back), UiEvent::Action(back)], "repeats keep deleting");
+        assert_eq!(ui.input().keys_bound, vec![Key::Backspace]);
+
+        // Modifiers must match exactly. Paste becomes a clipboard request
+        // (which `Ui` passes to the host only while a field has focus).
+        let key = |key, pressed| IE::Key { key, pressed, repeat: false };
+        let mut st = super::InputState::new();
+        st.bindings = ui.key_bindings().clone();
+        for e in [key(Key::ControlLeft, true), key(Key::V, true)] {
+            st.push(e);
+        }
+        st.frame(FrameInfo::default());
+        assert!(st.paste_requested);
+        for e in [key(Key::V, false), key(Key::ShiftLeft, true), key(Key::V, true)] {
+            st.push(e);
+        }
+        st.frame(FrameInfo::default());
+        assert!(!st.paste_requested, "Ctrl+Shift+V matched a Ctrl+V binding");
+
+        // A host can send actions without any keys.
+        frame(&mut ui, vec![IE::Action(UiAction::SelectAll)], &mut nothing);
+        assert_eq!(ui.input().events, vec![UiEvent::Action(UiAction::SelectAll)]);
     }
 
     #[test]

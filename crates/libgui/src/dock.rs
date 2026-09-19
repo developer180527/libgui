@@ -1342,7 +1342,6 @@ mod tests {
 
         let mut d = fresh();
         let mut ui = Ui::new(crate::Theme::dark(), include_bytes!("../../../assets/Inter.ttf")).unwrap();
-        ui.set_mac_shortcuts(false);
         let left = match d.surfaces[0].root.as_ref().unwrap() {
             DockNode::Split(s) => match &*s.first {
                 DockNode::Leaf(l) => l.id,

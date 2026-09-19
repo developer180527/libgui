@@ -4,8 +4,9 @@
 //! to check the CPU renderer against a GPU.
 //!
 //! A scene is deterministic by construction: libgui's clock is the sum of the
-//! frames' `dt`, never the wall clock, every run uses the same frames, and the
-//! one platform-dependent setting (shortcut label style) is pinned.
+//! frames' `dt`, never the wall clock, and every run uses the same frames.
+//! libgui has no platform-dependent behaviour to pin: shortcut hints are text
+//! the app passes in.
 
 #![allow(dead_code)] // each including test uses a different subset
 
@@ -66,10 +67,6 @@ impl Scene {
     /// Run the scene's frames and hand the final one to `f`.
     pub fn run<R>(&self, theme: Theme, scale: f32, f: impl FnOnce(&FrameOutput, (u32, u32)) -> R) -> R {
         let mut ui = Ui::new(theme, FONT).expect("font");
-        // Shortcut labels follow the platform libgui was built for (⌘O on
-        // Apple, Ctrl+O elsewhere); the only thing in libgui that does. Pin it
-        // so a scene renders the same pixels whichever OS runs the test.
-        ui.set_mac_shortcuts(true);
         TARGET.with(|t| t.set(Rect::default()));
         FIELD.with(|t| t.borrow_mut().clear());
         // A whole second per frame, so every hover fade and ease has finished
@@ -267,7 +264,7 @@ fn menu_target(ui: &mut Ui) {
         target(Rect::new(12.0, 12.0, 24.0, 20.0));
         ui.menu_button("File", |ui| {
             let _ = ui.menu_item("New");
-            let _ = ui.menu_item_shortcut("Open…", Shortcut::command(Key::O));
+            let _ = ui.menu_item_shortcut("Open…", "⌘O");
             ui.menu_separator();
             ui.submenu("Recent", |ui| {
                 let _ = ui.menu_item("scene.lvl");

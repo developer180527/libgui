@@ -8,6 +8,7 @@ rust-version.workspace = true
 libgui = { path = "../libgui", features = ["theme-watch"] }
 libgui_wgpu = { path = "../libgui_wgpu" }
 libgui_nodes = { path = "../libgui_nodes" }
+libgui_keymap = { path = "../libgui_keymap" }
 libgui_winit = { path = "../libgui_winit" }
 wgpu.workspace = true
 winit.workspace = true

@@ -4,7 +4,7 @@
 //! future multi-line editor.
 
 use crate::input::UiEvent as Event;
-use crate::{Color, Cursor, Insets, Key, Layout, Modifiers, Rect, Response, Size, Ui, Vec2};
+use crate::{Color, Cursor, Insets, Layout, Motion, Rect, Response, Size, Ui, UiAction, Vec2};
 
 /// Retained per-field state. Indices are in chars, not bytes.
 #[derive(Clone, Copy, Debug, Default)]
@@ -98,61 +98,49 @@ impl Edit<'_> {
         }
     }
 
-    /// Apply one key. Returns true if the text changed.
-    fn key(&mut self, key: Key, m: Modifiers) -> bool {
+    /// Where `motion` takes the caret. Single-line: up, down and the
+    /// document ends are the line's ends.
+    fn target(&self, motion: Motion) -> usize {
         let n = self.len();
-        match key {
-            Key::Backspace | Key::Delete if self.has_selection() => {
+        match motion {
+            Motion::Left => self.cursor.saturating_sub(1),
+            Motion::Right => (self.cursor + 1).min(n),
+            Motion::WordLeft => self.word_left(self.cursor),
+            Motion::WordRight => self.word_right(self.cursor),
+            Motion::LineStart | Motion::Up | Motion::DocStart => 0,
+            Motion::LineEnd | Motion::Down | Motion::DocEnd => n,
+        }
+    }
+
+    /// Apply one action. Returns true if the text changed.
+    fn action(&mut self, action: UiAction) -> bool {
+        match action {
+            UiAction::Move { motion, select } => {
+                // A plain arrow with a selection lands on its near edge
+                // rather than moving from the caret.
+                let to = match motion {
+                    Motion::Left if self.has_selection() && !select => self.selection().0,
+                    Motion::Right if self.has_selection() && !select => self.selection().1,
+                    m => self.target(m),
+                };
+                self.move_to(to, select);
+                false
+            }
+            UiAction::Delete(_) if self.has_selection() => {
                 self.insert("");
                 true
             }
-            Key::Backspace if self.cursor > 0 => {
-                let from = if m.command { 0 } else if m.word { self.word_left(self.cursor) } else { self.cursor - 1 };
-                self.replace(from, self.cursor, "");
+            UiAction::Delete(motion) => {
+                let to = self.target(motion);
+                if to == self.cursor {
+                    return false;
+                }
+                self.replace(self.cursor.min(to), self.cursor.max(to), "");
                 true
             }
-            Key::Delete if self.cursor < n => {
-                let to = if m.command { n } else if m.word { self.word_right(self.cursor) } else { self.cursor + 1 };
-                self.replace(self.cursor, to, "");
-                true
-            }
-            Key::ArrowLeft => {
-                let to = if self.has_selection() && !m.shift {
-                    self.selection().0
-                } else if m.command {
-                    0
-                } else if m.word {
-                    self.word_left(self.cursor)
-                } else {
-                    self.cursor.saturating_sub(1)
-                };
-                self.move_to(to, m.shift);
-                false
-            }
-            Key::ArrowRight => {
-                let to = if self.has_selection() && !m.shift {
-                    self.selection().1
-                } else if m.command {
-                    n
-                } else if m.word {
-                    self.word_right(self.cursor)
-                } else {
-                    self.cursor + 1
-                };
-                self.move_to(to, m.shift);
-                false
-            }
-            Key::Home | Key::ArrowUp => {
-                self.move_to(0, m.shift);
-                false
-            }
-            Key::End | Key::ArrowDown => {
-                self.move_to(n, m.shift);
-                false
-            }
-            Key::A if m.command => {
+            UiAction::SelectAll => {
                 self.anchor = 0;
-                self.cursor = n;
+                self.cursor = self.len();
                 false
             }
             _ => false,
@@ -226,18 +214,20 @@ impl Ui {
                             changed = true;
                         }
                     }
-                    Event::Copy if e.has_selection() => self.copied = Some(e.selected_text()),
-                    Event::Cut if e.has_selection() => {
+                    Event::Action(UiAction::Copy) if e.has_selection() => self.copied = Some(e.selected_text()),
+                    Event::Action(UiAction::Cut) if e.has_selection() => {
                         self.copied = Some(e.selected_text());
                         e.insert("");
                         changed = true;
                     }
-                    Event::Key(Key::Enter, _) => {
+                    Event::Action(UiAction::Submit) => {
                         submitted = true;
                         self.focused = None;
                     }
-                    Event::Key(Key::Escape, _) => self.focused = None,
-                    Event::Key(k, m) => changed |= e.key(k, m),
+                    Event::Action(UiAction::Cancel) => self.focused = None,
+                    Event::Action(a @ (UiAction::Move { .. } | UiAction::Delete(_) | UiAction::SelectAll)) => {
+                        changed |= e.action(a)
+                    }
                     _ => continue,
                 }
                 st.last_move = self.time;
@@ -325,42 +315,50 @@ mod tests {
         (s.to_string(), cursor, cursor)
     }
 
-    fn run(state: (String, usize, usize), keys: &[(Key, Modifiers)]) -> (String, usize, usize) {
+    fn run(state: (String, usize, usize), actions: &[UiAction]) -> (String, usize, usize) {
         let (mut text, cursor, anchor) = state;
         let mut e = Edit { text: &mut text, cursor, anchor };
-        for &(k, m) in keys {
-            e.key(k, m);
+        for &a in actions {
+            e.action(a);
         }
         let (c, a) = (e.cursor, e.anchor);
         (text, c, a)
     }
 
-    const NONE: Modifiers = Modifiers { shift: false, ctrl: false, alt: false, logo: false, command: false, word: false };
-    const SHIFT: Modifiers = Modifiers { shift: true, ..NONE };
-    const WORD: Modifiers = Modifiers { word: true, ..NONE };
-    const CMD: Modifiers = Modifiers { command: true, ..NONE };
+    const fn mv(motion: Motion) -> UiAction {
+        UiAction::Move { motion, select: false }
+    }
+
+    const fn sel(motion: Motion) -> UiAction {
+        UiAction::Move { motion, select: true }
+    }
+
+    use Motion::*;
+    use UiAction::Delete;
 
     #[test]
     fn backspace_and_delete() {
-        assert_eq!(run(edit("hello", 5), &[(Key::Backspace, NONE)]).0, "hell");
-        assert_eq!(run(edit("hello", 0), &[(Key::Delete, NONE)]).0, "ello");
-        assert_eq!(run(edit("hello", 0), &[(Key::Backspace, NONE)]).0, "hello");
+        assert_eq!(run(edit("hello", 5), &[Delete(Left)]).0, "hell");
+        assert_eq!(run(edit("hello", 0), &[Delete(Right)]).0, "ello");
+        assert_eq!(run(edit("hello", 0), &[Delete(Left)]).0, "hello");
     }
 
     #[test]
     fn word_movement_and_deletion() {
-        let r = run(edit("move the cube", 13), &[(Key::Backspace, WORD)]);
+        let r = run(edit("move the cube", 13), &[Delete(WordLeft)]);
         assert_eq!(r.0, "move the ");
-        let r = run(edit("move the cube", 0), &[(Key::ArrowRight, WORD), (Key::ArrowRight, WORD)]);
+        let r = run(edit("move the cube", 0), &[mv(WordRight), mv(WordRight)]);
         assert_eq!(r.1, 8);
-        let r = run(edit("move the cube", 9), &[(Key::Backspace, CMD)]);
+        let r = run(edit("move the cube", 9), &[Delete(LineStart)]);
         assert_eq!(r.0, "cube");
+        let r = run(edit("move the cube", 4), &[Delete(LineEnd)]);
+        assert_eq!(r.0, "move");
     }
 
     #[test]
     fn selection_replace_and_unicode() {
-        // Select "wörld" with shift+word-left, then type over it.
-        let (mut text, cursor, anchor) = run(edit("héllo wörld", 11), &[(Key::ArrowLeft, Modifiers { shift: true, word: true, ..NONE })]);
+        // Select "wörld" with a selecting word-left, then type over it.
+        let (mut text, cursor, anchor) = run(edit("héllo wörld", 11), &[sel(WordLeft)]);
         assert_eq!((cursor, anchor), (6, 11));
         let mut e = Edit { text: &mut text, cursor, anchor };
         assert_eq!(e.selected_text(), "wörld");
@@ -370,18 +368,21 @@ mod tests {
 
     #[test]
     fn arrows_collapse_selection() {
-        let r = run(edit("abcdef", 2), &[(Key::ArrowRight, SHIFT), (Key::ArrowRight, SHIFT), (Key::ArrowLeft, NONE)]);
+        let r = run(edit("abcdef", 2), &[sel(Right), sel(Right), mv(Left)]);
         assert_eq!((r.1, r.2), (2, 2));
-        let r = run(edit("abcdef", 3), &[(Key::A, CMD)]);
+        let r = run(edit("abcdef", 3), &[UiAction::SelectAll]);
         assert_eq!((r.1, r.2), (6, 0));
+        // Deleting with a selection removes the selection, whatever the motion.
+        let r = run(edit("abcdef", 1), &[sel(Right), sel(Right), Delete(WordRight)]);
+        assert_eq!(r.0, "adef");
     }
 
     /// Drives the real widget through `Ui` with host-style events.
     #[test]
     fn ui_focus_typing_clipboard_and_tab() {
-        use crate::{FrameInfo, InputEvent as IE, PlatformOutput, PointerButton, Theme};
+        use crate::{FrameInfo, InputEvent as IE, Key, PlatformOutput, PointerButton, Theme};
         let mut ui = Ui::new(Theme::dark(), include_bytes!("../../../assets/Inter.ttf")).unwrap();
-        ui.set_mac_shortcuts(true);
+        ui.set_key_bindings(crate::input::test_bindings());
         let (mut a, mut b) = (String::new(), String::from("second"));
         let mut frame = |ui: &mut Ui, events: Vec<IE>| -> (TextResponse, TextResponse, PlatformOutput) {
             for e in events {

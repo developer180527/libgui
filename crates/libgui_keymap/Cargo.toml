@@ -1,0 +1,10 @@
+[package]
+name = "libgui_keymap"
+version = "0.1.0"
+edition.workspace = true
+# No GPU crate here, so this is lower than the workspace floor.
+rust-version = "1.87"
+description = "Cross-platform keymaps for libgui: per-platform bindings for its widgets, and rebindable app actions."
+
+[dependencies]
+libgui = { path = "../libgui" }
