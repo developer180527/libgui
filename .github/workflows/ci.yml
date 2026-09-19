@@ -55,6 +55,38 @@ jobs:
             libx11-dev libxkbcommon-dev libwayland-dev libxcursor-dev libxrandr-dev libxi-dev
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
+  # The direct-dependency allow-list is a test (`tests/boundaries.rs`); this is
+  # the transitive half, which no test can see. A UI core people embed in their
+  # own engine earns that by pulling in almost nothing, and a jump here should
+  # be a decision somebody made on purpose rather than something a version bump
+  # did quietly.
+  deps:
+    name: deps · transitive footprint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: libgui pulls in what we agreed on
+        run: |
+          set -euo pipefail
+          count() {
+            cargo tree -p libgui -e normal --prefix none --no-dedupe "$@" \
+              | sed '/^$/d' | sort -u | grep -cv '^libgui v'
+          }
+          bare=$(count --no-default-features)
+          full=$(count)
+          echo "no-default-features: $bare crates"
+          echo "default features:    $full crates"
+          # bare: bytemuck + its derive and the proc-macro crates behind it.
+          # full: adds fontdue (rasteriser) and serde/toml (theme files).
+          if [ "$bare" -gt 6 ] || [ "$full" -gt 23 ]; then
+            echo "::error::libgui's dependency footprint grew (bare $bare/6, full $full/23)."
+            echo "Raise the number here only when the crate is worth it; otherwise it belongs in a host crate."
+            cargo tree -p libgui -e normal
+            exit 1
+          fi
+
   docs:
     name: docs · intra-doc links
     runs-on: ubuntu-latest

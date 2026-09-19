@@ -116,9 +116,26 @@ pub struct Fonts {
     scale: f32,
     /// Extra resolution for text inside a zoomed canvas.
     zoom: f32,
+    /// Glyphs rasterised since the counter was last taken. A steady frame
+    /// rasterises none; a frame that does is doing work it will not repeat.
+    rasterized: u32,
+    /// Strings shaped since the counter was last taken (run-cache misses).
+    /// `Cell`, because shaping happens through `&self` on the measure path.
+    shaped_runs: std::cell::Cell<u32>,
 }
 
 impl Fonts {
+    /// Glyphs rasterised since the last call, and reset. [`Ui`](crate::Ui)
+    /// takes it once a frame for [`FrameCost`](crate::testing::FrameCost).
+    pub fn take_rasterized(&mut self) -> u32 {
+        std::mem::take(&mut self.rasterized)
+    }
+
+    /// Strings shaped since the last call, and reset.
+    pub fn take_shaped_runs(&mut self) -> u32 {
+        self.shaped_runs.replace(0)
+    }
+
     pub fn new() -> Self {
         Self {
             fonts: Vec::new(),
@@ -129,6 +146,8 @@ impl Fonts {
             atlas: Atlas::new(2048),
             scale: 1.0,
             zoom: 1.0,
+            rasterized: 0,
+            shaped_runs: std::cell::Cell::new(0),
         }
     }
 
@@ -207,6 +226,7 @@ impl Fonts {
         if let Some(r) = self.runs.borrow().get(&key).and_then(|m| m.get(text)) {
             return r.clone();
         }
+        self.shaped_runs.set(self.shaped_runs.get() + 1);
         let run = {
             let mut shaped = self.shaped.borrow_mut();
             shaped.clear();
@@ -278,6 +298,7 @@ impl Fonts {
         if let Some(g) = self.glyphs.get(&key) {
             return *g;
         }
+        self.rasterized += 1;
         let m = self.fonts[font.0 as usize].rasterize(id, px);
         let bitmap = &m.coverage;
         let (w, h) = (m.width, m.height);

@@ -723,6 +723,77 @@ The one absolute budget is asserted in release only, since a debug build is an
 order of magnitude slower. `crates/libgui_bench` is the measuring tool;
 these are the regression guards.
 
+### The same guards, for your panels
+
+A UI library can be as fast as it likes and still end up slow in your app, because
+the expensive mistakes are made in the calling code: every row built instead of
+virtualised, a `format!` per row per frame, a missing `with_key`. None of those
+look wrong — the UI is perfectly correct, it is just doing a thousand times the
+work — and nothing says so until someone opens a real project.
+
+So `libgui::testing` is public. It is the same count-based machinery, pointed at
+whatever you write:
+
+```rust
+#[test]
+fn the_outliner_stays_cheap() {
+    let mut ui = Ui::new(Theme::dark(), FONT).unwrap();
+    let cost = testing::steady_frame(&mut ui, FrameInfo::default(), |ui| {
+        my_app::outliner(ui, &mut state);
+    });
+    Budget::steady(80).instances(200).assert(&cost);
+}
+```
+
+`steady_frame` runs a few frames first, because frame one is start-up — glyphs
+rasterise once, layout settles, animations are at their starting value — and
+returns what the settled frame cost:
+
+| `FrameCost` | what a bad number means |
+|---|---|
+| `nodes` | how much UI you described. A missing virtualisation shows up here first |
+| `instances` / `batches` | work handed to the GPU |
+| `glyphs_rasterized` | **0** in a steady frame; anything else is atlas thrash |
+| `text_shaped` | **0** in a steady frame; anything else is a string rebuilt with new content every frame (a counter, a timestamp, an unrounded float) |
+| `offscreen_nodes` | laid out, then clipped away. A few is a virtual list's overscan; thousands is a `for` loop that should be `virtual_list` |
+| `unkeyed_duplicates` | interactive widgets whose identity came from *build order* — a missing `with_key`, so focus, drag and animation state move to the neighbour when the list reorders |
+
+The difference it catches, on the same 2,000 objects:
+
+```
+virtualised + keyed   nodes:   47   offscreen:   11   unkeyed: 0      text_shaped: 0
+plain for loop        nodes: 2003   offscreen: 1989   unkeyed: 1960   text_shaped: 1
+```
+
+`Budget::check` returns every overrun worst-first, so the message leads with the
+thing worth fixing. `unkeyed_duplicates` needs `ui.audit = true` (an O(nodes)
+scan, which `steady_frame` turns on and a shipping app leaves off); everything
+else is counted for free.
+
+### The boundary is a test, not a convention
+
+`libgui` does UI work and nothing else. That is easy to state and easy to erode
+one convenience at a time — a `SystemTime::now()` for an animation, a
+`std::fs::read` for an icon — so `tests/boundaries.rs` reads the crate's own
+source and manifest and fails on the commit that breaks it:
+
+- no `std::fs`, `std::time`, `std::thread`, `std::net`, `std::process`, `std::env`
+  or `std::io` anywhere in `src/`, outside `#[cfg(test)]` and the one documented
+  exception (`theme_watch`, opt-in, off by default, whose entire job is to poll a
+  file);
+- direct dependencies must be on an allow-list that carries the reason each one
+  is there, so adding a fifth is a decision rather than an import.
+
+No test can see *transitive* dependencies, so CI counts those too:
+
+| `libgui` | crates pulled in |
+|---|---|
+| `--no-default-features` | **6** — `bytemuck` and the proc-macro crates behind its derive |
+| default features | **23** — adds `fontdue` (rasteriser) and `serde`/`toml` (theme files) |
+
+A jump in either fails the build, so growth is something somebody chose rather
+than something a version bump did quietly.
+
 ## Golden images
 
 Every scene in `crates/libgui_soft/tests/scenes/mod.rs` (widgets at rest, each

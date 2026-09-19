@@ -463,6 +463,13 @@ pub struct Ui {
     pub(crate) drop_hot: Option<Id>,
     /// Pointer travel (logical px) before a press on a drag source becomes a drag.
     pub drag_threshold: f32,
+    /// Collect the extra counters in [`crate::testing::FrameCost`] that are
+    /// not free (today: unkeyed duplicates). Off in a shipping app.
+    pub audit: bool,
+    /// Ids that only became unique through the build-order fallback, while
+    /// `audit` is on.
+    dup_ids: FxSet<Id>,
+    cost: crate::testing::FrameCost,
     scroll_hits: Vec<(Id, Rect)>,
     scroll_target: Option<Id>,
     /// Hit rects that win over normal widgets (splitters).
@@ -576,6 +583,9 @@ impl Ui {
             drop_hits: Vec::new(),
             drop_hot: None,
             drag_threshold: 4.0,
+            audit: false,
+            dup_ids: FxSet::default(),
+            cost: crate::testing::FrameCost::default(),
             top_hits: Vec::new(),
             overlays: Vec::new(),
             touch_slop: 8.0,
@@ -1054,6 +1064,9 @@ impl Ui {
         // the same one-frame-late rule the rest of the input model uses.
         self.typing = self.focused.is_some();
         self.sheet_done = false;
+        self.dup_ids.clear();
+        let _ = self.fonts.take_rasterized();
+        let _ = self.fonts.take_shaped_runs();
         self.dnd_begin_frame();
         self.popup_stack.clear();
         self.xform_stack.clear();
@@ -1090,11 +1103,29 @@ impl Ui {
             scroll_hits: &mut self.scroll_hits,
             top_hits: &mut self.top_hits,
             drop_hits: &mut self.drop_hits,
+            offscreen: 0,
         };
         paint(&mut self.nodes, 0, &mut painter, &mut sink);
         for overlay in self.overlays.drain(..) {
             overlay(&mut painter);
         }
+        let offscreen = sink.offscreen;
+        let dup = &self.dup_ids;
+        self.cost = crate::testing::FrameCost {
+            nodes: self.nodes.len(),
+            instances: self.draw.instances.len(),
+            batches: self.draw.batches.len(),
+            glyphs_rasterized: self.fonts.take_rasterized(),
+            text_shaped: self.fonts.take_shaped_runs(),
+            offscreen_nodes: offscreen,
+            // Only the interactive ones matter: `space` and `separator` share
+            // a key by design and have no state to lose. The scan is O(nodes),
+            // so it only runs when someone asked for it.
+            unkeyed_duplicates: match self.audit {
+                true => self.nodes.iter().filter(|n| n.interactive && dup.contains(&n.id)).count() as u32,
+                false => 0,
+            },
+        };
 
         // Feed this frame's measured content back into scroll state.
         for n in &self.nodes {
@@ -1195,6 +1226,9 @@ impl Ui {
             id = base.with(n);
         }
         self.dup_next.insert(base, n + 1);
+        if self.audit {
+            self.dup_ids.insert(id);
+        }
         id
     }
 
@@ -1336,6 +1370,11 @@ impl Ui {
     pub fn physical_px(&self, rect: Rect) -> (u32, u32) {
         let s = self.input.scale.max(0.01);
         (((rect.w * s).round().max(0.0)) as u32, ((rect.h * s).round().max(0.0)) as u32)
+    }
+
+    /// What the last completed frame cost. See [`crate::testing`].
+    pub fn frame_cost(&self) -> crate::testing::FrameCost {
+        self.cost
     }
 
     /// Rect of `id` from the previous frame's layout.
@@ -1905,6 +1944,8 @@ struct HitSink<'a> {
     rects: &'a mut FxMap<Id, Rect>,
     scroll_hits: &'a mut Vec<(Id, Rect)>,
     drop_hits: &'a mut Vec<(Id, Rect)>,
+    /// Nodes laid out and then clipped away entirely.
+    offscreen: u32,
 }
 
 fn paint(nodes: &mut [Node], i: usize, p: &mut Painter, sink: &mut HitSink) {
@@ -1916,6 +1957,9 @@ fn paint(nodes: &mut [Node], i: usize, p: &mut Painter, sink: &mut HitSink) {
     let t = p.draw.xform();
     let win = t.rect(rect);
     let visible = p.draw.clip().intersect(&win);
+    if visible.is_none() {
+        sink.offscreen += 1;
+    }
     if nodes[i].interactive {
         let pad = nodes[i].hit_pad * t.zoom;
         if let Some(r) = p.draw.clip().expand(pad).intersect(&win.expand(pad)) {

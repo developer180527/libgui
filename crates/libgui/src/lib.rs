@@ -19,6 +19,7 @@ mod math;
 mod painter;
 pub mod render_contract;
 mod scroll;
+pub mod testing;
 mod text;
 mod theme;
 #[cfg(feature = "theme-toml")]
