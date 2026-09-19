@@ -18,10 +18,12 @@ mod layout;
 mod math;
 mod paint_arena;
 mod painter;
+mod profile;
 pub mod render_contract;
 mod scroll;
 pub mod testing;
 pub mod table;
+mod subtree_cache;
 mod text;
 mod text_arena;
 mod theme;
@@ -45,6 +47,7 @@ pub use input::{
 pub use layout::{Align, Axis, Insets, Layout, Size};
 pub use math::{Color, Rect, Transform, Vec2};
 pub use painter::{Chevron, Painter};
+pub use profile::{enabled as profile_enabled, Profile};
 pub use scroll::{ScrollConfig, Smoothing};
 pub use font::{FontRasterizer, GlyphBitmap, LineMetrics, ShapedGlyph};
 #[cfg(feature = "fontdue")]

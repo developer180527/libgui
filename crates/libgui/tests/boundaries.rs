@@ -35,7 +35,13 @@ const NO_GLOBALS: &[&str] = &["static mut", "thread_local!", "OnceLock", "OnceCe
 
 /// `theme_watch` is the documented exception: an opt-in, off-by-default feature
 /// whose whole job is to poll a file, kept in one module so it stays visible.
-const EXEMPT_FILES: &[&str] = &["theme_watch.rs"];
+const EXEMPT_FILES: &[&str] = &[
+    // Opt-in, off by default, and its whole job is to poll a file.
+    "theme_watch.rs",
+    // Opt-in, off by default, and its whole job is to read the clock. The
+    // timers compile to nothing without the `profile` feature.
+    "profile.rs",
+];
 
 /// Every direct dependency, and why it is allowed to be one.
 const ALLOWED_DEPS: &[(&str, &str)] = &[

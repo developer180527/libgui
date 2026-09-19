@@ -198,6 +198,10 @@ pub struct Demo {
     /// UI frames skipped since the last one that ran: the scene keeps drawing,
     /// the panels do not.
     pub ui_skipped: u32,
+    /// Bumped whenever `objects` changes in any way a reorder, a delete or an
+    /// import can manage. `ui.cached` hashes it: a length alone would miss a
+    /// reorder, and that is exactly the bug the deps hash exists to prevent.
+    pub outliner_rev: u64,
     pub windows: usize,
     /// The Assets table: 200k rows of nothing much, to show what virtualised
     /// rows and frozen columns cost (nothing).
@@ -260,6 +264,7 @@ impl Default for Demo {
             ui_instances: 0,
             ui_batches: 0,
             ui_skipped: 0,
+            outliner_rev: 0,
             windows: 1,
             viewport_px: (1, 1),
             dock_cfg: DockConfig::default(),
@@ -452,6 +457,7 @@ impl Panels<'_> {
         for path in dropped_files.into_iter().flatten() {
             let name = path.file_stem().map_or_else(|| "file".to_string(), |s| s.to_string_lossy().into_owned());
             d.objects.push(name.clone());
+            d.outliner_rev += 1;
             d.log(format!("imported {name}"));
         }
 
@@ -477,6 +483,12 @@ impl Panels<'_> {
                 Row::Group { .. } => group_h,
                 Row::Object { .. } => leaf_h,
             };
+            // Everything the rows are drawn from, in one number the app keeps
+            // honest: `outliner_rev` moves on every reorder, delete, import and
+            // collapse, because a length alone would miss a reorder and the
+            // cache would happily replay the old order.
+            let deps = (d.outliner_rev, selected, filter.as_str(), rows.len());
+            ui.cached("rows", deps, |ui| {
             ui.virtual_rows_with("objects", rows.len(), opts, height, |ui, r| match &rows[r] {
                 Row::Group { name, expanded } => {
                     let branch = if *expanded { Branch::Expanded } else { Branch::Collapsed };
@@ -521,9 +533,11 @@ impl Panels<'_> {
                     });
                 }
             });
+            });
         }
         if let Some((from, at)) = reorder {
             if from < d.objects.len() && at <= d.objects.len() && at != from && at != from + 1 {
+                d.outliner_rev += 1;
                 let name = d.objects.remove(from);
                 let at = if at > from { at - 1 } else { at };
                 d.objects.insert(at, name.clone());
@@ -532,12 +546,14 @@ impl Panels<'_> {
             }
         }
         if let Some(name) = toggled {
+            d.outliner_rev += 1;
             if !d.collapsed.remove(&name) {
                 d.collapsed.insert(name);
             }
         }
         if let Some(i) = remove.or(delete_selected.then_some(d.selected)) {
             if d.objects.len() > 1 {
+                d.outliner_rev += 1;
                 let name = d.objects.remove(i);
                 d.selected = d.selected.min(d.objects.len() - 1);
                 d.log(format!("deleted {name}"));

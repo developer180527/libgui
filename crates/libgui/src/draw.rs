@@ -116,6 +116,32 @@ impl DrawList {
         }
     }
 
+    /// Re-emit a recorded instance exactly as it was, batching as usual.
+    /// Already clipped and transformed when it was recorded, so it goes in
+    /// untouched — that is the whole point of having kept it.
+    pub(crate) fn replay(&mut self, texture: TextureId, inst: Instance) {
+        let idx = self.instances.len() as u32;
+        self.instances.push(inst);
+        match self.batches.last_mut() {
+            Some(b) if b.texture == texture => b.range.end = idx + 1,
+            _ => self.batches.push(Batch { texture, range: idx..idx + 1 }),
+        }
+    }
+
+    /// The instances emitted since `from`, with the texture each went to.
+    pub(crate) fn since(&self, from: u32) -> impl Iterator<Item = (TextureId, Instance)> + '_ {
+        let from = from as usize;
+        self.batches.iter().flat_map(move |b| {
+            let s = (b.range.start as usize).max(from);
+            let e = b.range.end as usize;
+            (s..e).map(move |i| (b.texture, self.instances[i]))
+        })
+    }
+
+    pub(crate) fn instance_count(&self) -> u32 {
+        self.instances.len() as u32
+    }
+
     fn push(&mut self, texture: TextureId, bounds: Rect, mut inst: Instance) {
         let clip = self.clip();
         if clip.intersect(&bounds).is_none() {

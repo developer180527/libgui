@@ -756,6 +756,7 @@ enforced by tests rather than left to a benchmark nobody runs
 | Glyph rasterisation in a steady frame | **none** (atlas version unchanged) |
 | An idle UI | `repaint_after: None` — the host sleeps |
 | A static UI under a host redrawing at 120 Hz | **0** UI frames per second |
+| A cached 800-row panel beside a live widget | **0.044 ms** vs 0.487 (11x) |
 
 They assert properties that hold on any machine: deterministic counts, and
 *ratios* for complexity (4x the widgets must not cost more than 7x the time,
@@ -928,6 +929,71 @@ Measured, on a panel of 500 visible widgets: paint is **60%** of a frame, build
 skipping layout for unchanged subtrees, which was the obvious-sounding thing to
 build and would have bought almost nothing.
 
+### Profiling: knowing rather than guessing
+
+Every guard in this repo asserts a *count*, because counts are identical on
+every machine and cannot flake. Counts are the wrong thing to optimise against,
+though — they cannot tell you which phase is expensive. So `--features profile`
+adds phase timings to `FrameOutput::profile`, and nothing in the library reads a
+clock unless you turn it on:
+
+```
+cargo run --release -p libgui_bench --features libgui/profile
+```
+
+```text
+workload        end_frame   measure   place    paint    paint%
+boxes   (500)     0.027ms    0.004    0.005    0.017     63%
+labels  (500)     0.074ms    0.003    0.004    0.066     90%
+inspector (500)   0.188ms    0.005    0.007    0.171     91%
+inspector (2000)  0.590ms    0.016    0.028    0.528     90%
+```
+
+**Layout is four per cent of a frame. Paint is ninety.** That number is why
+damage tracking here is about instances and not about layout: the obvious
+feature to build — "skip layout for unchanged subtrees" — would have bought
+almost nothing.
+
+### Subtree caching: repainting only what moved
+
+Frame skipping cannot help when *part* of the window is live: a meter, a clock,
+a playhead forces a frame, and the other nine tenths repaint for nothing.
+`ui.cached` replays a subtree's recorded instances instead:
+
+```rust
+ui.cached("outliner", (objects.len(), revision, selected), |ui| {
+    for (i, o) in objects.iter().enumerate() {
+        ui.with_key(o.id, |ui| { let _ = ui.selectable(&o.name, i == selected); });
+    }
+});
+```
+
+Measured, with a live label forcing a frame every time:
+
+| rows | uncached | cached | |
+|---|---|---|---|
+| 200 | 0.197 ms | **0.029 ms** | 6.8× |
+| 800 | 0.487 ms | **0.044 ms** | 11× |
+
+Same instance count either way — the pixels are identical, and `tests/cache.rs`
+proves it the only way worth trusting: it runs a second `Ui` that never caches,
+drives both with the same events, and compares the instance **bytes** every
+frame.
+
+`deps` is the one thing the library cannot check for you, so get it right — a
+length alone will miss a reorder. Everything else *is* checked, and a replay
+happens only when the subtree lands at exactly the rect and clip it was recorded
+at, the pointer is outside it, keyboard focus is outside it, nothing inside is
+still animating, and the theme has not changed. Each of those is a way the
+pixels could differ that `deps` would not mention. A miss simply builds, so a
+subtree that never qualifies is correct and costs one hash.
+
+Widgets inside a replayed subtree do not run, so they cannot report anything.
+Interaction still *works* — hit rects are replayed too, and the pointer arriving
+invalidates the cache — but a `Response` from inside only comes back on a frame
+that built. Cache the parts of your UI that are display, not the parts you read
+answers from.
+
 ### Bring your own allocator
 
 `#[global_allocator]` is the binary's choice, and libgui inherits it: the crate
@@ -994,9 +1060,10 @@ lag, fling, easing) stay as frame-trace tests like
 9. **Accessibility** via AccessKit: emit a node per interactive widget from the same tree.
 10. ~~**Perf**: a "sleep when idle" mode instead of redrawing continuously~~ ✅
    `repaint_after` for hosts that draw only the UI, `Ui::needs_frame` +
-   `Backend::render_batches` for hosts that redraw anyway; next: caching the
-   emitted instances of a subtree so a *partly* changed UI repaints only the
-   part that moved.
+   `Backend::render_batches` for hosts that redraw anyway, `ui.cached` for a
+   *partly* changed UI, and `--features profile` for knowing which of those to
+   reach for; next: translating a replay so a subtree that merely moved still
+   hits, and persistent GPU buffers.
 
 ## Known scaffold limitations
 

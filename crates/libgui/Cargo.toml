@@ -13,6 +13,9 @@ fontdue = ["dep:fontdue"]
 theme-toml = ["dep:serde", "dep:toml"]
 # Hot-reload a theme file by polling it: the only filesystem access in libgui.
 theme-watch = ["theme-toml"]
+# Time a frame's phases (`FrameOutput::profile`). The only clock in libgui, and
+# off by default: without it `Profile` is all zeroes and the timers compile away.
+profile = []
 
 [dependencies]
 fontdue = { workspace = true, optional = true }

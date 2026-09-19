@@ -381,6 +381,8 @@ struct ScrollState {
 
 /// Everything a renderer needs for this frame.
 pub struct FrameOutput<'a> {
+    /// Where this frame's time went. All zeroes without the `profile` feature.
+    pub profile: crate::Profile,
     pub draw: &'a DrawList,
     pub atlas: &'a Atlas,
     pub screen_size: Vec2,
@@ -493,6 +495,19 @@ pub struct Ui {
     /// `audit` is on.
     dup_ids: FxSet<Id>,
     cost: crate::testing::FrameCost,
+    profile: crate::Profile,
+    /// Subtree recordings, for [`Ui::cached`].
+    cache: crate::subtree_cache::Cache,
+    rects_order: Vec<(Id, Rect)>,
+    /// Ids handed to `cached` this frame, so recordings for subtrees the app
+    /// stopped building can be swept.
+    cached_seen: FxSet<Id>,
+    /// The theme the cache was recorded against: a theme change invalidates
+    /// every pixel in it.
+    cache_theme: u64,
+    /// Subtrees that were animating when they last built, so a replay cannot
+    /// freeze a fade half way.
+    cache_busy: FxSet<Id>,
     scroll_hits: Vec<(Id, Rect)>,
     pub(crate) scroll_target: Option<Id>,
     /// Hit rects that win over normal widgets (splitters).
@@ -616,6 +631,12 @@ impl Ui {
             audit: false,
             dup_ids: FxSet::default(),
             cost: crate::testing::FrameCost::default(),
+            profile: crate::Profile::default(),
+            cache: crate::subtree_cache::Cache::default(),
+            rects_order: Vec::new(),
+            cached_seen: FxSet::default(),
+            cache_theme: 0,
+            cache_busy: FxSet::default(),
             top_hits: Vec::new(),
             overlays: Vec::new(),
             touch_slop: 8.0,
@@ -750,7 +771,7 @@ impl Ui {
         }
         self.sheet_done = true;
         let id = Id::new("popup_sheet");
-        self.seen.insert(id);
+        self.mark_seen(id);
         let s = self.input.screen_size;
         let rect = Rect::new(0.0, 0.0, s.x, s.y);
         let resp = self.interact(id);
@@ -796,7 +817,7 @@ impl Ui {
         let s = self.theme.menu;
         let (pad, gap) = (s.padding, s.gap);
 
-        self.seen.insert(id);
+        self.mark_seen(id);
         let layout = Layout::column().width(Size::Fit).height(Size::Fit).padding(pad).gap(gap);
         let mut n = Node::new(id, layout);
         n.absolute = Some(rect);
@@ -856,7 +877,7 @@ impl Ui {
         let rect = Rect::new(x, y, w, h);
 
         let id = resp.id.with("tooltip");
-        self.seen.insert(id);
+        self.mark_seen(id);
         let text = text.to_string();
         let mut n = Node::new(id, Layout::leaf(Size::Fixed(w), Size::Fixed(h)));
         n.absolute = Some(rect);
@@ -1139,6 +1160,8 @@ impl Ui {
         // the same one-frame-late rule the rest of the input model uses.
         self.typing = self.focused.is_some();
         self.sheet_done = false;
+        self.rects_order.clear();
+        self.cached_seen.clear();
         self.dup_ids.clear();
         let _ = self.fonts.take_rasterized();
         let _ = self.fonts.take_shaped_runs();
@@ -1160,7 +1183,13 @@ impl Ui {
         self.close();
         let s = self.input.screen_size;
         let screen = Rect::new(0.0, 0.0, s.x, s.y);
-        layout::solve(&mut self.nodes, &self.kids, 0, screen, &mut self.scratch);
+        let clock = crate::profile::Clock::start();
+        let t = crate::profile::Clock::start();
+        layout::fit(&mut self.nodes, &self.kids, 0);
+        let measure_ms = t.ms();
+        let t = crate::profile::Clock::start();
+        layout::arrange(&mut self.nodes, &self.kids, 0, screen, &mut self.scratch);
+        let place_ms = t.ms();
         // Floating nodes size themselves from their content, which `measure`
         // has just worked out; keep it for next frame's placement.
         self.layer_min.clear();
@@ -1185,12 +1214,16 @@ impl Ui {
             scroll_hits: &mut self.scroll_hits,
             top_hits: &mut self.top_hits,
             drop_hits: &mut self.drop_hits,
+            rects_order: &mut self.rects_order,
+            recording: 0,
             offscreen: 0,
         };
-        paint(&mut self.nodes, &self.kids, 0, &mut painter, &mut sink, &mut self.scratch, &mut self.paints);
+        let t = crate::profile::Clock::start();
+        paint(&mut self.nodes, &self.kids, 0, &mut painter, &mut sink, &mut self.scratch, &mut self.paints, &mut self.cache);
         for overlay in self.overlays.drain(..) {
             overlay(&mut painter);
         }
+        let paint_ms = t.ms();
         let offscreen = sink.offscreen;
         let dup = &self.dup_ids;
         self.cost = crate::testing::FrameCost {
@@ -1250,6 +1283,9 @@ impl Ui {
         }
 
         self.dnd_end_frame();
+        let used = std::mem::take(&mut self.cached_seen);
+        self.cache.sweep(&used);
+        self.cached_seen = used;
 
         let busy = self.active.is_some() || self.touch_scroll.is_some() || self.animating;
         let repaint_after = if busy {
@@ -1260,6 +1296,20 @@ impl Ui {
             None
         };
         self.last_repaint = repaint_after;
+        self.profile = crate::Profile {
+            measure_ms,
+            place_ms,
+            paint_ms,
+            end_frame_ms: 0.0,
+            nodes: self.nodes.len(),
+            instances: self.draw.instances.len(),
+            text_draws: self.fonts.take_text_draws(),
+            cached_hits: std::mem::take(&mut self.cache.hits_this_frame),
+            cached_misses: std::mem::take(&mut self.cache.misses_this_frame),
+        };
+        // Last, so it covers everything above it — including itself being
+        // assigned after the phases it is the sum of.
+        self.profile.end_frame_ms = clock.ms();
         let platform = PlatformOutput {
             cursor: self.cursor,
             copied_text: self.copied.take(),
@@ -1271,6 +1321,7 @@ impl Ui {
             repaint_after,
         };
         FrameOutput {
+            profile: self.profile,
             draw: &self.draw,
             atlas: self.fonts.atlas(),
             screen_size: s,
@@ -1290,6 +1341,17 @@ impl Ui {
     /// base. Rescanning from 1 each time made a container of N widgets sharing
     /// one key (`space`, `flex`, `separator`, or a list of equal labels)
     /// quadratic: 2000 spacers cost 25 ms/frame.
+    /// Note that `id` exists this frame, so its retained state is not pruned.
+    /// While a [`Ui::cached`] subtree is recording, the id is kept so a later
+    /// replay can say the same thing on its behalf.
+    pub(crate) fn mark_seen(&mut self, id: Id) -> bool {
+        let fresh = self.seen.insert(id);
+        if self.cache.recording > 0 {
+            self.cache.saw(id);
+        }
+        fresh
+    }
+
     pub fn make_id(&mut self, src: impl Hash) -> Id {
         let parent = self.nodes[self.stack.last().expect("libgui: widget built outside begin_frame/end_frame").0].id;
         // A `with_key` scope salts the widgets built directly inside it. Nested
@@ -1299,13 +1361,13 @@ impl Ui {
             Some(&(salt, depth)) if depth == self.stack.len() => parent.with(salt.0).with(&src),
             _ => parent.with(&src),
         };
-        if self.seen.insert(base) {
+        if self.mark_seen(base) {
             return base;
         }
         let mut n = *self.dup_next.get(&base).unwrap_or(&1);
         let mut id = base.with(n);
         // Loops only on a genuine hash collision with an unrelated id.
-        while !self.seen.insert(id) {
+        while !self.mark_seen(id) {
             n += 1;
             id = base.with(n);
         }
@@ -1440,7 +1502,7 @@ impl Ui {
     /// Mark an explicitly-constructed id as alive this frame so its retained
     /// state (animations, text/scroll state) is kept.
     pub fn keep_id(&mut self, id: Id) {
-        self.seen.insert(id);
+        self.mark_seen(id);
     }
 
     /// A rect in physical pixels, rounded: what an embedded renderer should
@@ -1516,6 +1578,12 @@ impl Ui {
         self.draw.reserve(widgets * 4);
     }
 
+    /// Where the last frame's time went. All zeroes unless the `profile`
+    /// feature is on; see [`crate::Profile`].
+    pub fn profile(&self) -> crate::Profile {
+        self.profile
+    }
+
     /// What the last completed frame cost. See [`crate::testing`].
     pub fn frame_cost(&self) -> crate::testing::FrameCost {
         self.cost
@@ -1589,7 +1657,7 @@ impl Ui {
         opts: LeafOptions,
         paint: impl FnOnce(&mut Painter, Rect) + 'static,
     ) {
-        self.seen.insert(id);
+        self.mark_seen(id);
         let mut n = Node::new(id, layout);
         n.intrinsic = content;
         n.interactive = opts.interactive;
@@ -1609,7 +1677,7 @@ impl Ui {
     /// Container with an explicit id: its rect is queryable via `rect_of`, and
     /// children's ids derive from it, so their state follows it around.
     pub fn container_id<R>(&mut self, id: Id, layout: Layout, frame: Frame, body: impl FnOnce(&mut Self) -> R) -> R {
-        self.seen.insert(id);
+        self.mark_seen(id);
         let mut n = Node::new(id, layout);
         n.clip = frame.clip;
         if frame.fill.a > 0.0 || frame.border_width > 0.0 || frame.shadow {
@@ -1624,6 +1692,105 @@ impl Ui {
         self.open(i);
         let r = body(self);
         self.close();
+        r
+    }
+
+    /// Replay a subtree's pixels instead of producing them again, while
+    /// nothing that could change them has changed.
+    ///
+    /// This is for the case [`Ui::needs_frame`] cannot help with: *part* of
+    /// the window is live — a meter, a clock, a playhead — so a frame has to
+    /// run, and the rest of the UI repaints for nothing. Profiling says paint
+    /// is ninety per cent of a frame's `end_frame` time, so the rest of the UI
+    /// is most of the bill.
+    ///
+    /// `deps` is everything the subtree draws from. Get it wrong and you will
+    /// see stale pixels, so it is the one thing the library cannot check for
+    /// you:
+    ///
+    /// ```ignore
+    /// ui.cached("outliner", (objects.len(), revision, selected), |ui| {
+    ///     for (i, o) in objects.iter().enumerate() {
+    ///         ui.with_key(o.id, |ui| { let _ = ui.selectable(&o.name, i == selected); });
+    ///     }
+    /// });
+    /// ```
+    ///
+    /// Everything else is checked. A replay happens only when the subtree
+    /// lands at exactly the rect and clip it was recorded at, the pointer is
+    /// outside it, keyboard focus is outside it, nothing inside is still
+    /// animating, and the theme has not changed — each of those being a way
+    /// the pixels could differ that `deps` would not mention. A miss simply
+    /// builds, so a subtree that never qualifies is correct and costs one
+    /// hash.
+    ///
+    /// Widgets inside a replayed subtree do not run, so they cannot report
+    /// anything: interaction still *works* — the hit rects are replayed too,
+    /// and the pointer arriving invalidates the cache — but a `Response` from
+    /// inside is only produced on a frame that built. Cache the parts of your
+    /// UI that are display, not the parts you read answers from.
+    pub fn cached(&mut self, key: impl Hash, deps: impl Hash, body: impl FnOnce(&mut Self)) {
+        let id = self.make_id(("cached", &key));
+        self.cached_seen.insert(id);
+        let deps = Id::new(&deps).0;
+
+        // A theme change repaints everything, so nothing recorded under the
+        // old one is worth keeping.
+        let theme = Id::new(&self.theme.name).with(self.theme.density as u8).with(self.theme.metrics.font_size as u32).0;
+        if theme != self.cache_theme {
+            self.cache.clear();
+            self.cache_theme = theme;
+        }
+
+        let rect = self.rect_of(id).unwrap_or_default();
+        let inside = |p: Vec2| rect.contains(p);
+        let pointer_in = self.input.mouse_inside && inside(self.input.mouse_pos);
+        let focus_in = self.focused.is_some_and(|f| self.rects.get(&f).is_some_and(|r| rect.contains(Vec2::new(r.x, r.y))));
+        let quiet = !self.cache_busy.contains(&id);
+        let clip = self.clip_here();
+
+        if quiet && !pointer_in && !focus_in && self.cache.can_replay(id, deps, rect, clip) {
+            let min = self.cache.entry_min(id).unwrap_or_default();
+            self.cache.mark_seen(id, &mut self.seen);
+            self.cache.hits_this_frame += 1;
+            let mut n = Node::new(id, Layout::leaf(Size::Fixed(min.x), Size::Fixed(min.y)));
+            n.cached = true;
+            self.attach(n);
+            return;
+        }
+
+        // Miss: build it, and record what it produces.
+        self.cache.misses_this_frame += 1;
+        let animating_before = self.animating;
+        let start = self.cache.open_ids();
+        let mut n = Node::new(id, Layout::column().width(Size::Fit).height(Size::Fit));
+        n.recording = true;
+        let i = self.attach(n);
+        self.open(i);
+        body(self);
+        self.close();
+        self.cache.close_ids(id, start);
+        self.cache.set_deps(id, deps);
+        // A subtree that is still animating cannot be replayed next frame: its
+        // pixels are going to move on their own.
+        if self.animating && !animating_before {
+            self.cache_busy.insert(id);
+        } else {
+            self.cache_busy.remove(&id);
+        }
+    }
+
+    /// The clip a subtree built here would be painted under. One frame late,
+    /// like every other geometry read, and compared rather than used.
+    fn clip_here(&self) -> Rect {
+        let mut r = Rect::new(0.0, 0.0, self.input.screen_size.x, self.input.screen_size.y);
+        for &(i, _) in &self.stack {
+            if self.nodes[i].clip {
+                if let Some(c) = self.rects.get(&self.nodes[i].id) {
+                    r = r.intersect(c).unwrap_or_default();
+                }
+            }
+        }
         r
     }
 
@@ -1649,7 +1816,7 @@ impl Ui {
         frame: Frame,
         body: impl FnOnce(&mut Self) -> R,
     ) -> R {
-        self.seen.insert(id);
+        self.mark_seen(id);
         let mut n = Node::new(id, layout);
         n.clip = frame.clip;
         if frame.fill.a > 0.0 || frame.border_width > 0.0 {
@@ -1720,7 +1887,7 @@ impl Ui {
     }
 
     fn layer_with<R>(&mut self, id: Id, z: Layer, rect: Rect, layout: Layout, frame: Frame, body: impl FnOnce(&mut Self) -> R) -> R {
-        self.seen.insert(id);
+        self.mark_seen(id);
         let mut n = Node::new(id, layout);
         n.absolute = Some(rect);
         n.z = z;
@@ -1767,7 +1934,7 @@ impl Ui {
     /// [`Ui::container_at`] with an explicit stacking [`Layer`] among its
     /// positioned siblings.
     pub fn container_at_in<R>(&mut self, id: Id, z: Layer, rect: Rect, frame: Frame, body: impl FnOnce(&mut Self) -> R) -> R {
-        self.seen.insert(id);
+        self.mark_seen(id);
         let mut n = Node::new(id, Layout::column().shrink());
         n.absolute = Some(rect);
         n.z = z;
@@ -1789,7 +1956,7 @@ impl Ui {
 
     /// Leaf at an absolute rect inside the current container (resize grips, badges).
     pub fn add_leaf_at(&mut self, id: Id, rect: Rect, opts: LeafOptions, paint: impl FnOnce(&mut Painter, Rect) + 'static) {
-        self.seen.insert(id);
+        self.mark_seen(id);
         let mut n = Node::new(id, Layout::leaf(Size::Fixed(rect.w), Size::Fixed(rect.h)));
         n.absolute = Some(rect);
         n.interactive = opts.interactive;
@@ -1818,8 +1985,8 @@ impl Ui {
     fn scroll_area_id<R>(&mut self, id: Id, opts: ScrollOptions, body: impl FnOnce(&mut Self) -> R) -> R {
         let bar_y = id.with("bar");
         let bar_x = id.with("bar_x");
-        self.seen.insert(bar_y);
-        self.seen.insert(bar_x);
+        self.mark_seen(bar_y);
+        self.mark_seen(bar_x);
         let mut st = self.scroll_states.get(&id).copied().unwrap_or_default();
         let at_end = st.y.target >= st.y.max() - 1.0;
 
@@ -2114,7 +2281,7 @@ impl Ui {
         let view = CanvasView { visible: st.visible, zoom: st.zoom, xform: t };
         let visible = st.visible;
 
-        self.seen.insert(id);
+        self.mark_seen(id);
         let mut n = Node::new(id, Layout::column().shrink());
         n.clip = true;
         n.xform = Some(t);
@@ -2133,7 +2300,7 @@ impl Ui {
     /// Draw and interact with `body` under an explicit [`Transform`]. The raw
     /// primitive behind [`Ui::canvas`], for a viewport you drive yourself.
     pub fn with_transform<R>(&mut self, id: Id, t: Transform, body: impl FnOnce(&mut Self) -> R) -> R {
-        self.seen.insert(id);
+        self.mark_seen(id);
         let mut n = Node::new(id, Layout::column().shrink());
         n.clip = true;
         n.xform = Some(t);
@@ -2163,10 +2330,27 @@ struct HitSink<'a> {
     rects: &'a mut FxMap<Id, Rect>,
     scroll_hits: &'a mut Vec<(Id, Rect)>,
     drop_hits: &'a mut Vec<(Id, Rect)>,
+    /// Rects in paint order, kept only while a `cached` subtree is recording:
+    /// `rects` is a map, and a replay has to put back exactly what it took.
+    rects_order: &'a mut Vec<(Id, Rect)>,
+    recording: u32,
     /// Nodes laid out and then clipped away entirely.
     offscreen: u32,
 }
 
+impl HitSink<'_> {
+    fn mark(&self) -> (u32, u32, u32, u32, u32) {
+        (
+            self.hits.len() as u32,
+            self.top_hits.len() as u32,
+            self.scroll_hits.len() as u32,
+            self.drop_hits.len() as u32,
+            self.rects_order.len() as u32,
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn paint(
     nodes: &mut [Node],
     kids: &[u32],
@@ -2175,10 +2359,36 @@ fn paint(
     sink: &mut HitSink,
     s: &mut crate::layout::Scratch,
     paints: &mut crate::paint_arena::PaintArena,
+    cache: &mut crate::subtree_cache::Cache,
 ) {
     let rect = nodes[i].rect;
     let id = nodes[i].id;
+    if nodes[i].cached {
+        for &(tex, inst) in cache.instances_of(id) {
+            p.draw.replay(tex, inst);
+        }
+        for &(list, hid, r) in cache.hits_of(id) {
+            use crate::subtree_cache::HitList::*;
+            match list {
+                Normal => sink.hits.push((hid, r)),
+                Top => sink.top_hits.push((hid, r)),
+                Scroll => sink.scroll_hits.push((hid, r)),
+                Drop => sink.drop_hits.push((hid, r)),
+            }
+        }
+        for &(rid, r) in cache.rects_of(id) {
+            sink.rects.insert(rid, r);
+        }
+        return;
+    }
+    let rec = nodes[i].recording.then(|| {
+        sink.recording += 1;
+        (p.draw.instance_count(), sink.mark(), cache.open_draw())
+    });
     sink.rects.insert(id, rect);
+    if sink.recording > 0 {
+        sink.rects_order.push((id, rect));
+    }
     // Hit rects are compared against the pointer, so they are stored in window
     // space; `sink.rects` keeps the canvas-space rect a widget reports.
     let t = p.draw.xform();
@@ -2230,7 +2440,7 @@ fn paint(
     for k in children.range() {
         let c = kids[k] as usize;
         if nodes[c].absolute.is_none() {
-            paint(nodes, kids, c, p, sink, s, paints);
+            paint(nodes, kids, c, p, sink, s, paints, cache);
         }
     }
     // Absolute children stack by layer, and by build order within a layer, so a
@@ -2250,7 +2460,7 @@ fn paint(
     }
     for k in 0..n {
         let c = (s.floating[base + k] & 0xffff_ffff) as usize;
-        paint(nodes, kids, c, p, sink, s, paints);
+        paint(nodes, kids, c, p, sink, s, paints, cache);
     }
     s.floating.truncate(base);
     if xform.is_some() {
@@ -2265,6 +2475,32 @@ fn paint(
     }
     if clip {
         p.draw.pop_clip();
+    }
+    if let Some((first, marks, draw_marks)) = rec {
+        // Everything the subtree produced is now a contiguous run in each of
+        // the sinks, because paint is depth-first and it owned all of it.
+        for (tex, inst) in p.draw.since(first) {
+            cache.record_instance(tex, inst);
+        }
+        use crate::subtree_cache::HitList::*;
+        for &(hid, r) in &sink.hits[marks.0 as usize..] {
+            cache.record_hit(Normal, hid, r);
+        }
+        for &(hid, r) in &sink.top_hits[marks.1 as usize..] {
+            cache.record_hit(Top, hid, r);
+        }
+        for &(hid, r) in &sink.scroll_hits[marks.2 as usize..] {
+            cache.record_hit(Scroll, hid, r);
+        }
+        for &(hid, r) in &sink.drop_hits[marks.3 as usize..] {
+            cache.record_hit(Drop, hid, r);
+        }
+        for &(rid, r) in &sink.rects_order[marks.4 as usize..] {
+            cache.record_rect(rid, r);
+        }
+        sink.recording -= 1;
+        let deps = cache.deps_of(id);
+        cache.close_draw(id, deps, rect, p.draw.clip(), nodes[i].min, draw_marks);
     }
 }
 

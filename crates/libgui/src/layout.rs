@@ -181,6 +181,11 @@ pub(crate) struct Node {
     pub clip: bool,
     pub paint: Option<PaintFn>,
     pub scroll: Option<Scroll>,
+    /// A cached subtree: `paint` replays its recording instead of walking
+    /// into it, and it has no children to walk.
+    pub cached: bool,
+    /// Recording this frame, so `paint` keeps what the subtree produced.
+    pub recording: bool,
     /// Registered as a drop zone this frame (only when it accepts the drag in
     /// flight, so rejecting zones do not shadow accepting ones beneath them).
     pub drop_zone: bool,
@@ -211,6 +216,8 @@ impl Node {
             clip: false,
             paint: None,
             scroll: None,
+            cached: false,
+            recording: false,
             drop_zone: false,
             content: Vec2::ZERO,
             absolute: None,
@@ -293,8 +300,11 @@ impl Scratch {
     }
 }
 
-pub(crate) fn solve(nodes: &mut [Node], kids: &[u32], root: usize, rect: Rect, s: &mut Scratch) {
+pub(crate) fn fit(nodes: &mut [Node], kids: &[u32], root: usize) {
     measure(nodes, kids, root);
+}
+
+pub(crate) fn arrange(nodes: &mut [Node], kids: &[u32], root: usize, rect: Rect, s: &mut Scratch) {
     place(nodes, kids, root, rect, s);
 }
 
@@ -502,7 +512,8 @@ mod tests {
                 self.nodes[i].children = Kids { start, len: kids.len() as u32 - start };
             }
             let mut scratch = Scratch::default();
-            super::solve(&mut self.nodes, &kids, 0, rect, &mut scratch);
+            super::fit(&mut self.nodes, &kids, 0);
+            super::arrange(&mut self.nodes, &kids, 0, rect, &mut scratch);
             assert!(scratch.flow.is_empty() && scratch.mains.is_empty(), "place leaked scratch");
             &self.nodes
         }

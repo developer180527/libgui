@@ -122,6 +122,8 @@ pub struct Fonts {
     /// Strings shaped since the counter was last taken (run-cache misses).
     /// `Cell`, because shaping happens through `&self` on the measure path.
     shaped_runs: std::cell::Cell<u32>,
+    /// Strings drawn since the counter was last taken.
+    text_draws: u32,
 }
 
 impl Fonts {
@@ -136,6 +138,11 @@ impl Fonts {
         self.shaped_runs.replace(0)
     }
 
+    /// Strings drawn since the last call, cache hits included, and reset.
+    pub fn take_text_draws(&mut self) -> u32 {
+        std::mem::take(&mut self.text_draws)
+    }
+
     pub fn new() -> Self {
         Self {
             fonts: Vec::new(),
@@ -148,6 +155,7 @@ impl Fonts {
             zoom: 1.0,
             rasterized: 0,
             shaped_runs: std::cell::Cell::new(0),
+            text_draws: 0,
         }
     }
 
@@ -369,6 +377,7 @@ impl Fonts {
         // a scroll stutter. Moving text is resampled (the shader filters the
         // atlas bilinearly), which is invisible in motion and exact again the
         // moment the scroll comes to rest.
+        self.text_draws += 1;
         let snap = dl.snap_text();
         let round = |v: f32| if snap { v.round() } else { v };
         let x0 = round(pos.x * s);

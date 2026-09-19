@@ -107,6 +107,55 @@ fn offscreen_widgets_cost_no_draw_work() {
 /// The property that decides whether a tool app burns a core while the user
 /// reads the screen: with nothing happening, the UI asks the host not to
 /// redraw at all. An animation that never settles would pin the CPU forever.
+/// Caching a subtree replaces its whole cost with a replay, and the replay is
+/// the same size whatever the subtree was: the counts below are flat in the
+/// row count where the uncached ones are linear. Counts, not milliseconds, so
+/// this says the same thing on any machine.
+#[test]
+fn a_cached_subtree_costs_the_same_however_big_it_is() {
+    let names: Vec<String> = (0..4000).map(|i| format!("Object {}", i % 40)).collect();
+    let panel = |ui: &mut Ui, rows: usize, names: &[String]| {
+        ui.heading("Outliner");
+        for (i, n) in names.iter().enumerate().take(rows) {
+            ui.with_key(i, |ui| {
+                let _ = ui.selectable(n, i == 3);
+            });
+        }
+    };
+    let run = |rows: usize, cache: bool| {
+        let mut ui = ui();
+        let info = FrameInfo { screen_size: Vec2::new(1400.0, 20000.0), dt: 1.0 / 60.0, ..FrameInfo::default() };
+        let mut last = libgui::Profile::default();
+        for f in 0..12 {
+            ui.begin_frame(info);
+            // The live widget that forces a frame however still the rest is.
+            ui.label(&format!("meter {}", f % 7));
+            if cache {
+                ui.cached("panel", rows, |ui| panel(ui, rows, &names));
+            } else {
+                panel(&mut ui, rows, &names);
+            }
+            let _ = ui.end_frame();
+            last = ui.profile();
+        }
+        last
+    };
+
+    let (small, big) = (run(200, true), run(800, true));
+    assert_eq!(small.cached_hits, 1, "the subtree never replayed");
+    assert_eq!(big.cached_hits, 1);
+    assert_eq!(small.nodes, big.nodes, "a replay's node count grew with the subtree");
+    assert_eq!(small.text_draws, big.text_draws, "a replay re-shaped text");
+    assert!(small.text_draws <= 1, "a replay drew {} strings", small.text_draws);
+
+    // Same pixels as the build it replaced, at both sizes.
+    for rows in [200usize, 800] {
+        let (c, u) = (run(rows, true), run(rows, false));
+        assert_eq!(c.instances, u.instances, "a {rows}-row replay emitted a different number of instances");
+        assert!(u.nodes > c.nodes * 50, "the uncached panel should be far bigger: {} vs {}", u.nodes, c.nodes);
+    }
+}
+
 /// A host that redraws for its own reasons — an engine's viewport, a DAW's
 /// meters, a video playing back — would otherwise rebuild, re-lay-out and
 /// re-paint a UI that has not moved, every frame, forever. Paint alone is
