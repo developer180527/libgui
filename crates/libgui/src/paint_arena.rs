@@ -151,6 +151,15 @@ impl PaintArena {
         self.len = 0;
     }
 
+    /// Make room for `widgets` closures of a typical size, so a first frame
+    /// costs no more than a steady one.
+    pub fn reserve(&mut self, widgets: usize) {
+        // 48 bytes is about what a built-in widget's paint closure captures:
+        // a style, a couple of floats and a colour.
+        self.buf.resize(self.buf.len().max(widgets * 48 / ALIGN), 0);
+        self.entries.reserve(widgets.saturating_sub(self.entries.capacity()));
+    }
+
     /// Bytes the buffer holds, for tests.
     #[cfg(test)]
     pub fn capacity(&self) -> usize {
@@ -257,7 +266,8 @@ mod tests {
         let mut draw = crate::DrawList::default();
         let mut fonts = crate::Fonts::new();
         let theme = crate::Theme::dark();
-        let mut p = Painter { draw: &mut draw, fonts: &mut fonts, theme: &theme, font: crate::FontId(0) };
+        let mut p =
+            Painter { draw: &mut draw, fonts: &mut fonts, theme: &theme, font: crate::FontId(0), strs: &[] };
         f(&mut p);
     }
 }

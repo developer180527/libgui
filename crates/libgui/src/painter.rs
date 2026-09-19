@@ -1,4 +1,4 @@
-use crate::{Color, DrawList, FontId, Fonts, Rect, TextureId, Theme, Vec2};
+use crate::{Color, DrawList, FontId, Fonts, Rect, TextureId, Theme, Vec2, PaintText};
 
 /// Handed to paint callbacks after layout is solved. This is the
 /// "immediate" drawing layer: widgets and custom overlays (gizmo labels, graphs,
@@ -17,9 +17,11 @@ pub struct Painter<'a> {
     pub fonts: &'a mut Fonts,
     pub theme: &'a Theme,
     pub font: FontId,
+    /// This frame's text arena, which a [`FrameText`](crate::FrameText) names a range in.
+    pub strs: &'a [u8],
 }
 
-impl Painter<'_> {
+impl<'a> Painter<'a> {
     pub fn rect(&mut self, r: Rect, fill: Color, radius: f32) {
         self.draw.rect(r, fill, radius, 0.0, Color::TRANSPARENT);
     }
@@ -126,30 +128,44 @@ impl Painter<'_> {
         self.line(tip, b, stroke, color);
     }
 
-    pub fn measure(&self, size: f32, text: &str) -> Vec2 {
-        self.fonts.measure(self.font, size, text)
+    pub fn measure(&self, size: f32, text: impl PaintText) -> Vec2 {
+        self.fonts.measure(self.font, size, text.get(self.strs))
     }
 
-    pub fn text(&mut self, pos: Vec2, size: f32, color: Color, text: &str) {
-        self.fonts.draw(self.draw, self.font, size, pos, color, text);
+    /// `text` is a `&str`, a `String`, or a [`FrameText`](crate::FrameText) handle into the
+    /// frame's arena — which is what the built-in widgets pass, because it
+    /// costs no allocation to carry one into a paint closure.
+    pub fn text(&mut self, pos: Vec2, size: f32, color: Color, text: impl PaintText) {
+        // The arena is borrowed from the frame, not from `self`, so resolving
+        // first leaves `&mut self` free for the draw.
+        let arena: &'a [u8] = self.strs;
+        let s = text.get(arena);
+        self.fonts.draw(self.draw, self.font, size, pos, color, s);
     }
 
     /// Left-aligned, vertically centred in `r`.
-    pub fn text_left(&mut self, r: Rect, size: f32, color: Color, text: &str) {
-        let m = self.measure(size, text);
-        self.text(Vec2::new(r.x, r.y + (r.h - m.y) * 0.5), size, color, text);
+    pub fn text_left(&mut self, r: Rect, size: f32, color: Color, text: impl PaintText) {
+        let arena: &'a [u8] = self.strs;
+        let s = text.get(arena);
+        let m = self.fonts.measure(self.font, size, s);
+        self.fonts.draw(self.draw, self.font, size, Vec2::new(r.x, r.y + (r.h - m.y) * 0.5), color, s);
     }
 
     /// Right-aligned, vertically centred in `r`.
-    pub fn text_right(&mut self, r: Rect, size: f32, color: Color, text: &str) {
-        let m = self.measure(size, text);
-        self.text(Vec2::new(r.right() - m.x, r.y + (r.h - m.y) * 0.5), size, color, text);
+    pub fn text_right(&mut self, r: Rect, size: f32, color: Color, text: impl PaintText) {
+        let arena: &'a [u8] = self.strs;
+        let s = text.get(arena);
+        let m = self.fonts.measure(self.font, size, s);
+        let pos = Vec2::new(r.right() - m.x, r.y + (r.h - m.y) * 0.5);
+        self.fonts.draw(self.draw, self.font, size, pos, color, s);
     }
 
-    pub fn text_centered(&mut self, r: Rect, size: f32, color: Color, text: &str) {
-        let m = self.measure(size, text);
+    pub fn text_centered(&mut self, r: Rect, size: f32, color: Color, text: impl PaintText) {
+        let arena: &'a [u8] = self.strs;
+        let s = text.get(arena);
+        let m = self.fonts.measure(self.font, size, s);
         let c = r.center();
-        self.text(Vec2::new(c.x - m.x * 0.5, c.y - m.y * 0.5), size, color, text);
+        self.fonts.draw(self.draw, self.font, size, Vec2::new(c.x - m.x * 0.5, c.y - m.y * 0.5), color, s);
     }
 }
 

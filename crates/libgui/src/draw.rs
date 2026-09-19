@@ -77,6 +77,12 @@ impl DrawList {
         self.snap_text.pop();
     }
 
+    /// Make room for `instances` instances, so a first frame does not grow.
+    pub fn reserve(&mut self, instances: usize) {
+        self.instances.reserve(instances.saturating_sub(self.instances.capacity()));
+        self.batches.reserve(16);
+    }
+
     pub fn clip(&self) -> Rect {
         *self.clips.last().unwrap_or(&Rect::default())
     }

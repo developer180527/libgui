@@ -26,6 +26,13 @@ const FORBIDDEN: &[&str] = &[
     "Instant::now",
 ];
 
+/// Process-global state. An app embedding a UI owns its allocator, its
+/// threading and its lifetimes; a library that keeps a hidden global takes one
+/// of those away, and takes it away from every other user of the process too.
+/// Without any, `#[global_allocator]` is simply the binary's choice and libgui
+/// inherits it — which is what makes `perf_alloc.rs` able to count it at all.
+const NO_GLOBALS: &[&str] = &["static mut", "thread_local!", "OnceLock", "OnceCell", "lazy_static", "AtomicUsize", "AtomicU64"];
+
 /// `theme_watch` is the documented exception: an opt-in, off-by-default feature
 /// whose whole job is to poll a file, kept in one module so it stays visible.
 const EXEMPT_FILES: &[&str] = &["theme_watch.rs"];
@@ -76,9 +83,9 @@ fn without_test_modules(src: &str) -> String {
     out
 }
 
-#[test]
-fn the_core_reaches_for_nothing_outside_itself() {
-    let mut found = Vec::new();
+/// Every library file, test modules already cut out.
+fn sources() -> Vec<(String, String)> {
+    let mut out = Vec::new();
     for entry in std::fs::read_dir(src_dir()).expect("src/") {
         let path = entry.expect("entry").path();
         let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
@@ -86,6 +93,15 @@ fn the_core_reaches_for_nothing_outside_itself() {
             continue;
         }
         let src = without_test_modules(&std::fs::read_to_string(&path).expect("read"));
+        out.push((name, src));
+    }
+    out
+}
+
+#[test]
+fn the_core_reaches_for_nothing_outside_itself() {
+    let mut found = Vec::new();
+    for (name, src) in sources() {
         for (n, line) in src.lines().enumerate() {
             let code = line.split("//").next().unwrap_or("");
             for bad in FORBIDDEN {
@@ -99,6 +115,27 @@ fn the_core_reaches_for_nothing_outside_itself() {
         found.is_empty(),
         "libgui reached outside itself. The host owns these; pass the result in through \
          `FrameInfo` or an `InputEvent` instead:\n  {}",
+        found.join("\n  ")
+    );
+}
+
+#[test]
+fn the_core_keeps_no_process_global_state() {
+    let mut found = Vec::new();
+    for (name, src) in sources() {
+        for (n, line) in src.lines().enumerate() {
+            let code = line.split("//").next().unwrap_or("");
+            for bad in NO_GLOBALS {
+                if code.contains(bad) {
+                    found.push(format!("{name}:{}: {bad} — {}", n + 1, code.trim()));
+                }
+            }
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "libgui kept process-global state. Every `Ui` must be independent, so an app owns its \
+         allocator, its threads and its lifetimes:\n  {}",
         found.join("\n  ")
     );
 }

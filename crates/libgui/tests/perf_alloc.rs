@@ -71,13 +71,14 @@ fn a_frame_stays_within_its_allocation_budget() {
     println!("{per_widget:.2} allocations and {bytes_per_widget:.0} bytes per widget");
     println!("a 500-widget panel: {a1} allocations, {b1} bytes");
 
-    // Today: one per text widget, the `String` its paint closure owns. The
-    // closure itself no longer costs one — it is written into the frame's
-    // paint arena — and neither does a container's child list, which is a
-    // range into the tree's child arena. The ceilings catch either arena being
-    // bypassed or a second allocation per widget appearing, not normal drift.
-    assert!(per_widget <= 1.2, "{per_widget:.2} allocations per widget");
-    assert!(bytes_per_widget <= 32.0, "{bytes_per_widget:.0} bytes per widget");
+    // Zero. Three arenas, all reused frame to frame: a container's children
+    // are a range into the tree's child arena, a paint closure is written into
+    // the paint arena rather than boxed, and the text it draws is a handle into
+    // the text arena rather than an owned `String`. What is left is a constant
+    // for the whole panel, not a cost per widget — which is the property worth
+    // guarding, since it is what a real-time thread needs.
+    assert_eq!(per_widget, 0.0, "{per_widget:.2} allocations per widget");
+    assert!(a1 <= 8, "a 500-widget panel allocated {a1} times");
 
     // An idle repaint must be nearly free: a tool app that redraws a still
     // screen should not be handing work to the allocator at all.
@@ -93,6 +94,53 @@ fn a_frame_stays_within_its_allocation_budget() {
     assert!(empty <= 8, "an empty frame allocated {empty} times");
 
     nesting_is_free(&mut ui);
+    a_frame_without_text_allocates_nothing(false);
+    a_frame_without_text_allocates_nothing(true);
+}
+
+/// libgui keeps no process-global state, so the allocator is whatever the
+/// binary installs — this test file *is* the proof, since it installs its own
+/// and counts every call libgui makes. What an app embedding a UI in a
+/// real-time loop actually wants from that is not a special allocator but no
+/// allocator at all during a frame, so: a frame that draws no text must reach
+/// exactly zero, and `Ui::reserve` must get there on the first frame rather
+/// than the third.
+fn a_frame_without_text_allocates_nothing(reserve: bool) {
+    let mut ui = Ui::new(Theme::dark(), include_bytes!("../../../assets/Inter.ttf")).expect("font");
+    if reserve {
+        ui.reserve(4_000);
+    }
+    let style = Frame::panel(&ui.theme);
+    let build = |ui: &mut Ui| {
+        ui.begin_frame(FrameInfo::default());
+        for i in 0..2_000 {
+            ui.container(libgui::Layout::row().height(Size::Fixed(8.0)), style, |ui| {
+                let id = ui.make_id(("leaf", i));
+                let v = i as f32;
+                let leaf = libgui::Layout::leaf(Size::Fixed(8.0), Size::Fixed(8.0));
+                ui.add_leaf(id, leaf, Vec2::ZERO, false, move |p, r| {
+                    p.rect(Rect::new(r.x + v, r.y, 4.0, 4.0), Color::WHITE, 1.0);
+                });
+            });
+        }
+        let _ = ui.end_frame();
+    };
+
+    ALLOCS.store(0, Relaxed);
+    build(&mut ui);
+    let first = ALLOCS.load(Relaxed);
+    for _ in 0..4 {
+        ALLOCS.store(0, Relaxed);
+        build(&mut ui);
+    }
+    let steady = ALLOCS.load(Relaxed);
+    println!("4000 widgets, no text, reserve={reserve}: first frame {first}, steady {steady}");
+    assert_eq!(steady, 0, "a steady text-free frame allocated {steady} times");
+    if reserve {
+        // Not literally zero: one small map still sizes itself on first use.
+        // The number that matters is that it is a constant, not per widget.
+        assert!(first <= 2, "reserve() left {first} allocations on the first frame");
+    }
 }
 
 /// Nesting is free: a container's children are a range into one arena that is

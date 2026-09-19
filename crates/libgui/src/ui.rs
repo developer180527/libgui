@@ -426,6 +426,9 @@ pub struct Ui {
     scratch: crate::layout::Scratch,
     /// This frame's paint closures, stored inline rather than boxed one by one.
     paints: crate::paint_arena::PaintArena,
+    /// This frame's widget text, so a paint closure carries a handle rather
+    /// than an owned `String`.
+    strs: crate::text_arena::TextArena,
     // Retained state
     rects: FxMap<Id, Rect>,
     hits: Vec<(Id, Rect)>,
@@ -571,6 +574,7 @@ impl Ui {
             root_kids: Vec::new(),
             scratch: crate::layout::Scratch::default(),
             paints: crate::paint_arena::PaintArena::default(),
+            strs: crate::text_arena::TextArena::default(),
             rects: FxMap::default(),
             hits: Vec::new(),
             hovered: None,
@@ -1076,6 +1080,7 @@ impl Ui {
         self.input = input;
         self.nodes.clear();
         self.paints.clear();
+        self.strs.clear();
         self.kids.clear();
         self.open_kids.clear();
         self.root_kids.clear();
@@ -1126,7 +1131,8 @@ impl Ui {
         self.scroll_hits.clear();
         self.top_hits.clear();
         self.drop_hits.clear();
-        let mut painter = Painter { draw: &mut self.draw, fonts: &mut self.fonts, theme: &self.theme, font: self.font };
+        let mut painter =
+            Painter { draw: &mut self.draw, fonts: &mut self.fonts, theme: &self.theme, font: self.font, strs: self.strs.bytes() };
         let mut sink = HitSink {
             hits: &mut self.hits,
             rects: &mut self.rects,
@@ -1400,6 +1406,66 @@ impl Ui {
     pub fn physical_px(&self, rect: Rect) -> (u32, u32) {
         let s = self.input.scale.max(0.01);
         (((rect.w * s).round().max(0.0)) as u32, ((rect.h * s).round().max(0.0)) as u32)
+    }
+
+    /// Copy `text` into the frame's text arena and return a handle to it.
+    ///
+    /// A widget is declared before its rect is known, so its paint closure has
+    /// to own the text it will draw. Owning a `String` means an allocation per
+    /// text widget per frame; a [`FrameText`](crate::FrameText) is eight bytes naming a range in
+    /// a buffer that is reused, so the copy lands in space that already exists.
+    ///
+    /// The handle is valid for **this frame only**, which is exactly as long as
+    /// the paint closure carrying it. Do not keep one: a stale handle resolves
+    /// to `""` rather than to somebody else's text.
+    pub fn frame_text(&mut self, text: &str) -> crate::FrameText {
+        self.strs.push(text)
+    }
+
+    /// Size the per-frame buffers for about `widgets` widgets, up front.
+    ///
+    /// A `Ui` allocates only while its arenas grow into the shape of your
+    /// frame: after that a frame costs nothing but the `String` each text
+    /// widget's paint closure owns. That growth is a handful of allocations
+    /// over the first frames, which is invisible in an app and very visible in
+    /// a real-time thread that must not touch the allocator at all. Call this
+    /// once, with a generous guess: a container counts as a widget, buffers
+    /// only ever grow, and an overestimate costs memory while an underestimate
+    /// costs a few reallocations later.
+    ///
+    /// Nothing else is needed to use your own allocator: libgui keeps no
+    /// process-global state, so it allocates through whatever
+    /// `#[global_allocator]` your binary installs.
+    pub fn reserve(&mut self, widgets: usize) {
+        // The root, and the slack that keeps an off-by-a-few guess free.
+        let n = widgets + 16;
+        self.nodes.reserve(n.saturating_sub(self.nodes.capacity()));
+        self.kids.reserve(n.saturating_sub(self.kids.capacity()));
+        // Worst case every widget is a child of one still-open container.
+        self.open_kids.reserve(n.saturating_sub(self.open_kids.capacity()));
+        self.hits.reserve(widgets.saturating_sub(self.hits.capacity()));
+        self.rects.reserve(widgets.saturating_sub(self.rects.len()));
+        self.seen.reserve(widgets.saturating_sub(self.seen.len()));
+        self.focus_order.reserve(64);
+        self.paints.reserve(widgets);
+        // A label averages a couple of dozen characters.
+        self.strs.reserve(widgets * 24);
+        self.scratch.reserve(widgets);
+        self.anims.reserve(widgets.saturating_sub(self.anims.len()));
+        self.dup_next.reserve(widgets.saturating_sub(self.dup_next.len()));
+        self.scroll_hits.reserve(64);
+        self.top_hits.reserve(64);
+        self.drop_hits.reserve(64);
+        self.consumed_keys.reserve(16);
+        self.key_salt.reserve(64);
+        self.shortcut_scopes.reserve(64);
+        self.xform_stack.reserve(16);
+        self.popup_stack.reserve(16);
+        self.stack.reserve(64);
+        self.overlays.reserve(16);
+        self.layer_min.reserve(64);
+        // Widgets average a few instances each: a box, a border, some glyphs.
+        self.draw.reserve(widgets * 4);
     }
 
     /// What the last completed frame cost. See [`crate::testing`].

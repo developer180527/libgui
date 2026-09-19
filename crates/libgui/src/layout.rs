@@ -282,6 +282,17 @@ pub(crate) struct Scratch {
     pub floating: Vec<u64>,
 }
 
+impl Scratch {
+    /// Room for a frame of about `widgets` widgets. `place` holds one slice per
+    /// open container, so the worst case is every widget being a flow child of
+    /// one container.
+    pub fn reserve(&mut self, widgets: usize) {
+        self.flow.reserve(widgets.saturating_sub(self.flow.capacity()));
+        self.mains.reserve(widgets.saturating_sub(self.mains.capacity()));
+        self.floating.reserve(64);
+    }
+}
+
 pub(crate) fn solve(nodes: &mut [Node], kids: &[u32], root: usize, rect: Rect, s: &mut Scratch) {
     measure(nodes, kids, root);
     place(nodes, kids, root, rect, s);

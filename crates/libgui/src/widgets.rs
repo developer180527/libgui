@@ -67,9 +67,9 @@ impl Ui {
     pub fn text_with(&mut self, text: &str, size: f32, color: Color) {
         let id = self.make_id(("label", text));
         let m = self.text_size(size, text);
-        let text = text.to_string();
+        let text = self.frame_text(text);
         self.add_leaf(id, Layout::leaf(Size::Fit, Size::Fit), m, false, move |p, r| {
-            p.text(Vec2::new(r.x, r.y), size, color, &text);
+            p.text(Vec2::new(r.x, r.y), size, color, text);
         });
     }
 
@@ -143,7 +143,7 @@ impl Ui {
         }
         let hover = self.animate_bool(id, 0, resp.hovered);
         let down = self.animate_bool(id, 1, resp.active && resp.hovered);
-        let label = label.to_string();
+        let label = self.frame_text(label);
         let layout = Layout::leaf(Size::Fit, Size::Fixed(s.height)).padding(Insets::xy(s.padding_x, 0.0));
         self.add_leaf(id, layout, m, true, move |p, r| {
             let shadow = s.shadow.color.with_alpha(s.shadow.color.a * (1.0 - down));
@@ -156,7 +156,7 @@ impl Ui {
                 let hl = Rect::new(r.x + s.radius, r.y + s.border_width, r.w - 2.0 * s.radius, 1.0);
                 p.rect(hl, Color::WHITE.with_alpha(s.highlight * (1.0 + 0.8 * hover)), 0.0);
             }
-            p.text_centered(r.translate(0.0, down * s.press_offset), size, s.text.at(hover, down), &label);
+            p.text_centered(r.translate(0.0, down * s.press_offset), size, s.text.at(hover, down), label);
         });
         resp
     }
@@ -182,10 +182,10 @@ impl Ui {
         }
         let on = self.animate_bool(id, 0, *value);
         let hover = self.animate_bool(id, 1, resp.hovered);
-        let label = label.to_string();
+        let label = self.frame_text(label);
         let content = Vec2::new(m.x + 12.0 + s.width, m.y.max(s.height));
         self.add_leaf(id, Layout::leaf(Size::Grow(1.0), Size::Fixed(h.max(s.height))), content, true, move |p, r| {
-            p.text_left(r, size, s.label.lerp(muted, 0.25 * (1.0 - hover)), &label);
+            p.text_left(r, size, s.label.lerp(muted, 0.25 * (1.0 - hover)), label);
             let track = Rect::new(r.right() - s.width, r.center().y - s.height * 0.5, s.width, s.height);
             let fill = s.track_off.lerp(s.track_on, on);
             let border = s.border_off.lerp(s.border_on, on);
@@ -223,7 +223,7 @@ impl Ui {
         let hover = self.animate_bool(id, 1, resp.hovered);
         let box_side = (size + 4.0).round();
         let gap = 8.0;
-        let label = label.to_string();
+        let label = self.frame_text(label);
         let h = self.theme.metrics.control_height.max(box_side);
         let content = Vec2::new(box_side + gap + m.x, m.y.max(box_side));
         let layout = Layout::leaf(Size::Fit, Size::Fixed(h));
@@ -243,7 +243,7 @@ impl Ui {
                 p.line(a, bend, w, s.knob);
                 p.line(bend, e, w, s.knob);
             }
-            p.text_left(r.shrink(box_side + gap, 0.0, 0.0, 0.0), size, sel.text_hover, &label);
+            p.text_left(r.shrink(box_side + gap, 0.0, 0.0, 0.0), size, sel.text_hover, label);
         });
         resp
     }
@@ -266,7 +266,7 @@ impl Ui {
         let hover = self.animate_bool(id, 1, resp.hovered);
         let d = (size + 4.0).round();
         let gap = 8.0;
-        let label = label.to_string();
+        let label = self.frame_text(label);
         let h = self.theme.metrics.control_height.max(d);
         let content = Vec2::new(d + gap + m.x, m.y.max(d));
         self.add_leaf(id, Layout::leaf(Size::Fit, Size::Fixed(h)), content, true, move |p, r| {
@@ -279,7 +279,7 @@ impl Ui {
                 let c = b.center();
                 p.rect(Rect::new(c.x - dot, c.y - dot, dot * 2.0, dot * 2.0), s.knob, dot);
             }
-            p.text_left(r.shrink(d + gap, 0.0, 0.0, 0.0), size, sel.text_hover, &label);
+            p.text_left(r.shrink(d + gap, 0.0, 0.0, 0.0), size, sel.text_hover, label);
         });
         resp
     }
@@ -300,13 +300,13 @@ impl Ui {
             self.request_repaint();
         }
         let time = self.time as f32;
-        let label = label.to_string();
+        let label = self.frame_text(label);
         let track_h = s.track_height.max(6.0);
         let h = if show_label { m.y + 6.0 + track_h } else { track_h };
         self.add_leaf(id, Layout::leaf(Size::Grow(1.0), Size::Fixed(h)), Vec2::new(80.0, h), false, move |p, r| {
             if show_label {
                 let top = Rect::new(r.x, r.y, r.w, m.y);
-                p.text_left(top, size, s.label, &label);
+                p.text_left(top, size, s.label, label);
                 p.text_right(top, size, s.value, &text);
             }
             let track = Rect::new(r.x, r.bottom() - track_h, r.w, track_h);
@@ -352,12 +352,12 @@ impl Ui {
         let frac = ((*value - min) / (max - min)).clamp(0.0, 1.0);
         let hover = self.animate_bool(id, 0, resp.hovered || resp.active);
         let drag = self.animate_bool(id, 1, resp.active);
-        let label = label.to_string();
+        let label = self.frame_text(label);
         let value_text = format!("{:.2}", *value);
         let h = m.y + 8.0 + 2.0 * kr0;
         self.add_leaf(id, Layout::leaf(Size::Grow(1.0), Size::Fixed(h)), Vec2::new(m.x + 40.0, h), true, move |p, r| {
             let top = Rect::new(r.x, r.y, r.w, m.y);
-            p.text_left(top, size, s.label, &label);
+            p.text_left(top, size, s.label, label);
             p.text_right(top, size, s.value.lerp(s.value_active, drag), &value_text);
             let cy = r.bottom() - kr0 - 2.0;
             let th = s.track_height;
@@ -420,15 +420,15 @@ impl Ui {
         // Show enough decimals to see a change at this speed.
         let decimals = if speed >= 1.0 { 0 } else if speed >= 0.1 { 1 } else if speed >= 0.01 { 2 } else { 3 };
         let text = format!("{:.*}", decimals, *value);
-        let label = label.to_string();
         let show_label = !label.is_empty();
+        let label = self.frame_text(label);
         let content = Vec2::new(m.x + 64.0, m.y);
         let layout = Layout::leaf(Size::Grow(1.0), Size::Fixed(h)).padding(Insets::xy(s.padding_x, 0.0));
         self.add_leaf(id, layout, content, true, move |p, r| {
             let border = s.border.lerp(s.border_hover, hover).lerp(s.border_focus, drag);
             p.rect_bordered(r, s.fill, s.radius, 1.0, border);
             if show_label {
-                p.text_left(r.shrink(s.padding_x, 0.0, 0.0, 0.0), size, s.placeholder, &label);
+                p.text_left(r.shrink(s.padding_x, 0.0, 0.0, 0.0), size, s.placeholder, label);
                 p.text_right(r.shrink(0.0, 0.0, s.padding_x, 0.0), size, sl.value.lerp(sl.value_active, drag), &text);
             } else {
                 p.text_centered(r, size, sl.value.lerp(sl.value_active, drag), &text);
@@ -481,8 +481,9 @@ impl Ui {
         let size = self.theme.metrics.font_size;
         let h = self.theme.metrics.control_height;
         let idx = (*selected).min(options.len().saturating_sub(1));
-        let shown = options.get(idx).copied().unwrap_or("").to_string();
-        let m = self.text_size(size, &shown);
+        let shown = options.get(idx).copied().unwrap_or("");
+        let m = self.text_size(size, shown);
+        let shown = self.frame_text(shown);
         let resp = self.interact(id);
         let open = self.popup_open(popup_id);
         if resp.clicked {
@@ -504,7 +505,7 @@ impl Ui {
         self.add_leaf(id, layout, content, true, move |p, r| {
             let border = s.border.lerp(s.border_hover, hover).lerp(s.border_focus, hot);
             p.rect_bordered(r, s.fill, s.radius, 1.0, border);
-            p.text_left(r.shrink(s.padding_x, 0.0, arrow_w, 0.0), size, s.text, &shown);
+            p.text_left(r.shrink(s.padding_x, 0.0, arrow_w, 0.0), size, s.text, shown);
             let a = Rect::new(r.right() - arrow_w, r.y, arrow_w, r.h);
             p.chevron(a, size, Chevron::Down, menu.shortcut);
         });
@@ -544,7 +545,7 @@ impl Ui {
         }
         let hover = self.animate_bool(id, 0, resp.hovered);
         let sel = self.animate_bool(id, 1, selected);
-        let label = label.to_string();
+        let label = self.frame_text(label);
         let layout = Layout::leaf(Size::Grow(1.0), Size::Fixed(s.height)).padding(Insets::xy(s.padding_x, 0.0));
         self.add_leaf(id, layout, m, true, move |p, r| {
             let bg = s.fill_hover.with_alpha(s.fill_hover.a * hover).lerp(s.fill_selected, sel);
@@ -555,7 +556,7 @@ impl Ui {
                 p.rect(Rect::new(r.x + 3.0, r.center().y - bar_h * 0.5, w, bar_h), s.indicator, w * 0.5);
             }
             let fg = s.text.lerp(s.text_hover, hover).lerp(s.text_selected, sel);
-            p.text_left(r.shrink(s.padding_x + 4.0 * sel, 0.0, s.padding_x, 0.0), size, fg, &label);
+            p.text_left(r.shrink(s.padding_x + 4.0 * sel, 0.0, s.padding_x, 0.0), size, fg, label);
         });
         resp
     }
@@ -609,7 +610,7 @@ impl Ui {
         let sel = self.animate_bool(id, 1, selected);
         let arrow_hot = self.animate_bool(id, 2, resp.hovered && on_arrow);
 
-        let label = label.to_string();
+        let label = self.frame_text(label);
         let text_x = s.padding_x + depth as f32 * indent + indent;
         let content = Vec2::new(text_x + m.x, m.y);
         let layout = Layout::leaf(Size::Grow(1.0), Size::Fixed(s.height));
@@ -629,7 +630,7 @@ impl Ui {
                 let a = Rect::new(r.x + s.padding_x + depth as f32 * indent, r.y, indent, r.h);
                 p.chevron(a, size, dir, c);
             }
-            p.text_left(r.shrink(text_x, 0.0, s.padding_x, 0.0), size, fg, &label);
+            p.text_left(r.shrink(text_x, 0.0, s.padding_x, 0.0), size, fg, label);
         });
         TreeResponse { response: resp, toggled }
     }
@@ -678,11 +679,11 @@ impl Ui {
             self.cursor = Cursor::Pointer;
         }
         let hot = self.animate_bool(id, 0, resp.hovered || sliding || open);
-        let label = label.to_string();
+        let label = self.frame_text(label);
         let layout = Layout::leaf(Size::Fit, Size::Fixed(s.item_height)).padding(Insets::xy(s.item_padding_x, 0.0));
         self.add_leaf(id, layout, m, true, move |p, r| {
             p.rect(r, s.item_fill_hover.with_alpha(s.item_fill_hover.a * hot), s.item_radius);
-            p.text_centered(r, size, s.text, &label);
+            p.text_centered(r, size, s.text, label);
         });
 
         self.popup(menu_id, 160.0, body)
@@ -708,8 +709,9 @@ impl Ui {
         let size = self.theme.metrics.font_size;
         let id = self.make_id(("menu_item", label));
         let m = self.text_size(size, label);
-        let hint = hint.unwrap_or_default().to_string();
-        let hint_w = if hint.is_empty() { 0.0 } else { self.text_size(size, &hint).x + s.item_padding_x };
+        let hint = hint.unwrap_or_default();
+        let hint_w = if hint.is_empty() { 0.0 } else { self.text_size(size, hint).x + s.item_padding_x };
+        let hint = self.frame_text(hint);
         let mut resp = self.interact(id);
         if !enabled {
             resp.clicked = false;
@@ -725,7 +727,7 @@ impl Ui {
             self.close_sibling_submenus(id);
         }
         let hot = self.animate_bool(id, 0, resp.hovered);
-        let label = label.to_string();
+        let label = self.frame_text(label);
         let content = Vec2::new(s.gutter + m.x + hint_w + s.item_padding_x, m.y);
         let layout = Layout::leaf(Size::Grow(1.0), Size::Fixed(s.item_height)).padding(Insets::xy(s.item_padding_x, 0.0));
         self.add_leaf(id, layout, content, enabled, move |p, r| {
@@ -733,9 +735,9 @@ impl Ui {
                 p.rect(r, s.item_fill_hover.with_alpha(s.item_fill_hover.a * hot), s.item_radius);
             }
             let fg = if enabled { s.text.lerp(s.text_hover, hot) } else { s.text_disabled };
-            p.text_left(r.shrink(s.gutter, 0.0, 0.0, 0.0), size, fg, &label);
+            p.text_left(r.shrink(s.gutter, 0.0, 0.0, 0.0), size, fg, label);
             if !hint.is_empty() {
-                p.text_right(r, size, s.shortcut, &hint);
+                p.text_right(r, size, s.shortcut, hint);
             }
         });
         resp
@@ -773,7 +775,7 @@ impl Ui {
             self.cursor = Cursor::Pointer;
         }
         let hot = self.animate_bool(id, 0, resp.hovered || open);
-        let label = label.to_string();
+        let label = self.frame_text(label);
         let arrow_w = s.item_padding_x * 1.5;
         let content = Vec2::new(s.gutter + m.x + arrow_w + s.item_padding_x, m.y);
         let layout = Layout::leaf(Size::Grow(1.0), Size::Fixed(s.item_height)).padding(Insets::xy(s.item_padding_x, 0.0));
@@ -782,7 +784,7 @@ impl Ui {
                 p.rect(r, s.item_fill_hover.with_alpha(s.item_fill_hover.a * hot), s.item_radius);
             }
             let fg = s.text.lerp(s.text_hover, hot);
-            p.text_left(r.shrink(s.gutter, 0.0, 0.0, 0.0), size, fg, &label);
+            p.text_left(r.shrink(s.gutter, 0.0, 0.0, 0.0), size, fg, label);
             p.chevron(Rect::new(r.right() - arrow_w, r.y, arrow_w, r.h), size, Chevron::Right, s.shortcut);
         });
         self.popup(child, 140.0, body)
@@ -831,7 +833,7 @@ impl Ui {
         }
         let idx = (*selected).min(options.len().saturating_sub(1));
         let pos = self.animate(id, 0, idx as f32);
-        let options: Vec<String> = options.iter().map(|o| o.to_string()).collect();
+        let options: Vec<crate::FrameText> = options.iter().map(|o| self.frame_text(o)).collect();
         let min_w = total * 0.6;
         self.add_leaf(id, Layout::leaf(Size::Grow(1.0), Size::Fixed(s.height)), Vec2::new(min_w, 0.0), true, move |p, r| {
             p.rect_bordered(r, s.fill, s.radius, 1.0, s.border);

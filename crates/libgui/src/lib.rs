@@ -22,6 +22,7 @@ pub mod render_contract;
 mod scroll;
 pub mod testing;
 mod text;
+mod text_arena;
 mod theme;
 #[cfg(feature = "theme-toml")]
 mod theme_file;
@@ -48,6 +49,7 @@ pub use font::{FontRasterizer, GlyphBitmap, LineMetrics, ShapedGlyph};
 #[cfg(feature = "fontdue")]
 pub use font::FontdueRasterizer;
 pub use text::{Atlas, FontError, FontId, Fonts};
+pub use text_arena::{FrameText, PaintText};
 pub use theme::{
     ButtonStyle, Density, DropPreviewStyle, Metrics, MenuStyle, Palette, PanelStyle, PlotStyle, ScrollbarStyle, SegmentedStyle,
     SelectableStyle, Shadow, SliderStyle, SplitterStyle, StateColors, TabStyle, TextInputStyle, TooltipStyle, Theme, ToggleStyle,

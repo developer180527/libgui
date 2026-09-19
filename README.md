@@ -708,7 +708,8 @@ enforced by tests rather than left to a benchmark nobody runs
 | guard | today |
 |---|---|
 | A visible 211-widget inspector, as a share of a 60 fps frame | **0.26%** (44 µs) |
-| Allocations per widget per frame | **1.00** (6 bytes) |
+| Allocations per widget per frame | **0** |
+| A 500-widget inspector, whole frame | **1** allocation, 8 bytes |
 | Allocations for 1,800 nested containers | **0** |
 | Allocations in an empty frame | **0** |
 | Draw instances for offscreen widgets | **0** (15x the rows, same instance count) |
@@ -795,15 +796,17 @@ No test can see *transitive* dependencies, so CI counts those too:
 A jump in either fails the build, so growth is something somebody chose rather
 than something a version bump did quietly.
 
-### Two arenas, so a frame barely touches the allocator
+### Three arenas, so a frame does not touch the allocator at all
 
-A frame used to cost **2 allocations and 170 bytes per widget**; it now costs
-**1 and 6**, and nesting is free. Allocation is global shared state — a UI that
-churns it taxes every other thread in the process, not just itself — so this is
-the number that matters more than microseconds on any one machine.
+A frame used to cost **2 allocations and 170 bytes per widget**. It now costs
+**none**: a 500-widget inspector allocates *once*, for the whole frame, and that
+one is a constant rather than a cost per widget. Allocation is global shared
+state — a UI that churns it taxes every other thread in the process, not just
+itself — so this is the number that matters more than microseconds on any one
+machine.
 
-Both came from the same shape of problem: per-node data with a per-node
-lifetime, reached for one `Vec` and one `Box` at a time.
+All three came from the same shape of problem: per-node data with a per-frame
+lifetime, reached for one `Vec`, one `Box` and one `String` at a time.
 
 - **Children.** A `Node` held a `Vec<usize>`, so every container allocated for a
   list that never changes after it is built, and `place` allocated two more
@@ -828,8 +831,38 @@ lifetime, reached for one `Vec` and one `Box` at a time.
   and its tests cover a closure that never runs, a mid-frame drop, reallocation
   under load and the over-aligned path. They pass under Miri.
 
-The remaining allocation per widget is the `String` a text widget's closure
-owns. A frame-lifetime text arena would remove it too.
+- **Text.** A widget is declared before its rect is known, so its paint closure
+  has to own the text it will draw, and owning it meant a `String` per text
+  widget per frame. A `FrameText` is eight bytes naming a range in a buffer that
+  is reused, so the copy lands in space that already exists. **A custom widget
+  does not have to use it**: `Painter::text` and friends take anything
+  implementing `PaintText`, which `&str` and `String` both do, so an ordinary
+  owned `String` in a closure keeps working exactly as before. Handles are valid
+  for the frame that made them — the same life as the closure carrying one — and
+  a stale handle resolves to `""` rather than to somebody else's text.
+
+### Bring your own allocator
+
+`#[global_allocator]` is the binary's choice, and libgui inherits it: the crate
+keeps **no process-global state at all** — no statics, no `thread_local!`, no
+`OnceLock`, no lazy initialisation — so every `Ui` is independent and allocates
+through whatever you installed. That is a test (`boundaries.rs`), not a claim,
+and `perf_alloc.rs` is the demonstration: it installs its own allocator and
+counts every call libgui makes through it.
+
+A per-instance `Allocator` (Rust's `allocator_api`) is *not* supported, and
+cannot be while it is unstable. In practice what a real-time loop wants is not a
+special allocator but no allocator at all during a frame, which is the property
+above — and `Ui::reserve(widgets)` sizes the buffers up front so the *first*
+frame gets it too:
+
+```rust
+let mut ui = Ui::new(theme, font)?;
+ui.reserve(4_000);   // a container counts as a widget; overestimate freely
+```
+
+Measured on 4,000 widgets with no text: **109 allocations on the first frame
+without it, 1 with it, 0 on every frame after either way.**
 
 ## Golden images
 
