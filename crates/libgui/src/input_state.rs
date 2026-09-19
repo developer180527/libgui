@@ -82,6 +82,11 @@ impl InputState {
         }
     }
 
+    /// Anything queued that a frame would react to.
+    pub fn has_pending(&self) -> bool {
+        !self.queue.is_empty()
+    }
+
     /// Consume the queued events and produce this frame's input.
     pub fn frame(&mut self, info: FrameInfo) -> FrameInput {
         let mut out = FrameInput { screen_size: info.screen_size, scale: info.scale, dt: info.dt, ..FrameInput::default() };

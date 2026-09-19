@@ -122,6 +122,16 @@ struct Win {
     fingers: Vec<(u64, Vec2)>,
     /// Turns the OS's per-file drag events into one libgui drag.
     files: libgui_winit::FileDrop,
+    /// The last UI frame that actually ran. The scene redraws every frame
+    /// whatever the UI is doing, so on the frames where libgui says nothing
+    /// changed we draw these again instead of rebuilding a UI that has not
+    /// moved — the viewport keeps animating, the panels cost nothing.
+    batches: Vec<libgui::Batch>,
+    clear: libgui::Color,
+    /// Seconds since the UI last ran, which is what `needs_frame` asks for.
+    ui_idle: f32,
+    /// Frames skipped since the last one that ran, for the Stats panel.
+    skipped: u32,
 }
 
 struct App {
@@ -236,6 +246,10 @@ impl App {
                 title: title.to_string(),
                 fingers: Vec::new(),
                 files: libgui_winit::FileDrop::default(),
+                batches: Vec::new(),
+                clear: libgui::Color::TRANSPARENT,
+                ui_idle: 0.0,
+                skipped: 0,
             },
         );
         id
@@ -404,10 +418,19 @@ impl App {
             }
         }
 
-        // 1. UI
-        if w.ui.theme != self.theme {
+        // 1. UI — but only when it would come out different. The scene below
+        //    redraws regardless; the panels around it do not have to.
+        w.ui_idle += dt;
+        let theme_changed = w.ui.theme != self.theme;
+        let run_ui = theme_changed || w.ui.needs_frame(w.ui_idle);
+        if theme_changed {
             w.ui.theme = self.theme.clone();
         }
+        let mut platform = libgui::PlatformOutput::default();
+        if run_ui {
+            w.skipped = 0;
+            let info = FrameInfo { dt: w.ui_idle, ..info };
+            w.ui_idle = 0.0;
         w.ui.begin_frame(info);
         {
             let ui = &mut w.ui;
@@ -434,10 +457,20 @@ impl App {
             ui.drag_ghost();
         }
         let out = w.ui.end_frame();
-        let platform = out.platform.clone();
+        platform = out.platform.clone();
         if main {
             self.demo.ui_instances = out.draw.instances.len();
             self.demo.ui_batches = out.draw.batches.len();
+        }
+        w.renderer.prepare(&out);
+        w.batches.clear();
+        w.batches.extend_from_slice(&out.draw.batches);
+        w.clear = out.clear_color;
+        } else {
+            w.skipped += 1;
+        }
+        if main {
+            self.demo.ui_skipped = w.skipped;
         }
 
         // 2. Engine: the main window drives the scene render at the size the
@@ -467,8 +500,7 @@ impl App {
         };
         if let Some(frame) = frame {
             let view = frame.texture.create_view(&Default::default());
-            w.renderer.prepare(&out);
-            let c = out.clear_color;
+            let c = w.clear;
             {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("ui"),
@@ -486,7 +518,10 @@ impl App {
                     occlusion_query_set: None,
                     multiview_mask: None,
                 });
-                w.renderer.render(&mut pass, &out);
+                // From what `prepare` already uploaded, whether or not a UI
+                // frame ran: the instance buffer and atlas are unchanged, and
+                // the viewport is a texture the scene just redrew into.
+                w.renderer.render_batches(&mut pass, &w.batches);
             }
             g.queue.submit([encoder.finish()]);
             w.window.pre_present_notify();

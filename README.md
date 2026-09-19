@@ -755,6 +755,7 @@ enforced by tests rather than left to a benchmark nobody runs
 | 100,000 variable-height rows | ~210 µs (locating is O(rows); building is not) |
 | Glyph rasterisation in a steady frame | **none** (atlas version unchanged) |
 | An idle UI | `repaint_after: None` — the host sleeps |
+| A static UI under a host redrawing at 120 Hz | **0** UI frames per second |
 
 They assert properties that hold on any machine: deterministic counts, and
 *ratios* for complexity (4x the widgets must not cost more than 7x the time,
@@ -879,6 +880,54 @@ lifetime, reached for one `Vec`, one `Box` and one `String` at a time.
   for the frame that made them — the same life as the closure carrying one — and
   a stale handle resolves to `""` rather than to somebody else's text.
 
+### Damage tracking: the frames you don't run
+
+`repaint_after` lets a host that draws *only* for the UI go to sleep. The
+interesting case is the host that doesn't: an engine running its viewport at
+120 Hz, a DAW drawing meters, a video editor playing back. Those redraw every
+frame for their own reasons, and without asking they rebuild, re-lay-out and
+re-paint a UI that has not moved.
+
+`Ui::needs_frame(elapsed)` answers **before** the frame is built:
+
+```rust
+let elapsed = now - last_ui_frame;
+if ui.needs_frame(elapsed) {
+    ui.begin_frame(FrameInfo { dt: elapsed, ..info });
+    build(&mut ui);
+    let out = ui.end_frame();
+    renderer.prepare(&out);                        // only now
+    batches.clear();
+    batches.extend_from_slice(&out.draw.batches);
+    last_ui_frame = now;
+}
+renderer.render_batches(&mut pass, &batches);      // every frame
+```
+
+It is true when input is queued, when something is animating, or when the caret
+is due to blink — and false otherwise, which is the promise: **the frame you
+skipped would have been byte-identical to the one you already have.** That is a
+test, not a claim (`tests/damage.rs` compares the instance bytes of two settled
+frames).
+
+The instance buffer and the atlas are still the ones `prepare` uploaded, so a
+skipped frame needs nothing but the list of draws. A user texture the app is
+still rendering into keeps updating, which is how the demo's viewport animates
+at full rate while the panels around it cost nothing.
+
+**What this asks of you:** if your UI shows something that changes on its own —
+a meter, a clock, a progress bar driven by a worker — call
+`ui.request_repaint()` while it does. libgui cannot see your data. Widgets that
+animate on their own behalf already do it (an indeterminate `progress` bar, a
+pending tooltip), which is also why one of those on screen keeps the whole UI
+awake: the demo used to show an idle spinner in the inspector, and nothing could
+ever be skipped.
+
+Measured, on a panel of 500 visible widgets: paint is **60%** of a frame, build
+**38%**, and layout **3.5%** — so skipping whole frames is worth far more than
+skipping layout for unchanged subtrees, which was the obvious-sounding thing to
+build and would have bought almost nothing.
+
 ### Bring your own allocator
 
 `#[global_allocator]` is the binary's choice, and libgui inherits it: the crate
@@ -943,8 +992,11 @@ lag, fling, easing) stay as frame-trace tests like
    (ligatures, bidi, font fallback, CJK), multi-page atlas with LRU eviction.
 8. ~~Theme hot-reload~~ ✅ TOML themes, per-widget styles, density presets; next: multiple fonts (UI/mono/icons) in the theme, per-widget disabled states.
 9. **Accessibility** via AccessKit: emit a node per interactive widget from the same tree.
-10. **Perf**: skip layout/paint for unchanged subtrees, persistent GPU buffers,
-   and a "sleep when idle" mode for tools (CAD) instead of redrawing continuously.
+10. ~~**Perf**: a "sleep when idle" mode instead of redrawing continuously~~ ✅
+   `repaint_after` for hosts that draw only the UI, `Ui::needs_frame` +
+   `Backend::render_batches` for hosts that redraw anyway; next: caching the
+   emitted instances of a subtree so a *partly* changed UI repaints only the
+   part that moved.
 
 ## Known scaffold limitations
 

@@ -195,6 +195,9 @@ pub struct Demo {
     pub frame_ms: VecDeque<f32>,
     pub ui_instances: usize,
     pub ui_batches: usize,
+    /// UI frames skipped since the last one that ran: the scene keeps drawing,
+    /// the panels do not.
+    pub ui_skipped: u32,
     pub windows: usize,
     /// The Assets table: 200k rows of nothing much, to show what virtualised
     /// rows and frozen columns cost (nothing).
@@ -256,6 +259,7 @@ impl Default for Demo {
             frame_ms: VecDeque::new(),
             ui_instances: 0,
             ui_batches: 0,
+            ui_skipped: 0,
             windows: 1,
             viewport_px: (1, 1),
             dock_cfg: DockConfig::default(),
@@ -675,10 +679,13 @@ impl Panels<'_> {
             d.bake = 0.0;
         }
         if d.baking {
+            // The app's own animation, so the app asks for the frames. An
+            // indeterminate bar asks on its own behalf, which is also why one
+            // that is always on screen keeps the whole UI awake — this used to
+            // show an "Idle" spinner here, and nothing could ever be skipped.
+            ui.request_repaint();
             d.bake = (d.bake + 0.004) % 1.0;
-            ui.progress("Progress", Some(d.bake));
-        } else {
-            ui.progress("Idle", None);
+            ui.progress("Baking", Some(d.bake));
         }
         ui.space(4.0);
         ui.section("Mix");
@@ -721,6 +728,12 @@ impl Panels<'_> {
     }
 
     fn stats(&mut self, ui: &mut Ui) {
+        // This panel shows numbers that change on their own, which libgui has
+        // no way to know: without asking, `needs_frame` would let the host skip
+        // the UI and the readout would freeze while the scene kept moving.
+        // Anything live — a meter, a clock, a progress bar driven by a worker —
+        // owes the same call.
+        ui.request_repaint();
         let d = &*self.d;
         let t = ui.theme.clone();
         ui.section("Frame");
@@ -728,6 +741,7 @@ impl Panels<'_> {
         let hist: Vec<f32> = d.frame_ms.iter().copied().collect();
         ui.plot("frame times", &hist, 33.3, 56.0);
         ui.label_muted(&format!("UI: {} instances · {} draw calls", d.ui_instances, d.ui_batches));
+        ui.label_muted(&format!("UI frames skipped: {}", d.ui_skipped));
         ui.label_muted(&format!("Windows: {}", d.windows));
     }
 }

@@ -107,6 +107,49 @@ fn offscreen_widgets_cost_no_draw_work() {
 /// The property that decides whether a tool app burns a core while the user
 /// reads the screen: with nothing happening, the UI asks the host not to
 /// redraw at all. An animation that never settles would pin the CPU forever.
+/// A host that redraws for its own reasons — an engine's viewport, a DAW's
+/// meters, a video playing back — would otherwise rebuild, re-lay-out and
+/// re-paint a UI that has not moved, every frame, forever. Paint alone is
+/// three fifths of a frame, so this is the difference between the UI being
+/// negligible and the UI being a tax on every frame the app draws.
+#[test]
+fn a_static_ui_costs_a_continuously_redrawing_host_nothing() {
+    let mut ui = ui();
+    let names: Vec<String> = (0..400).map(|i| format!("Object {}", i % 40)).collect();
+    let step = 1.0 / 120.0;
+
+    let mut frames = 0;
+    let mut waited = 0.0;
+    // Two seconds at 120 Hz, the way an engine would drive it.
+    for _ in 0..240 {
+        waited += step;
+        if !ui.needs_frame(waited) {
+            continue;
+        }
+        ui.begin_frame(FrameInfo { dt: waited, ..FrameInfo::default() });
+        panel(&mut ui, 200, &names);
+        let _ = ui.end_frame();
+        frames += 1;
+        waited = 0.0;
+    }
+    // Only what it took to settle the first frame's animations.
+    assert!(frames < 20, "a static UI cost {frames} of 240 frames");
+
+    // And once settled, the next second is free outright.
+    let before = frames;
+    for _ in 0..120 {
+        waited += step;
+        if ui.needs_frame(waited) {
+            ui.begin_frame(FrameInfo { dt: waited, ..FrameInfo::default() });
+            panel(&mut ui, 200, &names);
+            let _ = ui.end_frame();
+            frames += 1;
+            waited = 0.0;
+        }
+    }
+    assert_eq!(frames, before, "a settled UI woke {} times in a second", frames - before);
+}
+
 #[test]
 fn an_idle_ui_lets_the_host_sleep() {
     let mut ui = ui();

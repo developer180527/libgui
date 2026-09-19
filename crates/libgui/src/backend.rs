@@ -74,11 +74,26 @@ pub trait Backend {
 
     /// Record the whole UI into `pass`. The default is right for most backends.
     fn render(&mut self, pass: &mut Self::Pass<'_>, frame: &FrameOutput) {
-        if frame.batches().is_empty() {
+        self.render_batches(pass, frame.batches());
+    }
+
+    /// Draw batches the backend has already prepared, without a
+    /// [`FrameOutput`].
+    ///
+    /// For the host that skipped a UI frame because
+    /// [`Ui::needs_frame`](crate::Ui::needs_frame) said nothing changed: the
+    /// instance buffer and the atlas are still the ones `prepare` uploaded, so
+    /// the only thing missing is the list of draws. Keep a copy of
+    /// [`FrameOutput::batches`] from the last frame that *did* run and hand it
+    /// back here. Nothing else needs re-uploading — including a user texture
+    /// the app is still redrawing into, which is how a viewport keeps
+    /// animating while the UI around it costs nothing.
+    fn render_batches(&mut self, pass: &mut Self::Pass<'_>, batches: &[crate::Batch]) {
+        if batches.is_empty() {
             return;
         }
         self.begin(pass);
-        for b in frame.batches() {
+        for b in batches {
             self.draw(pass, b.texture, b.range.clone());
         }
     }

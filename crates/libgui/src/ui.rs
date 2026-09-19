@@ -482,6 +482,10 @@ pub struct Ui {
     pub(crate) drop_hot: Option<Id>,
     /// Pointer travel (logical px) before a press on a drag source becomes a drag.
     pub drag_threshold: f32,
+    /// What the last frame asked for, so [`Ui::needs_frame`] can answer before
+    /// the next one starts. `Some(0.0)` until a frame has run, because a `Ui`
+    /// that has never drawn has everything to do.
+    last_repaint: Option<f32>,
     /// Collect the extra counters in [`crate::testing::FrameCost`] that are
     /// not free (today: unkeyed duplicates). Off in a shipping app.
     pub audit: bool,
@@ -608,6 +612,7 @@ impl Ui {
             drop_hits: Vec::new(),
             drop_hot: None,
             drag_threshold: 4.0,
+            last_repaint: Some(0.0),
             audit: false,
             dup_ids: FxSet::default(),
             cost: crate::testing::FrameCost::default(),
@@ -951,6 +956,46 @@ impl Ui {
         self.animating = true;
     }
 
+    /// Whether the next frame would differ from the last one, answered
+    /// **before** building it.
+    ///
+    /// [`PlatformOutput::repaint_after`] already lets a host that only draws
+    /// for the UI go to sleep. This is for the host that does not: an engine
+    /// running its viewport at 120 Hz, a DAW drawing meters, a video editor
+    /// playing back. Those redraw every frame for their own reasons, and
+    /// without asking they would rebuild, re-lay-out and re-paint a UI that
+    /// has not moved — measured at three fifths of the frame in paint alone.
+    ///
+    /// `elapsed` is seconds since the last frame, the same clock that feeds
+    /// [`FrameInfo::dt`]. When this returns false, skip `begin_frame` and
+    /// `end_frame` entirely and redraw the geometry you already uploaded:
+    /// nothing about the UI has changed, so the last frame's draw list is
+    /// still correct.
+    ///
+    /// ```ignore
+    /// let elapsed = now - last_ui_frame;
+    /// if ui.needs_frame(elapsed) {
+    ///     ui.begin_frame(FrameInfo { dt: elapsed, ..info });
+    ///     build(&mut ui);
+    ///     let out = ui.end_frame();
+    ///     renderer.upload(&out);            // only now
+    ///     last_ui_frame = now;
+    /// }
+    /// renderer.draw(&mut pass);             // every frame, from what it has
+    /// ```
+    ///
+    /// Queued input always wins: pushing an event makes this true whatever
+    /// the last frame asked for.
+    pub fn needs_frame(&self, elapsed: f32) -> bool {
+        if self.input_state.has_pending() {
+            return true;
+        }
+        match self.last_repaint {
+            Some(after) => elapsed >= after,
+            None => false,
+        }
+    }
+
     pub fn focused(&self) -> Option<Id> {
         self.focused
     }
@@ -1207,6 +1252,14 @@ impl Ui {
         self.dnd_end_frame();
 
         let busy = self.active.is_some() || self.touch_scroll.is_some() || self.animating;
+        let repaint_after = if busy {
+            Some(0.0)
+        } else if self.focused.is_some() {
+            Some(0.5) // caret blink
+        } else {
+            None
+        };
+        self.last_repaint = repaint_after;
         let platform = PlatformOutput {
             cursor: self.cursor,
             copied_text: self.copied.take(),
@@ -1215,13 +1268,7 @@ impl Ui {
             wants_pointer: self.wants_pointer(),
             wants_keyboard: self.wants_keyboard(),
             pointer_lock: self.lock_request,
-            repaint_after: if busy {
-                Some(0.0)
-            } else if self.focused.is_some() {
-                Some(0.5) // caret blink
-            } else {
-                None
-            },
+            repaint_after,
         };
         FrameOutput {
             draw: &self.draw,
