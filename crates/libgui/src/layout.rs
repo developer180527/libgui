@@ -161,6 +161,8 @@ pub(crate) struct Scroll {
     pub vis_y: f32,
     pub hot_y: f32,
     pub style: crate::ScrollbarStyle,
+    /// This scroll is standing still, so its content sits on the pixel grid.
+    pub snap: bool,
 }
 
 pub(crate) struct Node {
@@ -456,6 +458,7 @@ mod tests {
             vis_y: 0.0,
             hot_y: 0.0,
             style: crate::Theme::dark().scrollbar,
+            snap: true,
         });
         nodes.push(sc);
         nodes[0].children.push(1);

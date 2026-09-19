@@ -48,6 +48,10 @@ pub struct DrawList {
     /// goes through here is mapped, so nothing can draw untransformed by
     /// accident.
     xforms: Vec<Transform>,
+    /// Text pixel-snapping, innermost last. Off inside a scroll area that is
+    /// moving, so its text tracks the sub-pixel offset instead of shearing
+    /// against the row boxes it sits in.
+    snap_text: Vec<bool>,
 }
 
 impl DrawList {
@@ -57,6 +61,20 @@ impl DrawList {
         self.clips.clear();
         self.clips.push(screen);
         self.xforms.clear();
+        self.snap_text.clear();
+    }
+
+    /// Whether text should snap its baseline to the physical pixel grid here.
+    pub fn snap_text(&self) -> bool {
+        *self.snap_text.last().unwrap_or(&true)
+    }
+
+    pub(crate) fn push_snap_text(&mut self, snap: bool) {
+        self.snap_text.push(snap);
+    }
+
+    pub(crate) fn pop_snap_text(&mut self) {
+        self.snap_text.pop();
     }
 
     pub fn clip(&self) -> Rect {

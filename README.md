@@ -368,7 +368,17 @@ ui.scroll_area_with("ruler", ScrollOptions::horizontal(Size::Grow(1.0), Size::Fi
   scrolling area span its whole width.
 - On an area that only scrolls sideways, a plain vertical wheel scrolls it: what a trackpad user
   expects on a timeline.
-- Wheel/trackpad goes to the innermost scroll area under the mouse (nesting works), with smoothing.
+- Wheel/trackpad goes to the innermost scroll area under the mouse (nesting works). A wheel *notch*
+  eases in over a few frames; a trackpad's pixel deltas are already smooth and are applied in full,
+  the same frame, because easing them again only makes the list trail your fingers.
+- **A moving scroll runs sub-pixel; a still one sits on the pixel grid.** At rest the offset is
+  rounded to whole physical pixels, so text is crisp and boxes have hard edges. The moment it moves,
+  both the offset *and* the text baselines inside it stop rounding. That pairing matters: the first
+  frames of a trackpad flick are fractions of a pixel each, and rounding them away turned a smooth
+  ramp into "nothing, nothing, nothing, a whole pixel" — a stutter at the start of every scroll.
+  Un-rounding the boxes alone would instead shear each label against the row it sits in, so the two
+  switch together. Moving text is resampled by the shader's bilinear fetch, which is invisible in
+  motion and exact again the moment the scroll stops.
 - Overlay scrollbar fades in on hover, widens under the pointer; drag the thumb or click the track to jump.
 - Clipped hit-testing: widgets scrolled out of view can't be hovered or clicked.
 - `stick_to_end` keeps logs/consoles pinned to the newest line while at the bottom.

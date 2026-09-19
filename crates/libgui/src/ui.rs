@@ -294,6 +294,10 @@ struct ScrollAxis {
     viewport: f32,
     /// Touch fling velocity (px/s).
     velocity: f32,
+    /// The offset handed to layout last frame. A scroll is "moving" when this
+    /// frame's differs, which is the only reliable test: a trackpad scroll
+    /// settles within the frame, so `offset == target` even mid-gesture.
+    applied: f32,
 }
 
 impl ScrollAxis {
@@ -1563,8 +1567,34 @@ impl Ui {
 
         st.x.settle(direct_x, self.input.dt);
         st.y.settle(direct_y, self.input.dt);
+
+        // A scroll standing still sits on the physical pixel grid: crisp text,
+        // hard box edges. While it moves, the offset keeps its sub-pixel part
+        // and the text inside it stops snapping too, so the two never shear.
+        //
+        // Rounding a *moving* scroll is what made the start of a trackpad
+        // flick stutter. The first frames of a gesture are 0.2-0.8 px each,
+        // and round-to-nearest turned that smooth ramp into "nothing, nothing,
+        // nothing, a whole pixel, nothing, a whole pixel". `offset == target`
+        // is no use as a test — a trackpad scroll settles within the frame —
+        // so the test is against the offset handed to layout last frame.
+        let scale = self.input.scale.max(0.01);
+        let snap = |v: f32| (v * scale).round() / scale;
+        let moving = st.x.offset != st.x.applied || st.y.offset != st.y.applied;
+        if !moving {
+            st.x.offset = snap(st.x.offset);
+            st.y.offset = snap(st.y.offset);
+            st.x.target = st.x.offset;
+            st.y.target = st.y.offset;
+        }
+        st.x.applied = st.x.offset;
+        st.y.applied = st.y.offset;
+
         self.animating |= st.x.offset != st.x.target || st.x.velocity != 0.0;
         self.animating |= st.y.offset != st.y.target || st.y.velocity != 0.0;
+        // A moving scroll is a gesture in progress: keep the frames coming so
+        // the host does not go to sleep between the pointer's own events.
+        self.animating |= moving;
         self.scroll_states.insert(id, st);
         if by.hovered || by.active || bx.hovered || bx.active {
             self.cursor = Cursor::Default;
@@ -1580,15 +1610,10 @@ impl Ui {
             .height(opts.height)
             .gap(opts.gap)
             .padding(opts.padding);
-        let scale = self.input.scale.max(0.01);
-        let snap = |v: f32| (v * scale).round() / scale;
         let mut n = Node::new(id, layout);
         n.clip = true;
         n.scroll = Some(Scroll {
-            // Whole physical pixels: text snaps its baseline to the pixel
-            // grid, so a fractional offset would slide row boxes under their
-            // labels and the two would jitter against each other.
-            offset: Vec2::new(snap(st.x.offset), snap(st.y.offset)),
+            offset: Vec2::new(st.x.offset, st.y.offset),
             scroll_x: opts.scroll_x,
             scroll_y: opts.scroll_y,
             bar_x,
@@ -1598,6 +1623,7 @@ impl Ui {
             vis_y,
             hot_y,
             style: self.theme.scrollbar,
+            snap: !moving,
         });
         let i = self.attach(n);
         self.stack.push(i);
@@ -1870,6 +1896,10 @@ fn paint(nodes: &mut [Node], i: usize, p: &mut Painter, sink: &mut HitSink) {
     if let (true, Some(r)) = (nodes[i].drop_zone, visible) {
         sink.drop_hits.push((id, r));
     }
+    let snap_text = nodes[i].scroll.map(|s| s.snap);
+    if let Some(snap) = snap_text {
+        p.draw.push_snap_text(snap);
+    }
     if let Some(f) = nodes[i].paint.take() {
         f(p, rect);
     }
@@ -1906,6 +1936,9 @@ fn paint(nodes: &mut [Node], i: usize, p: &mut Painter, sink: &mut HitSink) {
     }
     if let Some(sc) = nodes[i].scroll {
         scrollbars(p, sink, rect, nodes[i].content, sc);
+    }
+    if snap_text.is_some() {
+        p.draw.pop_snap_text();
     }
     if clip {
         p.draw.pop_clip();
@@ -2080,39 +2113,70 @@ mod tests {
         assert_eq!(r[19].rect.bottom(), 100.0);
     }
 
+    /// The scroll area under test, built for one frame. Returns the first
+    /// row's y and the topmost glyph's y, both from *this* frame's layout.
+    fn scroll_frame(ui: &mut Ui, delta: f32, unit: crate::WheelUnit, scale: f32) -> (f32, f32) {
+        ui.push(InputEvent::PointerMoved { pos: Vec2::new(20.0, 50.0) });
+        if delta != 0.0 {
+            ui.push(InputEvent::Wheel { delta: Vec2::new(0.0, delta), unit });
+        }
+        ui.begin_frame(FrameInfo { dt: 1.0 / 60.0, scale, ..FrameInfo::default() });
+        ui.scroll_area_with("list", ScrollOptions::new(Size::Fixed(100.0)), |ui| {
+            for i in 0..40 {
+                if i == 0 {
+                    ui.add_leaf(Id::new("row0"), Layout::leaf(Size::Grow(1.0), Size::Fixed(24.0)), Vec2::ZERO, false, |_, _| {});
+                } else {
+                    let _ = ui.button(&format!("item {i}"));
+                }
+            }
+        });
+        let out = ui.end_frame();
+        let glyph = crate::render_contract::PrimitiveKind::Glyph.code();
+        let text_y = out
+            .draw
+            .instances
+            .iter()
+            .filter(|i| i.params[3] == glyph)
+            .map(|i| i.rect[1])
+            .fold(f32::INFINITY, f32::min);
+        drop(out);
+        (ui.rect_of(Id::new("row0")).unwrap_or_default().y, text_y)
+    }
+
     /// Trackpad (pixel) deltas are already smooth, so the content follows them
     /// exactly; easing them again only made the list trail the fingers. Wheel
-    /// notches (lines) still ease. Either way the applied offset is whole
-    /// physical pixels, so row boxes and their pixel-snapped text move together.
+    /// notches (lines) still ease.
+    ///
+    /// A scroll that is *standing still* sits on the physical pixel grid, so
+    /// text is crisp and boxes have hard edges. A scroll that is *moving* does
+    /// not: the first frames of a trackpad flick are fractions of a pixel
+    /// each, and rounding them away made the start of every scroll stutter.
+    /// Its text stops snapping at the same time, so the two never shear.
     #[test]
     fn trackpad_scroll_is_exact_and_offsets_land_on_pixels() {
-        let frame = |ui: &mut Ui, delta: f32, unit: crate::WheelUnit, scale: f32| -> f32 {
-            ui.push(InputEvent::PointerMoved { pos: Vec2::new(20.0, 50.0) });
-            if delta != 0.0 {
-                ui.push(InputEvent::Wheel { delta: Vec2::new(0.0, delta), unit });
-            }
-            ui.begin_frame(FrameInfo { dt: 1.0 / 60.0, scale, ..FrameInfo::default() });
-            let mut first = Rect::default();
-            ui.scroll_area_with("list", ScrollOptions::new(Size::Fixed(100.0)), |ui| {
-                for i in 0..40 {
-                    let r = ui.button(&format!("item {i}"));
-                    if i == 0 {
-                        first = r.rect;
-                    }
-                }
-            });
-            let _ = ui.end_frame();
-            first.y
-        };
         use crate::WheelUnit::{Line, Pixel};
+        let frame = |ui: &mut Ui, d: f32, u: crate::WheelUnit, s: f32| scroll_frame(ui, d, u, s).0;
 
         // Trackpad: each frame's delta is applied in full, the same frame.
         let mut ui = ui();
         let y0 = (0..3).map(|_| frame(&mut ui, 0.0, Pixel, 1.0)).last().unwrap();
-        frame(&mut ui, -30.0, Pixel, 1.0);
         assert_eq!(frame(&mut ui, -30.0, Pixel, 1.0), y0 - 30.0, "trackpad scroll lagged");
+        assert_eq!(frame(&mut ui, -30.0, Pixel, 1.0), y0 - 60.0, "trackpad scroll lagged");
         assert_eq!(frame(&mut ui, 0.0, Pixel, 1.0), y0 - 60.0, "trackpad scroll kept moving after the fingers stopped");
         assert_eq!(frame(&mut ui, 0.0, Pixel, 1.0), y0 - 60.0);
+
+        // The start of a flick: deltas smaller than a pixel must survive. Each
+        // one used to round to nothing, then to a whole pixel at once.
+        for scale in [1.0, 1.5, 2.0] {
+            let mut ui = self::ui();
+            let mut y = (0..3).map(|_| frame(&mut ui, 0.0, Pixel, scale)).last().unwrap();
+            for d in [-0.2f32, -0.35, -0.5, -0.8, -1.1] {
+                let next = frame(&mut ui, d, Pixel, scale);
+                let step = y - next;
+                assert!((step + d).abs() < 1e-3, "at scale {scale}, a {d} px step moved {step}");
+                y = next;
+            }
+        }
 
         // Wheel notch: eases in over several frames rather than jumping.
         let mut ui = self::ui();
@@ -2121,18 +2185,33 @@ mod tests {
         let first_step = y0 - frame(&mut ui, 0.0, Line, 1.0);
         assert!(first_step > 0.0 && first_step < 24.0, "a wheel notch should ease, moved {first_step}");
 
-        // At a fractional DPI scale, every frame of the ease lands on a
-        // physical pixel.
+        // At a fractional DPI scale, the offset lands back on a physical pixel
+        // once the ease finishes.
         let mut ui = self::ui();
         let scale = 1.5;
         for _ in 0..3 {
             frame(&mut ui, 0.0, Line, scale);
         }
         frame(&mut ui, -1.0, Line, scale);
-        for _ in 0..20 {
-            let y = frame(&mut ui, 0.0, Line, scale) * scale;
-            assert!((y - y.round()).abs() < 1e-3, "row at {y} physical px, between pixels");
+        for _ in 0..40 {
+            frame(&mut ui, 0.0, Line, scale);
         }
+        let y = frame(&mut ui, 0.0, Line, scale) * scale;
+        assert!((y - y.round()).abs() < 1e-3, "settled row at {y} physical px, between pixels");
+
+        // Text moves with its row, sub-pixel and all: a snapped baseline over
+        // an unsnapped box is the shear this pairing exists to prevent. The
+        // first moving frame also gives up the snap it was resting on, so the
+        // comparison is between frames that are both already moving.
+        let mut ui = self::ui();
+        let (_, t0) = (0..3).map(|_| scroll_frame(&mut ui, 0.0, Pixel, 2.0)).last().unwrap();
+        let (r1, t1) = scroll_frame(&mut ui, -0.25, Pixel, 2.0);
+        let (r2, t2) = scroll_frame(&mut ui, -0.25, Pixel, 2.0);
+        let (r3, t3) = scroll_frame(&mut ui, -0.25, Pixel, 2.0);
+        assert!(t1 < t0 && t0 - t1 < 1.0, "a quarter-pixel scroll did not move the text: {t0} -> {t1}");
+        assert!(((t1 - t2) - (r1 - r2)).abs() < 1e-3, "text and its row box moved by different amounts");
+        assert!(((t2 - t3) - (r2 - r3)).abs() < 1e-3, "text and its row box moved by different amounts");
+        assert!((r2 - r3 - 0.25).abs() < 1e-3, "a quarter-pixel scroll moved the row by {}", r2 - r3);
     }
 
     /// `segmented`'s thumb position is retained across frames, so it can point

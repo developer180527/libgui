@@ -341,19 +341,28 @@ impl Fonts {
         let px = self.px(size);
         let r = self.fit(size, px);
         let (asc, _) = self.line(font, px);
-        let x0 = (pos.x * s).round();
+        // Snapping to whole physical pixels keeps text crisp, and is what
+        // the scroll offset is snapped to match. A scroll area that is moving
+        // turns it off for its content: a trackpad's first frames move less
+        // than a pixel each, and rounding them away is what makes the start of
+        // a scroll stutter. Moving text is resampled (the shader filters the
+        // atlas bilinearly), which is invisible in motion and exact again the
+        // moment the scroll comes to rest.
+        let snap = dl.snap_text();
+        let round = |v: f32| if snap { v.round() } else { v };
+        let x0 = round(pos.x * s);
         // Pen advances in raster px, placed at the exact size (`r`); glyphs are
-        // drawn at their native raster size and snapped, so they stay crisp.
+        // drawn at their native raster size, so at rest they are texel-exact.
         let mut x = 0.0;
-        let baseline = (pos.y * s + asc * r).round();
+        let baseline = round(pos.y * s + asc * r);
         // The run is reference-counted, so holding it while rasterising glyphs
         // (which needs `&mut self`) costs no copy.
         let run = self.run(font, px, text);
         for sg in run.glyphs.iter() {
             let g = self.glyph(font, sg.glyph, px);
             if g.w > 0.0 {
-                let gx = (x0 + (x + sg.offset.x) * r).round() + g.left;
-                let gy = baseline + (sg.offset.y * r).round() - (g.bottom + g.h);
+                let gx = round(x0 + (x + sg.offset.x) * r) + g.left;
+                let gy = baseline + round(sg.offset.y * r) - (g.bottom + g.h);
                 dl.glyph(Rect::new(gx / s, gy / s, g.w / s, g.h / s), g.uv, color);
             }
             x += sg.advance;
