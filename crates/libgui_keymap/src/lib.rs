@@ -241,8 +241,11 @@ impl<A: Copy + PartialEq> Keymap<A> {
 
     /// Hand the widget bindings to `ui`. Call once per `Ui` (each window has
     /// one), and again after editing them.
+    /// Install both halves of this platform's keyboard convention: the chords
+    /// libgui's widgets act on, and where the keyboard is allowed to go.
     pub fn install(&self, ui: &mut Ui) {
         ui.set_key_bindings(self.ui.clone());
+        ui.focus_policy = focus_policy(self.platform);
     }
 
     pub fn ui_bindings(&self) -> &KeyBindings {
@@ -673,5 +676,78 @@ mod tests {
         assert_eq!(run(Platform::Mac, &[Key::ControlLeft]), "move the cube");
         // Alt+Backspace on Windows likewise.
         assert_eq!(run(Platform::Windows, &[Key::AltLeft]), "move the cube");
+    }
+}
+
+/// Where the keyboard is allowed to go on `platform`.
+///
+/// libgui itself has no opinion — see [`libgui::focus`] — because this is
+/// convention rather than fact, and the conventions disagree:
+///
+/// - **macOS** visits text fields and lists, and nothing else, until Full
+///   Keyboard Access is switched on. Clicking a button does not move focus.
+/// - **Windows** and **Linux** visit every control, and a click focuses what
+///   it pressed.
+///
+/// A macOS app that ships its own preference, or a kiosk that wants Tab to do
+/// nothing at all, builds a [`libgui::FocusPolicy`] by hand instead. Nothing
+/// downstream of this function knows what platform it is on.
+pub fn focus_policy(platform: Platform) -> libgui::FocusPolicy {
+    match platform {
+        Platform::Mac => libgui::FocusPolicy {
+            text: true,
+            controls: false,
+            collections: true,
+            click_focuses: false,
+        },
+        Platform::Windows | Platform::Linux => libgui::FocusPolicy {
+            text: true,
+            controls: true,
+            collections: true,
+            click_focuses: true,
+        },
+    }
+}
+
+/// [`focus_policy`] with every control reachable, whatever the platform —
+/// macOS with Full Keyboard Access on, or an app that has decided a UI nobody
+/// can drive from the keyboard is not one it wants to ship.
+pub fn full_keyboard_access(platform: Platform) -> libgui::FocusPolicy {
+    libgui::FocusPolicy { controls: true, click_focuses: platform != Platform::Mac, ..focus_policy(platform) }
+}
+
+#[cfg(test)]
+mod focus_tests {
+    use super::*;
+
+    #[test]
+    fn each_platform_gets_its_own_convention_and_none_is_compiled_in() {
+        let mac = focus_policy(Platform::Mac);
+        let win = focus_policy(Platform::Windows);
+        assert!(!mac.controls, "macOS visits buttons without Full Keyboard Access");
+        assert!(!mac.click_focuses, "clicking a button focuses it on macOS");
+        assert!(win.controls && win.click_focuses);
+        // Every platform is askable from any platform: the argument decides,
+        // not the target the binary was built for.
+        assert_ne!(mac, win);
+        assert_eq!(focus_policy(Platform::Linux), win);
+    }
+
+    #[test]
+    fn full_keyboard_access_reaches_everything_everywhere() {
+        for p in [Platform::Mac, Platform::Windows, Platform::Linux] {
+            let f = full_keyboard_access(p);
+            assert!(f.text && f.controls && f.collections, "{p:?} left something unreachable");
+        }
+    }
+
+    #[test]
+    fn installing_a_keymap_installs_its_focus_policy_too() {
+        let font = include_bytes!("../../../assets/Inter.ttf");
+        let mut ui = Ui::new(libgui::Theme::dark(), font).expect("font");
+        Keymap::<u8>::new(Platform::Mac).install(&mut ui);
+        assert_eq!(ui.focus_policy, focus_policy(Platform::Mac));
+        Keymap::<u8>::new(Platform::Windows).install(&mut ui);
+        assert_eq!(ui.focus_policy, focus_policy(Platform::Windows));
     }
 }

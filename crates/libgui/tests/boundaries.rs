@@ -33,6 +33,15 @@ const FORBIDDEN: &[&str] = &[
 /// inherits it — which is what makes `perf_alloc.rs` able to count it at all.
 const NO_GLOBALS: &[&str] = &["static mut", "thread_local!", "OnceLock", "OnceCell", "lazy_static", "AtomicUsize", "AtomicU64"];
 
+/// Deciding anything from the platform it was built for. Which controls the
+/// keyboard visits, what Cmd means, how a shortcut is spelled: all convention,
+/// all different per platform, and none of it libgui's to assume. A core that
+/// compiles differently on macOS is a core you cannot test on Linux, cannot
+/// embed in a host with its own conventions, and cannot ask to behave like
+/// another platform on request. The knowledge lives in `libgui_keymap`, which
+/// is opt-in and takes the platform as an argument.
+const NO_PLATFORM: &[&str] = &["target_os", "target_vendor", "target_family", "cfg!(unix", "cfg!(windows"];
+
 /// `theme_watch` is the documented exception: an opt-in, off-by-default feature
 /// whose whole job is to poll a file, kept in one module so it stays visible.
 const EXEMPT_FILES: &[&str] = &[
@@ -121,6 +130,29 @@ fn the_core_reaches_for_nothing_outside_itself() {
         found.is_empty(),
         "libgui reached outside itself. The host owns these; pass the result in through \
          `FrameInfo` or an `InputEvent` instead:\n  {}",
+        found.join("\n  ")
+    );
+}
+
+#[test]
+fn the_core_decides_nothing_from_the_platform_it_was_built_for() {
+    let mut found = Vec::new();
+    for (name, src) in sources() {
+        for (n, line) in src.lines().enumerate() {
+            let code = line.split("//").next().unwrap_or("");
+            for bad in NO_PLATFORM {
+                if code.contains(bad) {
+                    found.push(format!("{name}:{}: {bad} — {}", n + 1, code.trim()));
+                }
+            }
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "libgui decided something from the target platform. Keyboard focus, key bindings and \
+         shortcut spelling are convention, not fact: put the knowledge in `libgui_keymap`, which \
+         takes the platform as an argument, and leave the core able to behave like any of \
+         them:\n  {}",
         found.join("\n  ")
     );
 }

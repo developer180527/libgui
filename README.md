@@ -197,6 +197,53 @@ Routing, which is libgui's:
 `ui.key_pressed` / `key_down` stay raw and unrouted, for held-key state like a viewport's fly
 controls — gate those on `ui.wants_keyboard()`.
 
+## Keyboard focus
+
+Every control is reachable from the keyboard, and **libgui decides nothing about
+how**. Which chord moves focus, which activates, and even *which kinds of widget
+the keyboard visits at all* are platform conventions that platforms disagree on
+— so they are the app's, and the core is a mechanism with no opinion.
+
+```rust
+// A widget says what it is, and asks whether it has focus.
+let r = ui.interact_focusable(id, FocusKind::Control);
+if r.clicked { /* pressed, or activated from the keyboard */ }
+if r.focused { /* draw a focused state, if the widget has one */ }
+```
+
+Widgets never look at keys. A focused widget is activated by `UiAction::Submit`
+and left by `UiAction::Cancel`; focus moves on `FocusNext` / `FocusPrevious`.
+What chord produces any of those is the keymap's, and a host with no keyboard at
+all sends them directly with `InputEvent::Action` — a gamepad, a foot pedal, an
+accessibility switch. Every test in `tests/focus.rs` drives the UI that way: not
+one of them presses a key, and one fills in and submits a whole form with no
+pointer in existence.
+
+**The policy is the app's**, because the conventions differ:
+
+| | macOS | Windows / Linux |
+|---|---|---|
+| Tab visits text fields | yes | yes |
+| Tab visits buttons, toggles, sliders | only with Full Keyboard Access | yes |
+| Clicking a button focuses it | no | yes |
+
+```rust
+ui.focus_policy = libgui_keymap::focus_policy(Platform::current());  // or
+ui.focus_policy = libgui_keymap::full_keyboard_access(Platform::current());
+keymap.install(&mut ui);                                            // does both
+```
+
+`FocusPolicy::default()` is neutral — everything reachable — because a UI that
+cannot be driven from the keyboard is broken, and a library that quietly decides
+otherwise on your behalf is worse than one that asks. `libgui_keymap` carries the
+per-platform narrowing, takes the platform as an *argument*, and is opt-in:
+`tests/boundaries.rs` fails the build if `target_os` ever appears in the core, so
+libgui can always be asked to behave like a platform it was not built for.
+
+The focus ring is drawn once, centrally, and clipped by whatever clips the
+widget — so it works for custom widgets too — and only when focus arrived **by
+keyboard**. A ring that appears under the mouse is noise.
+
 ## Canvases: pan and zoom
 
 An unbounded coordinate space for node graphs, timelines, piano rolls, curve editors — anything
@@ -1075,8 +1122,12 @@ lag, fling, easing) stay as frame-trace tests like
 7. **Real text shaping**: replace `text.rs` internals with `cosmic-text`/`swash` or HarfBuzz
    (ligatures, bidi, font fallback, CJK), multi-page atlas with LRU eviction.
 8. ~~Theme hot-reload~~ ✅ TOML themes, per-widget styles, density presets; next: multiple fonts (UI/mono/icons) in the theme, per-widget disabled states.
-9. **Accessibility** via AccessKit: emit a node per interactive widget from the same tree.
-10. ~~**Perf**: a "sleep when idle" mode instead of redrawing continuously~~ ✅
+9. ~~Keyboard focus and navigation~~ ✅ `FocusKind` / `FocusPolicy`, activation through
+   `UiAction`, a centrally drawn focus ring, per-platform policy in `libgui_keymap`; next:
+   arrow-key navigation *within* lists, trees, tables and menus.
+10. **Accessibility** via AccessKit: emit a node per interactive widget from the same tree — now
+   unblocked, since it needs a focus order to describe.
+11. ~~**Perf**: a "sleep when idle" mode instead of redrawing continuously~~ ✅
    `repaint_after` for hosts that draw only the UI, `Ui::needs_frame` +
    `Backend::render_batches` for hosts that redraw anyway, `ui.cached` for a
    *partly* changed UI (including one that merely moved, or has a pointer

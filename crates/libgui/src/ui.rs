@@ -18,6 +18,9 @@ pub struct Response {
     /// Rect from the previous frame's layout (one frame latency, invisible in practice).
     pub rect: Rect,
     pub hovered: bool,
+    /// Has keyboard focus. A widget that shows a focused state draws it from
+    /// here; the focus *ring* is drawn for it.
+    pub focused: bool,
     /// Mouse went down on this widget and has not been released yet.
     pub active: bool,
     pub pressed: bool,
@@ -471,6 +474,14 @@ pub struct Ui {
     pub(crate) focused: Option<Id>,
     pub(crate) focus_order: Vec<Id>,
     pending_tab: Option<bool>,
+    /// Which kinds of widget the keyboard visits, and whether a click moves
+    /// focus. Platform convention, so libgui has no opinion: see
+    /// [`crate::FocusPolicy`] and `libgui_keymap`.
+    pub focus_policy: crate::FocusPolicy,
+    /// Focus arrived by keyboard, so it is worth drawing a ring. A click moves
+    /// focus without one, the way every desktop behaves — a ring that appears
+    /// under the mouse is noise.
+    focus_visible: bool,
     pub(crate) text_states: FxMap<Id, TextState>,
     pub(crate) copied: Option<String>,
     pub(crate) ime_rect: Option<Rect>,
@@ -617,6 +628,8 @@ impl Ui {
             focused: None,
             focus_order: Vec::new(),
             pending_tab: None,
+            focus_policy: crate::FocusPolicy::default(),
+            focus_visible: false,
             text_states: FxMap::default(),
             copied: None,
             ime_rect: None,
@@ -1219,7 +1232,8 @@ impl Ui {
             offscreen: 0,
         };
         let t = crate::profile::Clock::start();
-        paint(&mut self.nodes, &self.kids, 0, &mut painter, &mut sink, &mut self.scratch, &mut self.paints, &mut self.cache);
+        let focus_ring = self.focus_visible.then_some(self.focused).flatten();
+        paint(&mut self.nodes, &self.kids, 0, &mut painter, &mut sink, &mut self.scratch, &mut self.paints, &mut self.cache, focus_ring);
         for overlay in self.overlays.drain(..) {
             overlay(&mut painter);
         }
@@ -1256,6 +1270,7 @@ impl Ui {
 
         // Tab / Shift+Tab cycles focus through text fields in build order.
         if let Some(back) = self.pending_tab.take() {
+            self.focus_visible = true;
             let order = &self.focus_order;
             if !order.is_empty() {
                 let pos = self.focused.and_then(|f| order.iter().position(|&i| i == f));
@@ -1410,6 +1425,79 @@ impl Ui {
         r
     }
 
+    /// Register `id` as a place the keyboard can go, and report what it did.
+    ///
+    /// Whether this kind of widget is visited at all is [`Ui::focus_policy`],
+    /// which is the app's to set because it is a platform convention rather
+    /// than a fact — see [`crate::focus`]. A widget that is not visited still
+    /// works with the mouse; it simply never has focus.
+    pub fn focusable(&mut self, id: Id, kind: crate::FocusKind) -> crate::KeyResponse {
+        if !self.focus_policy.accepts(kind) {
+            // Focus must not be left on something the policy no longer visits.
+            if self.focused == Some(id) {
+                self.focused = None;
+            }
+            return crate::KeyResponse::default();
+        }
+        self.focus_order.push(id);
+        let focused = self.focused == Some(id);
+        if !focused {
+            return crate::KeyResponse::default();
+        }
+        // What chord produces Submit is the keymap's, and a host with no
+        // keyboard can send the action straight in.
+        let activated = self.take_action(UiAction::Submit);
+        if self.take_action(UiAction::Cancel) {
+            self.focused = None;
+        }
+        crate::KeyResponse { focused, activated }
+    }
+
+    /// [`Ui::interact`] and [`Ui::focusable`] together, which is what a
+    /// keyboard-reachable widget wants: `Response::clicked` is then true
+    /// whether it was pressed or activated from the keyboard.
+    pub fn interact_focusable(&mut self, id: Id, kind: crate::FocusKind) -> Response {
+        let mut r = self.interact(id);
+        // A press moves focus where the platform says it should. Text fields
+        // take it regardless: there is nowhere else for a caret to be.
+        if r.pressed && (self.focus_policy.click_focuses || kind == crate::FocusKind::Text) {
+            self.focused = Some(id);
+            self.focus_visible = false;
+        }
+        let k = self.focusable(id, kind);
+        r.focused = k.focused;
+        r.clicked |= k.activated;
+        r
+    }
+
+    /// [`Ui::interact_focusable`] for a widget that owns its drag (a slider, a
+    /// drag value): on touch it keeps the finger rather than handing it to the
+    /// scroll area around it.
+    pub fn interact_focusable_drag(&mut self, id: Id, kind: crate::FocusKind) -> Response {
+        let mut r = self.interact_drag(id);
+        if r.pressed && (self.focus_policy.click_focuses || kind == crate::FocusKind::Text) {
+            self.focused = Some(id);
+            self.focus_visible = false;
+        }
+        let k = self.focusable(id, kind);
+        r.focused = k.focused;
+        r.clicked |= k.activated;
+        r
+    }
+
+    /// Take a pending [`UiAction`] if one arrived this frame, so two widgets
+    /// cannot both act on it.
+    fn take_action(&mut self, want: UiAction) -> bool {
+        let at = self.input.events.iter().position(|e| *e == UiEvent::Action(want));
+        match at {
+            Some(i) => {
+                self.input.events.remove(i);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Resolve hover/press/click for `id` using last frame's rect. On touch,
     /// dragging past the slop scrolls instead (and cancels the click).
     pub fn interact(&mut self, id: Id) -> Response {
@@ -1451,6 +1539,7 @@ impl Ui {
             id,
             rect,
             hovered,
+            focused: self.focused == Some(id),
             active,
             pressed: hovered && self.pressed,
             clicked: active && hovered && self.released,
@@ -2362,6 +2451,7 @@ fn paint(
     s: &mut crate::layout::Scratch,
     paints: &mut crate::paint_arena::PaintArena,
     cache: &mut crate::subtree_cache::Cache,
+    focus_ring: Option<Id>,
 ) {
     let rect = nodes[i].rect;
     let id = nodes[i].id;
@@ -2465,7 +2555,7 @@ fn paint(
     for k in children.range() {
         let c = kids[k] as usize;
         if nodes[c].absolute.is_none() {
-            paint(nodes, kids, c, p, sink, s, paints, cache);
+            paint(nodes, kids, c, p, sink, s, paints, cache, focus_ring);
         }
     }
     // Absolute children stack by layer, and by build order within a layer, so a
@@ -2485,12 +2575,19 @@ fn paint(
     }
     for k in 0..n {
         let c = (s.floating[base + k] & 0xffff_ffff) as usize;
-        paint(nodes, kids, c, p, sink, s, paints, cache);
+        paint(nodes, kids, c, p, sink, s, paints, cache, focus_ring);
     }
     s.floating.truncate(base);
     if xform.is_some() {
         p.draw.pop_xform();
         p.fonts.set_zoom(p.draw.xform().zoom);
+    }
+    if focus_ring == Some(id) {
+        // Here rather than in each widget: one place, correctly clipped by
+        // whatever clips the widget, and it works for custom widgets too.
+        let w = p.theme.metrics.focus_ring_width;
+        let r = rect.expand(w * 0.5);
+        p.rect_bordered(r, Color::TRANSPARENT, p.theme.metrics.radius + w, w, p.theme.palette.focus_ring);
     }
     if let Some(sc) = nodes[i].scroll {
         scrollbars(p, sink, rect, nodes[i].content, sc);

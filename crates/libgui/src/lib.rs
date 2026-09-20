@@ -9,6 +9,7 @@ mod backend;
 mod dnd;
 mod dock;
 mod draw;
+pub mod focus;
 mod font;
 mod hash;
 mod id;
@@ -49,6 +50,7 @@ pub use math::{Color, Rect, Transform, Vec2};
 pub use painter::{Chevron, Painter};
 pub use profile::{enabled as profile_enabled, Profile};
 pub use scroll::{ScrollConfig, Smoothing};
+pub use focus::{FocusKind, FocusPolicy, KeyResponse};
 pub use font::{FontRasterizer, GlyphBitmap, LineMetrics, ShapedGlyph};
 #[cfg(feature = "fontdue")]
 pub use font::FontdueRasterizer;

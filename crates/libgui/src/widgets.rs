@@ -4,7 +4,10 @@
 //!   4. copy its style from `self.theme` (so `with_style` scopes work)
 //!   5. `add_leaf` with a layout + a paint closure that runs after layout.
 
-use crate::{Axis, ButtonStyle, Chevron, Color, Cursor, Id, Insets, Layout, Painter, Rect, Response, Size, TextureId, Theme, Ui, Vec2};
+use crate::{
+    Axis, ButtonStyle, Chevron, Color, Cursor, FocusKind, Id, Insets, Layout, Painter, Rect, Response, Size, TextureId, Theme, Ui,
+    Vec2,
+};
 use std::hash::Hash;
 
 /// Whether a tree row can be expanded, and whether it is.
@@ -137,7 +140,7 @@ impl Ui {
         let id = self.make_id(("button", key));
         let size = self.theme.metrics.font_size;
         let m = self.text_size(size, label);
-        let resp = self.interact(id);
+        let resp = self.interact_focusable(id, FocusKind::Control);
         if resp.hovered {
             self.cursor = Cursor::Pointer;
         }
@@ -173,7 +176,7 @@ impl Ui {
         let (size, h) = (self.theme.metrics.font_size, self.theme.metrics.control_height);
         let muted = self.theme.palette.text_muted;
         let m = self.text_size(size, label);
-        let resp = self.interact(id);
+        let resp = self.interact_focusable(id, FocusKind::Control);
         if resp.clicked {
             *value = !*value;
         }
@@ -212,7 +215,7 @@ impl Ui {
         let id = self.make_id(("checkbox", key));
         let size = self.theme.metrics.font_size;
         let m = self.text_size(size, label);
-        let resp = self.interact(id);
+        let resp = self.interact_focusable(id, FocusKind::Control);
         if resp.clicked {
             *value = !*value;
         }
@@ -255,7 +258,7 @@ impl Ui {
         let id = self.make_id(("radio", label));
         let size = self.theme.metrics.font_size;
         let m = self.text_size(size, label);
-        let resp = self.interact(id);
+        let resp = self.interact_focusable(id, FocusKind::Control);
         if resp.clicked {
             *value = choice;
         }
@@ -340,7 +343,7 @@ impl Ui {
         let id = self.make_id(("slider", key));
         let size = self.theme.metrics.font_size;
         let m = self.text_size(size, label);
-        let resp = self.interact_drag(id);
+        let resp = self.interact_focusable_drag(id, FocusKind::Control);
         let kr0 = s.knob_radius;
         if resp.active && resp.rect.w > 2.0 * kr0 {
             let frac = ((resp.mouse_pos.x - resp.rect.x - kr0) / (resp.rect.w - 2.0 * kr0)).clamp(0.0, 1.0);
@@ -398,7 +401,7 @@ impl Ui {
         let size = self.theme.metrics.font_size;
         let h = self.theme.metrics.control_height;
         let m = self.text_size(size, label);
-        let resp = self.interact_drag(id);
+        let resp = self.interact_focusable_drag(id, FocusKind::Control);
 
         if resp.active && resp.drag_delta.x != 0.0 {
             let mods = self.input.modifiers;
@@ -441,7 +444,7 @@ impl Ui {
     pub fn slider_vertical(&mut self, label: &str, value: &mut f32, min: f32, max: f32, height: f32) -> Response {
         let s = self.theme.slider;
         let id = self.make_id(("vslider", label));
-        let resp = self.interact_drag(id);
+        let resp = self.interact_focusable_drag(id, FocusKind::Control);
         let kr0 = s.knob_radius;
         if resp.active && resp.rect.h > 2.0 * kr0 {
             // Up is more, which is the opposite of the y axis.
@@ -484,7 +487,7 @@ impl Ui {
         let shown = options.get(idx).copied().unwrap_or("");
         let m = self.text_size(size, shown);
         let shown = self.frame_text(shown);
-        let resp = self.interact(id);
+        let resp = self.interact_focusable(id, FocusKind::Control);
         let open = self.popup_open(popup_id);
         if resp.clicked {
             if open {
@@ -539,7 +542,7 @@ impl Ui {
         let id = self.make_id(("selectable", key));
         let size = self.theme.metrics.font_size;
         let m = self.text_size(size, label);
-        let resp = self.interact(id);
+        let resp = self.interact_focusable(id, FocusKind::Collection);
         if resp.hovered {
             self.cursor = Cursor::Pointer;
         }
@@ -591,7 +594,7 @@ impl Ui {
         let faint = self.theme.palette.text_faint;
         let id = self.make_id(("tree_row", key));
         let m = self.text_size(size, label);
-        let mut resp = self.interact(id);
+        let mut resp = self.interact_focusable(id, FocusKind::Collection);
 
         // The arrow is a region of the row rather than its own widget: one hit
         // rect, and the row still highlights as a whole under the pointer.
@@ -816,7 +819,7 @@ impl Ui {
         let size = self.theme.metrics.font_size;
         let widths: Vec<f32> = options.iter().map(|o| self.text_size(size, o).x + 24.0).collect();
         let total: f32 = widths.iter().sum();
-        let resp = self.interact(id);
+        let resp = self.interact_focusable(id, FocusKind::Control);
         if resp.hovered {
             self.cursor = Cursor::Pointer;
         }

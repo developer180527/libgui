@@ -37,6 +37,8 @@ pub enum Pointer {
     Wheel(f32),
     /// Press on it, then move by this much and hold: a drag in flight.
     DragBy(Vec2),
+    /// Move keyboard focus forward this many times, touching nothing.
+    Tab(usize),
 }
 
 pub struct Scene {
@@ -112,6 +114,14 @@ impl Scene {
             Pointer::DragBy(_) => {
                 ui.push(InputEvent::PointerMoved { pos: at });
                 press(&mut ui, true);
+            }
+            Pointer::Tab(n) => {
+                // Actions, not keys: which chord means "next" is the keymap's,
+                // and this scene has no keymap at all.
+                for _ in 0..n {
+                    ui.push(InputEvent::Action(UiAction::FocusNext));
+                    frame(&mut ui);
+                }
             }
         }
         // The move has to be a frame after the press: a drag needs travel, and
@@ -378,6 +388,19 @@ fn table(ui: &mut Ui) {
     });
 }
 
+/// The keyboard focus ring, on a control that has no focused styling of its
+/// own, so the ring is the only thing marking where the keyboard is.
+fn focus_ring(ui: &mut Ui) {
+    panel(ui, |ui| {
+        let mut on = false;
+        let mut v = 0.4;
+        let _ = ui.button("Apply");
+        ui.checkbox("Enabled", &mut on);
+        ui.slider("Level", &mut v, 0.0, 1.0);
+        let _ = ui.button("Cancel");
+    });
+}
+
 pub const SCENES: &[Scene] = &[
     Scene { name: "widgets", size: (320.0, 640.0), pointer: Pointer::None, build: widgets },
     Scene { name: "tree", size: (240.0, 230.0), pointer: Pointer::None, build: tree },
@@ -392,6 +415,8 @@ pub const SCENES: &[Scene] = &[
     // 37px: not a multiple of anything, so a fractional offset would show.
     Scene { name: "scroll_mid", size: (240.0, 180.0), pointer: Pointer::Wheel(-37.0), build: scroll_target },
     Scene { name: "table", size: (300.0, 220.0), pointer: Pointer::None, build: table },
+    // Twice: past the button, onto the checkbox.
+    Scene { name: "focus_ring", size: (240.0, 170.0), pointer: Pointer::Tab(2), build: focus_ring },
     // Down past three rows, and sideways, so the ghost is clear of the list.
     Scene { name: "drag_reorder", size: (240.0, 200.0), pointer: Pointer::DragBy(Vec2::new(24.0, 74.0)), build: drag_reorder },
 ];

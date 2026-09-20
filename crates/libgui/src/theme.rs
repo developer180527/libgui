@@ -58,6 +58,8 @@ pub struct Palette {
     pub accent: Color,
     pub accent_hover: Color,
     pub accent_active: Color,
+    /// Ring drawn around whatever the keyboard is on.
+    pub focus_ring: Color,
     pub text: Color,
     pub text_muted: Color,
     pub text_faint: Color,
@@ -85,6 +87,8 @@ pub struct Metrics {
     pub font_size_heading: f32,
     /// Exponential approach rate for hover/press animations (1/s).
     pub anim_speed: f32,
+    /// Thickness of the keyboard focus ring.
+    pub focus_ring_width: f32,
 }
 }
 
@@ -102,7 +106,8 @@ impl Metrics {
                 font_size: 12.0,
                 font_size_small: 10.5,
                 font_size_heading: 13.5,
-                anim_speed: 20.0,
+                focus_ring_width: 2.0,
+            anim_speed: 20.0,
             },
             Density::Regular => Self {
                 radius: 6.0,
@@ -115,7 +120,8 @@ impl Metrics {
                 font_size: 13.0,
                 font_size_small: 11.0,
                 font_size_heading: 15.0,
-                anim_speed: 18.0,
+                focus_ring_width: 2.0,
+            anim_speed: 18.0,
             },
             Density::Touch => Self {
                 radius: 10.0,
@@ -128,7 +134,8 @@ impl Metrics {
                 font_size: 16.0,
                 font_size_small: 13.0,
                 font_size_heading: 19.0,
-                anim_speed: 16.0,
+                focus_ring_width: 2.0,
+            anim_speed: 16.0,
             },
         }
     }
@@ -673,6 +680,7 @@ impl Palette {
             accent: Color::hex(0x4c8dff),
             accent_hover: Color::hex(0x66a0ff),
             accent_active: Color::hex(0x3d78e0),
+            focus_ring: Color::hex(0x3d78e0),
             text: Color::hex(0xececee),
             text_muted: Color::hex(0xa3a3aa),
             text_faint: Color::hex(0x6c6c74),
@@ -697,6 +705,7 @@ impl Palette {
             accent: Color::hex(0x5b8def),
             accent_hover: Color::hex(0x6e9cff),
             accent_active: Color::hex(0x4a78d6),
+            focus_ring: Color::hex(0x4a78d6),
             text: Color::hex(0xe6e9ef),
             text_muted: Color::hex(0x9aa1b2),
             text_faint: Color::hex(0x5f6679),
@@ -721,6 +730,7 @@ impl Palette {
             accent: Color::hex(0x2f6fed),
             accent_hover: Color::hex(0x4580f5),
             accent_active: Color::hex(0x255fd1),
+            focus_ring: Color::hex(0x255fd1),
             text: Color::hex(0x1c1c21),
             text_muted: Color::hex(0x5b5b66),
             text_faint: Color::hex(0x9696a0),
