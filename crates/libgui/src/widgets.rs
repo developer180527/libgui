@@ -5,7 +5,7 @@
 //!   5. `add_leaf` with a layout + a paint closure that runs after layout.
 
 use crate::{
-    Axis, ButtonStyle, Chevron, Color, Cursor, FocusKind, Id, Insets, Layout, Painter, Rect, Response, Size, TextureId, Theme, Ui,
+    Align, Axis, ButtonStyle, Chevron, Color, Cursor, FocusKind, Id, Insets, Layout, Painter, Rect, Response, Size, TextureId, Theme, Ui,
     Vec2,
 };
 use std::hash::Hash;
@@ -65,6 +65,44 @@ impl Ui {
         let c = self.theme.palette.text_faint;
         let text = text.to_uppercase();
         self.text_with(&text, self.theme.metrics.font_size_small, c);
+    }
+
+    /// Text that wraps to the width it is given, and grows downwards.
+    ///
+    /// Its height follows from its width, which layout only knows after it has
+    /// run — so a frame containing one solves twice. That is paid once, when a
+    /// paragraph's width changes; a steady frame costs a walk of the
+    /// paragraphs and nothing more.
+    ///
+    /// Its *minimum* width is its longest unbreakable word, not its full
+    /// length: a paragraph never forces the panel around it wider. The
+    /// consequence is that a paragraph inside a `Size::Fit` container collapses
+    /// to that longest word, because a `Fit` container asks its children how
+    /// wide they want to be and a paragraph has no answer. Give the container
+    /// a width.
+    pub fn paragraph(&mut self, text: &str) {
+        let (size, color) = (self.theme.metrics.font_size, self.theme.palette.text);
+        self.paragraph_with(text, size, color, Align::Start);
+    }
+
+    /// [`Ui::paragraph`] with an explicit size, colour and alignment.
+    pub fn paragraph_with(&mut self, text: &str, size: f32, color: Color, align: Align) {
+        let id = self.make_id(("paragraph", text));
+        // Last frame's width, so the first frame of a stable paragraph is
+        // already right and the second solve has nothing to correct.
+        let last = self.rect_of(id).map(|r| r.w).filter(|w| *w > 0.0);
+        let min_w = self.fonts.min_wrap_width(self.font, size, text);
+        let h = match last {
+            Some(w) => self.fonts.measure_wrapped(self.font, size, text, w).y,
+            None => self.fonts.line_height(self.font, size),
+        };
+        let ft = self.frame_text(text);
+        let node = self.nodes.len() as u32;
+        self.wrapping.push((node, ft, size));
+        let layout = Layout::leaf(Size::Grow(1.0), Size::Fit);
+        self.add_leaf(id, layout, Vec2::new(min_w, h), false, move |p, r| {
+            p.text_wrapped(r, size, color, align, ft);
+        });
     }
 
     pub fn text_with(&mut self, text: &str, size: f32, color: Color) {

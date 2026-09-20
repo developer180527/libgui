@@ -95,6 +95,12 @@ pub enum InputEvent {
     ModifiersChanged(Modifiers),
     /// Committed text: typed characters, IME commits, dictation.
     Text(String),
+    /// Text an input method is still composing, with the caret's byte offset
+    /// inside it. Shown at the focused field's caret and **not** part of the
+    /// field's value: the host sends [`InputEvent::Text`] when the user accepts
+    /// it, and an empty preedit when they abandon it. Without this, typing
+    /// Japanese or Korean is invisible until the moment it commits.
+    ImePreedit { text: String, cursor: usize },
     /// Clipboard contents, typically sent in response to `PlatformOutput::paste_requested`.
     Paste(String),
     /// A widget action from outside the key bindings: an OS Edit menu's Copy,

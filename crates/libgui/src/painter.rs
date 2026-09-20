@@ -186,6 +186,15 @@ impl<'a> Painter<'a> {
         self.fonts.draw(self.draw, self.font, size, pos, color, s);
     }
 
+    /// Text wrapped to `r`'s width, laid out from its top. Lines break where
+    /// [`crate::Ui::paragraph`] would break them: the wrapping is cached, so
+    /// measuring and drawing the same paragraph costs one pass, not two.
+    pub fn text_wrapped(&mut self, r: Rect, size: f32, color: Color, align: crate::Align, text: impl PaintText) {
+        let arena: &'a [u8] = self.strs;
+        let s = text.get(arena);
+        self.fonts.draw_wrapped(self.draw, self.font, size, r, color, align, s);
+    }
+
     pub fn text_centered(&mut self, r: Rect, size: f32, color: Color, text: impl PaintText) {
         let arena: &'a [u8] = self.strs;
         let s = text.get(arena);

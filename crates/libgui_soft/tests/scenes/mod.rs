@@ -401,6 +401,22 @@ fn focus_ring(ui: &mut Ui) {
     });
 }
 
+/// Wrapped text: a paragraph that breaks at a narrow width, a hard newline,
+/// and a word longer than the line, which is cut rather than left to overflow.
+fn paragraph(ui: &mut Ui) {
+    panel(ui, |ui| {
+        ui.section("Notes");
+        ui.paragraph(
+            "A paragraph wraps to the width it is given, and its height follows from that — \
+             which is why a frame holding one solves twice.",
+        );
+        ui.space(6.0);
+        ui.paragraph("Hard\nbreaks\nstay.");
+        ui.space(6.0);
+        ui.paragraph("Supercalifragilisticexpialidocious");
+    });
+}
+
 pub const SCENES: &[Scene] = &[
     Scene { name: "widgets", size: (320.0, 640.0), pointer: Pointer::None, build: widgets },
     Scene { name: "tree", size: (240.0, 230.0), pointer: Pointer::None, build: tree },
@@ -417,6 +433,7 @@ pub const SCENES: &[Scene] = &[
     Scene { name: "table", size: (300.0, 220.0), pointer: Pointer::None, build: table },
     // Twice: past the button, onto the checkbox.
     Scene { name: "focus_ring", size: (240.0, 170.0), pointer: Pointer::Tab(2), build: focus_ring },
+    Scene { name: "paragraph", size: (260.0, 230.0), pointer: Pointer::None, build: paragraph },
     // Down past three rows, and sideways, so the ghost is clear of the list.
     Scene { name: "drag_reorder", size: (240.0, 200.0), pointer: Pointer::DragBy(Vec2::new(24.0, 74.0)), build: drag_reorder },
 ];

@@ -260,9 +260,22 @@ impl Ui {
         self.text_states.insert(id, st);
 
         let line_h = self.fonts.line_height(self.font, size);
+        // What an input method is composing sits at the caret, without being
+        // part of the field's value: it belongs to the IME until it commits.
+        let composing = if focused { self.preedit().map(|(t, c)| (t.to_string(), c)) } else { None };
+        let (pre_w, pre_caret, pre_text) = match &composing {
+            Some((t, c)) => (
+                self.fonts.measure(self.font, size, t).x,
+                self.fonts.measure(self.font, size, &t[..*c]).x,
+                Some(self.frame_text(t)),
+            ),
+            None => (0.0, 0.0, None),
+        };
         if focused {
+            // The IME wants the rect of what it is composing, so its candidate
+            // window can sit under it rather than under the caret it started at.
             let x = resp.rect.x + pad + cx - st.scroll;
-            self.ime_rect = Some(Rect::new(x, resp.rect.center().y - line_h * 0.5, 1.0, line_h));
+            self.ime_rect = Some(Rect::new(x, resp.rect.center().y - line_h * 0.5, pre_w.max(1.0), line_h));
         }
 
         let focus_t = self.animate_bool(id, 0, focused);
@@ -271,6 +284,9 @@ impl Ui {
         let (sa, sb) = (st.cursor.min(st.anchor), st.cursor.max(st.anchor));
         let sel = (carets[sa], carets[sb]);
         let shown = text.clone();
+        // Split at the caret, so the composing text can be drawn between them.
+        let head = shown[..byte_at(&shown, st.cursor)].to_string();
+        let tail = shown[byte_at(&shown, st.cursor)..].to_string();
         let placeholder = placeholder.to_string();
         let scroll = st.scroll;
 
@@ -292,13 +308,26 @@ impl Ui {
                 let c = if focus_t > 0.5 { s.selection } else { s.selection.with_alpha(s.selection.a * 0.5) };
                 p.rect(Rect::new(x0 + sel.0, ty, sel.1 - sel.0, line_h), c, 2.0);
             }
-            if shown.is_empty() {
+            if shown.is_empty() && pre_text.is_none() {
                 p.text(Vec2::new(inner.x, ty), size, s.placeholder, &placeholder);
+            } else if let Some(pre) = pre_text {
+                // Three runs: what is committed before the caret, what the IME
+                // is composing, and what is committed after it.
+                p.text(Vec2::new(x0, ty), size, s.text, &head);
+                let px = x0 + sel.0;
+                p.text(Vec2::new(px, ty), size, s.text, pre);
+                p.text(Vec2::new(px + pre_w, ty), size, s.text, &tail);
+                // Underlined, which is how every platform says "not committed".
+                let u = p.hairline(px, ty + line_h - 2.0, 1.0, 1.0);
+                p.rect(Rect::new(u.x, u.y, pre_w, u.w), s.text, 0.0);
             } else {
                 p.text(Vec2::new(x0, ty), size, s.text, &shown);
             }
             if caret_on {
-                p.rect(Rect::new((x0 + cx).round() - 0.75, ty - 1.0, 1.5, line_h + 2.0), s.caret, 0.75);
+                // While composing, the caret belongs to the IME's own cursor
+                // inside the composing text, not to the field's.
+                let at = x0 + cx + pre_caret;
+                p.rect(Rect::new(at.round() - 0.75, ty - 1.0, 1.5, line_h + 2.0), s.caret, 0.75);
             }
             p.draw.pop_clip();
         });

@@ -197,6 +197,51 @@ Routing, which is libgui's:
 `ui.key_pressed` / `key_down` stay raw and unrouted, for held-key state like a viewport's fly
 controls — gate those on `ui.wants_keyboard()`.
 
+## Wrapping text
+
+```rust
+ui.paragraph("Text that wraps to the width it is given, and grows downwards.");
+ui.paragraph_with(text, 13.0, colour, Align::Center);
+```
+
+A paragraph's height follows from its width, which layout only knows *after* it
+has run. So a frame containing one solves twice: measure, place, re-measure the
+paragraphs against the widths they got, and — only if that changed an answer —
+solve again. A steady frame costs a walk of the paragraphs and nothing more,
+and the frame a panel is resized on is right **on that frame**, not one later.
+Dragging a splitter would otherwise leave a gap under every paragraph in the
+window.
+
+Its **minimum** width is its longest unbreakable word, not its full length, so
+a paragraph never forces the panel around it wider. The consequence is that one
+inside a `Size::Fit` container collapses to that word, because a `Fit` container
+asks its children how wide they would like to be and a paragraph has no answer.
+Give the container a width.
+
+Line breaking is not UAX #14 — that needs a break-class table for every code
+point — and `wrap.rs` says exactly what it is instead: after whitespace, after a
+hyphen or slash, and between ideographs, which is what makes Japanese and
+Chinese wrap at all rather than running off the edge as one line. It keeps the
+part of *kinsoku shori* a reader notices (no line starting with closing
+punctuation, none ending with an opening bracket), and it cuts a word that
+cannot fit rather than letting it overflow. Thai and Khmer need word
+segmentation and will break only at spaces; hyphenation dictionaries are not
+there. Those belong behind `FontRasterizer`, the same seam complex shaping goes
+through.
+
+## Composing text (IME)
+
+Typing Japanese, Korean or Chinese goes through a composition the user sees and
+edits before accepting it. `InputEvent::ImePreedit { text, cursor }` carries it;
+the field draws it inline at the caret, underlined, with the IME's own cursor
+inside it — and **the `&mut String` does not change** until the host sends
+`InputEvent::Text`. An empty preedit means the user backed out.
+
+`PlatformOutput::text_input` reports the rect of what is being composed rather
+than of the bare caret, so the candidate window sits under the text it belongs
+to. `libgui_winit` maps winit's `Ime::Preedit`, `Enabled` and `Disabled`; any
+other host does the same three lines.
+
 ## Keyboard focus
 
 Every control is reachable from the keyboard, and **libgui decides nothing about
@@ -1124,7 +1169,9 @@ lag, fling, easing) stay as frame-trace tests like
 
 ## Roadmap (roughly in order)
 
-1. ~~Text input~~ ✅ single-line; next: multi-line editor, IME preedit, double-click word select, undo.
+1. ~~Text input~~ ✅ ~~IME preedit~~ ✅ ~~word wrap~~ ✅ single-line editing, `ui.paragraph` for
+   wrapped text, `InputEvent::ImePreedit` for compositions; next: the multi-line *editor* (caret
+   across lines, selection across lines), double-click word select, undo.
 2. ~~Scroll areas~~ ✅ ~~virtualised lists, variable row heights, trees~~ ✅ `ui.virtual_list`, `ui.virtual_rows`, `ui.tree_row`; next: horizontal scroll, keyboard PageUp/Down, multi-select and drag-to-reparent.
 3. ~~Keyboard/shortcut routing~~ ✅ ~~menus, popups/context menus, tooltips, z-order~~ ✅ `Layer`, `popup`, `menu_button`, `context_menu`, `tooltip`; next: checkable/icon menu items, keyboard navigation within a menu, "safe triangle" submenu tracking.
 4. ~~Docking + tabs + splitters~~ ✅ Unity-style with OS-window tear-off; next: layout save/load, tab close/context menu, maximize pane.
@@ -1153,7 +1200,11 @@ lag, fling, easing) stay as frame-trace tests like
 
 ## Known scaffold limitations
 
-- Text fields are single-line; no wrapping, IME preedit, or undo yet. No complex shaping.
+- Text fields are single-line and have no undo. Multi-line *editing* is not there yet: `paragraph`
+  wraps read-only text, and `ImePreedit` shows a composition.
+- No complex shaping and no font fallback. The bundled Inter has no CJK, Arabic or Indic glyphs, so
+  those scripts render as blanks until a `FontRasterizer` that does both is plugged in — the
+  wrapping already breaks them correctly, there is simply nothing to draw.
 - Glyph atlas grows to 4096² when full (one re-rasterisation, once); past that it resets, with a
   one-frame flicker. Multi-page + LRU is still the real answer.
 - Layouts nesting deeper than 256 are dropped and counted (`FrameCost::too_deep`), because the three

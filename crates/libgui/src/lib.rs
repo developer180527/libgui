@@ -35,6 +35,7 @@ mod theme_watch;
 mod ui;
 mod text_edit;
 mod widgets;
+mod wrap;
 
 pub use backend::{Backend, Globals, INSTANCE_STRIDE, VERTICES_PER_INSTANCE};
 pub use dock::{DockConfig, FloatingMode, DockNode, DockState, DropKind, DropTarget, Side, Surface, SurfaceId, TabViewer};

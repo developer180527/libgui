@@ -86,6 +86,18 @@ pub fn push_window_event(ui: &mut Ui, event: &WindowEvent, scale_factor: f64) ->
             }
         }
         WindowEvent::Ime(Ime::Commit(text)) => ui.push(InputEvent::Text(text.clone())),
+        // What the IME is still composing. winit gives the cursor as a byte
+        // range; libgui wants one offset, and the end of a selection is where
+        // a caret belongs.
+        WindowEvent::Ime(Ime::Preedit(text, cursor)) => {
+            let at = cursor.map_or(text.len(), |(_, end)| end.min(text.len()));
+            ui.push(InputEvent::ImePreedit { text: text.clone(), cursor: at });
+        }
+        // Enabled and Disabled bracket a composition; either way nothing is
+        // being composed at that moment.
+        WindowEvent::Ime(Ime::Enabled) | WindowEvent::Ime(Ime::Disabled) => {
+            ui.push(InputEvent::ImePreedit { text: String::new(), cursor: 0 });
+        }
         WindowEvent::Focused(false) => ui.push(InputEvent::FocusLost),
         _ => return false,
     }

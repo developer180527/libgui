@@ -144,6 +144,24 @@ pub struct Fonts {
     shaped_runs: std::cell::Cell<u32>,
     /// Strings drawn since the counter was last taken.
     text_draws: u32,
+    /// (font, px, width in whole px) -> text -> the lines it breaks into.
+    /// Wrapping is asked for twice a frame — once to measure, once to draw —
+    /// and the answer only changes when the width does.
+    wraps: RefCell<WrapCache>,
+    /// Scratch for the break opportunities of the string being wrapped.
+    breaks: RefCell<Vec<crate::wrap::Opportunity>>,
+}
+
+/// (font, px, width in whole px) -> text -> its lines.
+type WrapCache = FxMap<(u16, u32, u32), FxMap<String, Rc<[Line]>>>;
+
+/// One line of wrapped text: the byte range to draw, and how wide it is.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Line {
+    pub start: u32,
+    pub end: u32,
+    /// Raster px.
+    pub width: f32,
 }
 
 impl Fonts {
@@ -176,6 +194,8 @@ impl Fonts {
             rasterized: 0,
             shaped_runs: std::cell::Cell::new(0),
             text_draws: 0,
+            wraps: RefCell::new(FxMap::default()),
+            breaks: RefCell::new(Vec::new()),
         }
     }
 
@@ -314,6 +334,134 @@ impl Fonts {
         out
     }
 
+    /// Break `text` into lines no wider than `max` logical px.
+    ///
+    /// Greedy: each line takes as much as fits. That is what every UI toolkit
+    /// does — the alternative, minimising raggedness across the paragraph, is
+    /// for typesetting, and it makes a line's contents depend on lines after
+    /// it, which is not something a caret wants.
+    pub(crate) fn wrap(&self, font: FontId, size: f32, text: &str, max: f32) -> Rc<[Line]> {
+        let px = self.px(size);
+        let k = px / size.max(0.01);
+        let max_px = (max * k).max(1.0);
+        let key = (font.0, px as u32, max_px as u32);
+        if let Some(l) = self.wraps.borrow().get(&key).and_then(|m| m.get(text)) {
+            return l.clone();
+        }
+        let run = self.run(font, px, text);
+        let mut ops = self.breaks.borrow_mut();
+        crate::wrap::opportunities(text, &mut ops);
+
+        let mut lines: Vec<Line> = Vec::new();
+        let mut start = 0usize;
+        let mut next_op = 0usize;
+        loop {
+            // A newline is mandatory: nothing after it may share this line,
+            // however much room is left.
+            let hard = ops[next_op..].iter().find(|o| o.at > start && text.as_bytes().get(o.trim) == Some(&b'\n'));
+            let limit = hard.map_or(text.len(), |o| o.trim);
+
+            let fits = width_between(&run, start, limit);
+            if fits <= max_px {
+                lines.push(Line { start: start as u32, end: limit as u32, width: fits });
+                match hard {
+                    Some(o) => start = o.at,
+                    None => break,
+                }
+            } else {
+                // Greedy: the furthest soft break that still fits. Widths grow
+                // with the offset, so the first that does not fit ends the
+                // search.
+                let mut best: Option<crate::wrap::Opportunity> = None;
+                for o in ops[next_op..].iter() {
+                    if o.at <= start {
+                        continue;
+                    }
+                    if o.trim > limit {
+                        break;
+                    }
+                    if width_between(&run, start, o.trim) > max_px {
+                        break;
+                    }
+                    best = Some(*o);
+                }
+                match best {
+                    Some(o) => {
+                        lines.push(Line {
+                            start: start as u32,
+                            end: o.trim as u32,
+                            width: width_between(&run, start, o.trim),
+                        });
+                        start = o.at;
+                    }
+                    // Nothing fits and nowhere to break: cut the word rather
+                    // than let it overflow.
+                    None => {
+                        let cut = cut_to_fit(&run, text, start, limit, max_px);
+                        lines.push(Line {
+                            start: start as u32,
+                            end: cut as u32,
+                            width: width_between(&run, start, cut),
+                        });
+                        start = cut;
+                    }
+                }
+            }
+            while next_op < ops.len() && ops[next_op].at <= start {
+                next_op += 1;
+            }
+            if start >= text.len() {
+                break;
+            }
+        }
+        if lines.is_empty() {
+            lines.push(Line { start: 0, end: 0, width: 0.0 });
+        }
+        let lines: Rc<[Line]> = Rc::from(lines.as_slice());
+        let mut cache = self.wraps.borrow_mut();
+        let m = cache.entry(key).or_default();
+        if m.len() >= MEASURE_CAP {
+            m.clear();
+        }
+        m.insert(text.to_string(), lines.clone());
+        lines
+    }
+
+    /// The wrapped lines as strings, for tests.
+    #[doc(hidden)]
+    pub fn wrap_lines_for_test(&self, font: FontId, size: f32, text: &str, max: f32) -> Vec<String> {
+        self.wrap(font, size, text, max).iter().map(|l| text[l.start as usize..l.end as usize].to_string()).collect()
+    }
+
+    /// Size of `text` wrapped to `max` logical px.
+    pub fn measure_wrapped(&self, font: FontId, size: f32, text: &str, max: f32) -> Vec2 {
+        let lines = self.wrap(font, size, text, max);
+        let px = self.px(size);
+        let k = size / px;
+        let widest = lines.iter().fold(0.0f32, |a, l| a.max(l.width));
+        let lh = self.line_height(font, size);
+        Vec2::new((widest * k).ceil(), lh * lines.len() as f32)
+    }
+
+    /// The narrowest `max` at which `text` wraps without cutting a word: the
+    /// width of its longest unbreakable run. A wrapping paragraph reports this
+    /// as its minimum, so a container can always be narrower than the text.
+    pub fn min_wrap_width(&self, font: FontId, size: f32, text: &str) -> f32 {
+        let px = self.px(size);
+        let k = size / px;
+        let run = self.run(font, px, text);
+        let mut ops = self.breaks.borrow_mut();
+        crate::wrap::opportunities(text, &mut ops);
+        let mut widest = 0.0f32;
+        let mut start = 0usize;
+        for o in ops.iter() {
+            widest = widest.max(width_between(&run, start, o.trim));
+            start = o.at;
+        }
+        widest = widest.max(width_between(&run, start, text.len()));
+        (widest * k).ceil()
+    }
+
     /// Height of one line of text in logical px.
     pub fn line_height(&self, font: FontId, size: f32) -> f32 {
         let px = self.px(size);
@@ -389,6 +537,37 @@ impl Fonts {
         g
     }
 
+    /// Draw `text` wrapped to `r`'s width, from its top-left down.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_wrapped(
+        &mut self,
+        dl: &mut DrawList,
+        font: FontId,
+        size: f32,
+        r: Rect,
+        color: Color,
+        align: crate::Align,
+        text: &str,
+    ) {
+        let lines = self.wrap(font, size, text, r.w);
+        let lh = self.line_height(font, size);
+        let px = self.px(size);
+        let k = size / px;
+        for (i, l) in lines.iter().enumerate() {
+            let slice = &text[l.start as usize..l.end as usize];
+            if slice.is_empty() {
+                continue;
+            }
+            let w = l.width * k;
+            let x = match align {
+                crate::Align::End => r.x + r.w - w,
+                crate::Align::Center => r.x + (r.w - w) * 0.5,
+                _ => r.x,
+            };
+            self.draw(dl, font, size, Vec2::new(x, r.y + lh * i as f32), color, slice);
+        }
+    }
+
     /// Draw one line of text with its top-left at `pos` (logical px). Glyphs
     /// are rasterised at physical resolution and pixel-snapped.
     pub fn draw(&mut self, dl: &mut DrawList, font: FontId, size: f32, pos: Vec2, color: Color, text: &str) {
@@ -430,6 +609,40 @@ impl Default for Fonts {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Width of `text[a..b]` in raster px, from an already-shaped run.
+fn width_between(run: &Run, a: usize, b: usize) -> f32 {
+    run.glyphs
+        .iter()
+        .filter(|g| (g.cluster as usize) >= a && (g.cluster as usize) < b)
+        .map(|g| g.advance)
+        .sum()
+}
+
+/// The furthest end offset in `start..limit` that still fits in `max`, and
+/// never `start` itself: a line holding nothing would not terminate.
+fn cut_to_fit(run: &Run, text: &str, start: usize, limit: usize, max: f32) -> usize {
+    let mut w = 0.0;
+    let mut end = start;
+    for g in run.glyphs.iter() {
+        let at = g.cluster as usize;
+        if at < start || at >= limit {
+            continue;
+        }
+        if w + g.advance > max && end > start {
+            return end;
+        }
+        w += g.advance;
+        // The glyph's cluster is where it *starts*, so the line ends after it.
+        end = text[at..limit].char_indices().nth(1).map_or(limit, |(i, _)| at + i);
+    }
+    // One glyph is wider than the whole line: take a single character, or the
+    // caller would ask again with the same `start` forever.
+    if end <= start {
+        return text[start..limit].char_indices().nth(1).map_or(limit, |(i, _)| start + i);
+    }
+    end
 }
 
 #[cfg(test)]

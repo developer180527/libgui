@@ -31,6 +31,8 @@ struct Finger {
 
 pub(crate) struct InputState {
     queue: Vec<InputEvent>,
+    /// What an input method is composing, until it commits or is abandoned.
+    preedit: Option<(String, usize)>,
     pos: Vec2,
     inside: bool,
     kind: PointerKind,
@@ -47,6 +49,7 @@ impl InputState {
     pub fn new() -> Self {
         Self {
             queue: Vec::new(),
+            preedit: None,
             pos: Vec2::ZERO,
             inside: false,
             kind: PointerKind::Mouse,
@@ -80,6 +83,11 @@ impl InputState {
         } else {
             out.events.push(UiEvent::Action(action));
         }
+    }
+
+    /// What an input method is composing, if anything.
+    pub fn preedit(&self) -> Option<(&str, usize)> {
+        self.preedit.as_ref().map(|(t, c)| (t.as_str(), *c))
     }
 
     /// Anything queued that a frame would react to.
@@ -174,7 +182,14 @@ impl InputState {
                 }
                 InputEvent::ModifiersChanged(m) => self.mods = m,
                 InputEvent::Action(action) => self.action(action, &mut out),
+                // What an input method is composing. It replaces whatever it
+                // was composing before, and an empty one abandons it.
+                InputEvent::ImePreedit { text, cursor } => {
+                    self.preedit = (!text.is_empty()).then_some((text, cursor));
+                }
                 InputEvent::Text(s) => {
+                    // A commit ends the composition it came from.
+                    self.preedit = None;
                     // Chords (Cmd+S, Ctrl+S) aren't text; AltGr, which
                     // Windows reports as Ctrl+Alt, still is.
                     if (self.mods.ctrl || self.mods.logo) && !self.mods.alt {
@@ -187,6 +202,8 @@ impl InputState {
                 }
                 InputEvent::Paste(s) => out.events.push(UiEvent::Paste(s)),
                 InputEvent::FocusLost => {
+                    // The window losing focus abandons any composition with it.
+                    self.preedit = None;
                     for b in &mut self.buttons {
                         b.release_after_frame = b.pressed;
                         b.down &= b.pressed;

@@ -507,6 +507,11 @@ pub struct Ui {
     dup_ids: FxSet<Id>,
     /// Nodes left out of the tree for nesting past [`crate::layout::MAX_DEPTH`].
     too_deep: u32,
+    /// Paragraphs built this frame: (node, text, size, alignment). A wrapping
+    /// paragraph's height depends on the width it is *given*, which layout
+    /// only knows after it has run, so these are re-measured between the two
+    /// passes. See `Ui::rewrap`.
+    pub(crate) wrapping: Vec<(u32, crate::FrameText, f32)>,
     cost: crate::testing::FrameCost,
     profile: crate::Profile,
     /// Subtree recordings, for [`Ui::cached`].
@@ -646,6 +651,7 @@ impl Ui {
             audit: false,
             dup_ids: FxSet::default(),
             too_deep: 0,
+            wrapping: Vec::new(),
             cost: crate::testing::FrameCost::default(),
             profile: crate::Profile::default(),
             cache: crate::subtree_cache::Cache::default(),
@@ -1023,6 +1029,12 @@ impl Ui {
     ///
     /// Queued input always wins: pushing an event makes this true whatever
     /// the last frame asked for.
+    /// What an input method is composing, shown inline at the focused field's
+    /// caret and not part of its value until the host commits it.
+    pub(crate) fn preedit(&self) -> Option<(&str, usize)> {
+        self.input_state.preedit()
+    }
+
     pub fn needs_frame(&self, elapsed: f32) -> bool {
         if self.input_state.has_pending() {
             return true;
@@ -1178,6 +1190,7 @@ impl Ui {
         self.sheet_done = false;
         self.rects_order.clear();
         self.too_deep = 0;
+        self.wrapping.clear();
         self.cached_seen.clear();
         self.dup_ids.clear();
         let _ = self.fonts.take_rasterized();
@@ -1206,6 +1219,14 @@ impl Ui {
         let measure_ms = t.ms();
         let t = crate::profile::Clock::start();
         layout::arrange(&mut self.nodes, &self.kids, 0, screen, &mut self.scratch);
+        // A paragraph's height follows from the width it was given, which is
+        // only known now. Where that changed the answer, the solve is worth
+        // running again — once. In the steady state widths do not move, so
+        // this costs a walk of the paragraphs and nothing else.
+        if self.rewrap() {
+            layout::fit(&mut self.nodes, &self.kids, 0);
+            layout::arrange(&mut self.nodes, &self.kids, 0, screen, &mut self.scratch);
+        }
         let place_ms = t.ms();
         // Floating nodes size themselves from their content, which `measure`
         // has just worked out; keep it for next frame's placement.
@@ -1887,6 +1908,26 @@ impl Ui {
         } else {
             self.cache_busy.remove(&id);
         }
+    }
+
+    /// Re-measure every paragraph against the width layout just gave it.
+    /// True when any of them changed height, so the solve has to run again.
+    fn rewrap(&mut self) -> bool {
+        let mut changed = false;
+        for &(node, text, size) in &self.wrapping {
+            let n = &self.nodes[node as usize];
+            let w = n.rect.w;
+            if w <= 0.0 {
+                continue;
+            }
+            let s = crate::PaintText::get(&text, self.strs.bytes());
+            let h = self.fonts.measure_wrapped(self.font, size, s, w).y;
+            if (self.nodes[node as usize].intrinsic.y - h).abs() > 0.01 {
+                self.nodes[node as usize].intrinsic.y = h;
+                changed = true;
+            }
+        }
+        changed
     }
 
     /// The pointer as far as `rect`'s appearance is concerned: where it is if

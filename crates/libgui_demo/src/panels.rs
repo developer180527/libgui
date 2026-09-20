@@ -690,6 +690,11 @@ impl Panels<'_> {
             ui.radio(name, &mut d.shading, i);
         }
         ui.space(4.0);
+        ui.section("Notes");
+        ui.paragraph(
+            "This paragraph wraps to whatever width the panel has. Drag the splitter and watch              the lines re-flow, and the controls below it move — the height follows from the              width, so the frame solves twice on the frame that changes.",
+        );
+        ui.space(4.0);
         ui.section("Bake");
         if ui.checkbox("Running", &mut d.baking).clicked && d.baking {
             d.bake = 0.0;
