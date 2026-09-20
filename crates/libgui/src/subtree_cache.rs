@@ -61,12 +61,22 @@ impl Span {
     }
 }
 
+/// The pointer, as far as a subtree's appearance is concerned: where it is if
+/// it is inside, and which buttons are down. `None` when it is outside, where
+/// its exact position cannot change anything the subtree draws.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Pointer(pub Option<(Vec2, [bool; 5])>);
+
 struct Entry {
     deps: u64,
-    /// Where it was when recorded. A hit needs the same rect, to the bit.
+    /// What the pointer was doing when this was recorded. A pointer *resting*
+    /// inside is not a reason to rebuild — the hovered widget is the same one
+    /// — and refusing to replay under a still pointer is refusing exactly when
+    /// a user is reading a panel.
+    pointer: Pointer,
+    /// Where it was when recorded, so a replay knows how far it has moved.
     rect: Rect,
-    /// The clip it was recorded under, for the same reason.
-    clip: Rect,
+
     /// Its fitted size, so layout reserves the same space without the
     /// children that decided it.
     min: Vec2,
@@ -83,7 +93,7 @@ struct Entry {
 #[derive(Default)]
 pub(crate) struct Cache {
     entries: FxMap<Id, Entry>,
-    instances: Vec<(TextureId, Instance)>,
+    instances: Vec<(TextureId, Instance, Rect)>,
     hits: Vec<(HitList, Id, Rect)>,
     rects: Vec<(Id, Rect)>,
     ids: Vec<Id>,
@@ -94,7 +104,7 @@ pub(crate) struct Cache {
     /// Id spans from the build half, waiting for paint to supply the pixels.
     pending_ids: FxMap<Id, Span>,
     /// `deps` from the build half, read again when paint closes the entry.
-    deps: FxMap<Id, u64>,
+    deps: FxMap<Id, (u64, Pointer)>,
     pub(crate) hits_this_frame: u32,
     pub(crate) misses_this_frame: u32,
 }
@@ -109,13 +119,32 @@ impl Cache {
         self.entries.get(&id).map(|e| e.min)
     }
 
-    /// Whether `id` can be replayed into `rect` under `clip`.
-    #[allow(clippy::too_many_arguments)]
-    pub fn can_replay(&self, id: Id, deps: u64, rect: Rect, clip: Rect) -> bool {
-        match self.entries.get(&id) {
-            Some(e) => e.deps == deps && e.rect == rect && e.clip == clip,
-            None => false,
+    /// Where the recording was made, so paint can work out how far the replay
+    /// has moved. Build time cannot: it only has last frame's rect, and the
+    /// whole point is that this frame's may differ.
+    pub fn entry_rect(&self, id: Id) -> Option<Rect> {
+        self.entries.get(&id).map(|e| e.rect)
+    }
+
+    /// Whether `id` can be replayed, and the offset it would land at.
+    ///
+    /// Size is never in question: a replayed node is `Fixed` at the size it
+    /// recorded, so only its position can differ, and a difference there is
+    /// something the replay can carry.
+    pub fn can_replay(&self, id: Id, deps: u64, rect: Rect, pointer: Pointer) -> Option<()> {
+        let e = self.entries.get(&id)?;
+        if e.deps != deps || e.pointer != pointer {
+            return None;
         }
+        // A subtree that moved under a pointer inside it has a different
+        // widget under that pointer now, so its hover would be wrong. Where it
+        // moved *to* is paint's to work out; all that is decided here is
+        // whether a replay is allowed at all.
+        let moved = rect.x != e.rect.x || rect.y != e.rect.y;
+        if moved && pointer.0.is_some() {
+            return None;
+        }
+        Some(())
     }
 
     /// Open the *build* half of a recording: from here until `close_ids`,
@@ -134,11 +163,16 @@ impl Cache {
 
     /// What the build half hashed `deps` to.
     pub fn deps_of(&self, id: Id) -> u64 {
-        self.deps.get(&id).copied().unwrap_or(0)
+        self.deps.get(&id).map_or(0, |&(d, _)| d)
     }
 
-    pub fn set_deps(&mut self, id: Id, deps: u64) {
-        self.deps.insert(id, deps);
+    pub fn set_deps(&mut self, id: Id, deps: u64, pointer: Pointer) {
+        self.deps.insert(id, (deps, pointer));
+    }
+
+    /// What the pointer was doing when the build half ran.
+    pub fn pointer_of(&self, id: Id) -> Pointer {
+        self.deps.get(&id).map_or(Pointer(None), |&(_, p)| p)
     }
 
     /// Open the *paint* half: the arena marks to close it with.
@@ -149,12 +183,21 @@ impl Cache {
     /// Close the paint half, and the entry with it. Without a build half the
     /// recording is incomplete and is dropped rather than half-kept.
     #[allow(clippy::too_many_arguments)]
-    pub fn close_draw(&mut self, id: Id, deps: u64, rect: Rect, clip: Rect, min: Vec2, marks: (u32, u32, u32)) {
+    #[allow(clippy::too_many_arguments)]
+    pub fn close_draw(
+        &mut self,
+        id: Id,
+        deps: u64,
+        rect: Rect,
+        pointer: Pointer,
+        min: Vec2,
+        marks: (u32, u32, u32),
+    ) {
         let Some(ids) = self.pending_ids.remove(&id) else { return };
         let e = Entry {
             deps,
+            pointer,
             rect,
-            clip,
             min,
             instances: Span { start: marks.0, end: self.instances.len() as u32 },
             hits: Span { start: marks.1, end: self.hits.len() as u32 },
@@ -166,8 +209,11 @@ impl Cache {
     }
 
     /// Record one instance the subtree emitted.
-    pub fn record_instance(&mut self, texture: TextureId, inst: Instance) {
-        self.instances.push((texture, inst));
+    /// `inner` is the clipping the subtree imposed on itself, which moves with
+    /// it; whatever clipped it from outside does not, and is re-applied fresh
+    /// on every replay.
+    pub fn record_instance(&mut self, texture: TextureId, inst: Instance, inner: Rect) {
+        self.instances.push((texture, inst, inner));
     }
 
     pub fn record_hit(&mut self, list: HitList, id: Id, rect: Rect) {
@@ -178,7 +224,7 @@ impl Cache {
         self.rects.push((id, rect));
     }
 
-    pub fn instances_of(&self, id: Id) -> &[(TextureId, Instance)] {
+    pub fn instances_of(&self, id: Id) -> &[(TextureId, Instance, Rect)] {
         match self.entries.get(&id) {
             Some(e) => &self.instances[e.instances.range()],
             None => &[],

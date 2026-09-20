@@ -1716,13 +1716,23 @@ impl Ui {
     /// });
     /// ```
     ///
-    /// Everything else is checked. A replay happens only when the subtree
-    /// lands at exactly the rect and clip it was recorded at, the pointer is
-    /// outside it, keyboard focus is outside it, nothing inside is still
-    /// animating, and the theme has not changed — each of those being a way
-    /// the pixels could differ that `deps` would not mention. A miss simply
-    /// builds, so a subtree that never qualifies is correct and costs one
-    /// hash.
+    /// Everything else is checked. A replay happens only when the pointer is
+    /// doing the same thing over the subtree as when it was recorded, keyboard
+    /// focus is outside it, nothing inside is still animating, and the theme
+    /// has not changed — each of those being a way the pixels could differ
+    /// that `deps` would not mention. A miss simply builds, so a subtree that
+    /// never qualifies is correct and costs one hash.
+    ///
+    /// A pointer *resting* inside is not a reason to rebuild: the widget under
+    /// it is the same widget, so the pixels are the same pixels. That matters,
+    /// because a pointer resting in a panel is what someone reading one looks
+    /// like. Moving it, or pressing a button, does rebuild.
+    ///
+    /// A subtree that merely **moved** keeps its recording: the instances are
+    /// translated and clipped afresh against whatever encloses them now, since
+    /// the ancestors did not move just because it did. The exception is a
+    /// pointer inside it, which is then over a different widget than the one
+    /// recorded.
     ///
     /// Widgets inside a replayed subtree do not run, so they cannot report
     /// anything: interaction still *works* — the hit rects are replayed too,
@@ -1743,13 +1753,12 @@ impl Ui {
         }
 
         let rect = self.rect_of(id).unwrap_or_default();
-        let inside = |p: Vec2| rect.contains(p);
-        let pointer_in = self.input.mouse_inside && inside(self.input.mouse_pos);
+        let pointer = self.pointer_over(rect);
         let focus_in = self.focused.is_some_and(|f| self.rects.get(&f).is_some_and(|r| rect.contains(Vec2::new(r.x, r.y))));
         let quiet = !self.cache_busy.contains(&id);
-        let clip = self.clip_here();
 
-        if quiet && !pointer_in && !focus_in && self.cache.can_replay(id, deps, rect, clip) {
+        let replay = if quiet && !focus_in { self.cache.can_replay(id, deps, rect, pointer) } else { None };
+        if replay.is_some() {
             let min = self.cache.entry_min(id).unwrap_or_default();
             self.cache.mark_seen(id, &mut self.seen);
             self.cache.hits_this_frame += 1;
@@ -1770,7 +1779,7 @@ impl Ui {
         body(self);
         self.close();
         self.cache.close_ids(id, start);
-        self.cache.set_deps(id, deps);
+        self.cache.set_deps(id, deps, pointer);
         // A subtree that is still animating cannot be replayed next frame: its
         // pixels are going to move on their own.
         if self.animating && !animating_before {
@@ -1780,18 +1789,11 @@ impl Ui {
         }
     }
 
-    /// The clip a subtree built here would be painted under. One frame late,
-    /// like every other geometry read, and compared rather than used.
-    fn clip_here(&self) -> Rect {
-        let mut r = Rect::new(0.0, 0.0, self.input.screen_size.x, self.input.screen_size.y);
-        for &(i, _) in &self.stack {
-            if self.nodes[i].clip {
-                if let Some(c) = self.rects.get(&self.nodes[i].id) {
-                    r = r.intersect(c).unwrap_or_default();
-                }
-            }
-        }
-        r
+    /// The pointer as far as `rect`'s appearance is concerned: where it is if
+    /// it is inside, and nothing at all if it is not.
+    fn pointer_over(&self, rect: Rect) -> crate::subtree_cache::Pointer {
+        let inside = self.input.mouse_inside && rect.contains(self.input.mouse_pos);
+        crate::subtree_cache::Pointer(inside.then_some((self.input.mouse_pos, self.input.buttons_down)))
     }
 
     /// A container whose children are laid out shifted by `offset`, and
@@ -2364,11 +2366,33 @@ fn paint(
     let rect = nodes[i].rect;
     let id = nodes[i].id;
     if nodes[i].cached {
-        for &(tex, inst) in cache.instances_of(id) {
+        // Only now is the rect this frame's, so only now can the offset from
+        // the recording be known.
+        let was = cache.entry_rect(id).unwrap_or(rect);
+        let d = Vec2::new(rect.x - was.x, rect.y - was.y);
+        // Whatever clips this subtree from outside is re-read now rather than
+        // replayed: the ancestors did not move just because the subtree did.
+        let outer = p.draw.clip();
+        for &(tex, inst, inner) in cache.instances_of(id) {
+            let mut inst = inst;
+            inst.rect[0] += d.x;
+            inst.rect[1] += d.y;
+            let Some(c) = inner.translate(d.x, d.y).intersect(&outer) else { continue };
+            // Culled again here rather than trusted from the recording, so a
+            // replay's draw list is the same size as the build's would be.
+            // The margin covers a shadow's blur and a border's width, the way
+            // `DrawList::push` bounds a shape.
+            let margin = inst.params[1] + inst.params[2] + 1.0;
+            let bounds = Rect::new(inst.rect[0], inst.rect[1], inst.rect[2], inst.rect[3]).expand(margin);
+            if c.intersect(&bounds).is_none() {
+                continue;
+            }
+            inst.clip = [c.x, c.y, c.right(), c.bottom()];
             p.draw.replay(tex, inst);
         }
         for &(list, hid, r) in cache.hits_of(id) {
             use crate::subtree_cache::HitList::*;
+            let Some(r) = r.translate(d.x, d.y).intersect(&outer) else { continue };
             match list {
                 Normal => sink.hits.push((hid, r)),
                 Top => sink.top_hits.push((hid, r)),
@@ -2377,12 +2401,13 @@ fn paint(
             }
         }
         for &(rid, r) in cache.rects_of(id) {
-            sink.rects.insert(rid, r);
+            sink.rects.insert(rid, r.translate(d.x, d.y));
         }
         return;
     }
     let rec = nodes[i].recording.then(|| {
         sink.recording += 1;
+        p.draw.open_barrier();
         (p.draw.instance_count(), sink.mark(), cache.open_draw())
     });
     sink.rects.insert(id, rect);
@@ -2479,8 +2504,38 @@ fn paint(
     if let Some((first, marks, draw_marks)) = rec {
         // Everything the subtree produced is now a contiguous run in each of
         // the sinks, because paint is depth-first and it owned all of it.
-        for (tex, inst) in p.draw.since(first) {
-            cache.record_instance(tex, inst);
+        // Both walk instance indices in order, so one cursor pairs them —
+        // matched on the index rather than assumed to line up, because an
+        // instance pushed outside a barrier has no entry at all.
+        // Two streams in draw order — the instances that made it into this
+        // frame's list, and the ones culled aside — merged back by the index
+        // each has or would have had.
+        let inner = p.draw.inner_log_since(first).to_vec();
+        let culled = p.draw.culled_since(first).to_vec();
+        let live: Vec<(u32, crate::TextureId, crate::Instance)> = p.draw.since(first).collect();
+        let (mut li, mut ci, mut ii) = (0usize, 0usize, 0usize);
+        while li < live.len() || ci < culled.len() {
+            let take_culled = match (live.get(li), culled.get(ci)) {
+                (Some(&(l, ..)), Some(&(c, ..))) => c <= l,
+                (None, Some(_)) => true,
+                _ => false,
+            };
+            if take_culled {
+                let (_, tex, inst, ic) = culled[ci];
+                ci += 1;
+                cache.record_instance(tex, inst, ic);
+            } else {
+                let (idx, tex, inst) = live[li];
+                li += 1;
+                while ii < inner.len() && inner[ii].0 < idx {
+                    ii += 1;
+                }
+                let ic = match inner.get(ii) {
+                    Some(&(i, c)) if i == idx => c,
+                    _ => Rect::UNBOUNDED,
+                };
+                cache.record_instance(tex, inst, ic);
+            }
         }
         use crate::subtree_cache::HitList::*;
         for &(hid, r) in &sink.hits[marks.0 as usize..] {
@@ -2499,8 +2554,10 @@ fn paint(
             cache.record_rect(rid, r);
         }
         sink.recording -= 1;
+        p.draw.close_barrier();
         let deps = cache.deps_of(id);
-        cache.close_draw(id, deps, rect, p.draw.clip(), nodes[i].min, draw_marks);
+        let pointer = cache.pointer_of(id);
+        cache.close_draw(id, deps, rect, pointer, nodes[i].min, draw_marks);
     }
 }
 

@@ -52,6 +52,9 @@ pub struct Rect {
 }
 
 impl Rect {
+    /// Bigger than any window, for "no clipping from here".
+    pub const UNBOUNDED: Rect = Rect::new(-1.0e9, -1.0e9, 2.0e9, 2.0e9);
+
     pub const fn new(x: f32, y: f32, w: f32, h: f32) -> Self {
         Self { x, y, w, h }
     }

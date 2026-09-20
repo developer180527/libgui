@@ -52,6 +52,18 @@ pub struct DrawList {
     /// moving, so its text tracks the sub-pixel offset instead of shearing
     /// against the row boxes it sits in.
     snap_text: Vec<bool>,
+    /// The clip stack again, but reset to unbounded at each recording
+    /// boundary, so a `Ui::cached` subtree can tell the clipping it imposed on
+    /// itself from the clipping its ancestors imposed on it. Only the first
+    /// moves when the subtree moves, which is the whole difficulty of
+    /// replaying one somewhere else.
+    inner_clips: Vec<Rect>,
+    /// (instance, its inner clip), while a recording is open.
+    inner_log: Vec<(u32, Rect)>,
+    barrier: u32,
+    /// Instances culled while a recording was open: the index they would have
+    /// had, and what they were.
+    culled_log: Vec<(u32, TextureId, Instance, Rect)>,
 }
 
 impl DrawList {
@@ -62,6 +74,39 @@ impl DrawList {
         self.clips.push(screen);
         self.xforms.clear();
         self.snap_text.clear();
+        self.inner_clips.clear();
+        self.inner_log.clear();
+        self.culled_log.clear();
+        self.barrier = 0;
+    }
+
+    /// The culled instances recorded from `first` on, in draw order.
+    pub(crate) fn culled_since(&self, first: u32) -> &[(u32, TextureId, Instance, Rect)] {
+        let at = self.culled_log.partition_point(|&(i, ..)| i < first);
+        &self.culled_log[at..]
+    }
+
+    /// Clipping imposed from inside the innermost recording boundary.
+    pub(crate) fn inner_clip(&self) -> Rect {
+        *self.inner_clips.last().unwrap_or(&Rect::UNBOUNDED)
+    }
+
+    /// Start a recording: from here down, clipping is attributed to the
+    /// subtree rather than to whatever encloses it.
+    pub(crate) fn open_barrier(&mut self) {
+        self.barrier += 1;
+        self.inner_clips.push(Rect::UNBOUNDED);
+    }
+
+    pub(crate) fn close_barrier(&mut self) {
+        self.barrier -= 1;
+        self.inner_clips.pop();
+    }
+
+    /// The inner clips logged for instances from `first` on, in index order.
+    pub(crate) fn inner_log_since(&self, first: u32) -> &[(u32, Rect)] {
+        let at = self.inner_log.partition_point(|&(i, _)| i < first);
+        &self.inner_log[at..]
     }
 
     /// Whether text should snap its baseline to the physical pixel grid here.
@@ -108,11 +153,17 @@ impl DrawList {
         let r = self.xform().rect(r);
         let c = self.clip().intersect(&r).unwrap_or_default();
         self.clips.push(c);
+        if self.barrier > 0 {
+            self.inner_clips.push(self.inner_clip().intersect(&r).unwrap_or_default());
+        }
     }
 
     pub fn pop_clip(&mut self) {
         if self.clips.len() > 1 {
             self.clips.pop();
+            if self.barrier > 0 {
+                self.inner_clips.pop();
+            }
         }
     }
 
@@ -128,13 +179,14 @@ impl DrawList {
         }
     }
 
-    /// The instances emitted since `from`, with the texture each went to.
-    pub(crate) fn since(&self, from: u32) -> impl Iterator<Item = (TextureId, Instance)> + '_ {
+    /// The instances emitted since `from`, each with its index and the texture
+    /// it went to.
+    pub(crate) fn since(&self, from: u32) -> impl Iterator<Item = (u32, TextureId, Instance)> + '_ {
         let from = from as usize;
         self.batches.iter().flat_map(move |b| {
             let s = (b.range.start as usize).max(from);
             let e = b.range.end as usize;
-            (s..e).map(move |i| (b.texture, self.instances[i]))
+            (s..e).map(move |i| (i as u32, b.texture, self.instances[i]))
         })
     }
 
@@ -145,11 +197,25 @@ impl DrawList {
     fn push(&mut self, texture: TextureId, bounds: Rect, mut inst: Instance) {
         let clip = self.clip();
         if clip.intersect(&bounds).is_none() {
-            return; // culled
+            // Culling is a property of where the content *is*, so a recording
+            // that simply dropped these would only be true at the place it was
+            // made, and a subtree that moved would show holes at the edge it
+            // slid away from. Inside a recording they are kept aside instead:
+            // out of this frame's draw list, into the recording, and culled
+            // again — against the clip that is there then — on every replay.
+            if self.barrier > 0 {
+                let at = self.instances.len() as u32;
+                inst.clip = [clip.x, clip.y, clip.right(), clip.bottom()];
+                self.culled_log.push((at, texture, inst, self.inner_clip()));
+            }
+            return;
         }
         inst.clip = [clip.x, clip.y, clip.right(), clip.bottom()];
         let idx = self.instances.len() as u32;
         self.instances.push(inst);
+        if self.barrier > 0 {
+            self.inner_log.push((idx, self.inner_clip()));
+        }
         match self.batches.last_mut() {
             Some(b) if b.texture == texture => b.range.end = idx + 1,
             _ => self.batches.push(Batch { texture, range: idx..idx + 1 }),

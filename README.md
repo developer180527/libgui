@@ -973,7 +973,8 @@ Measured, with a live label forcing a frame every time:
 | rows | uncached | cached | |
 |---|---|---|---|
 | 200 | 0.197 ms | **0.029 ms** | 6.8× |
-| 800 | 0.487 ms | **0.044 ms** | 11× |
+| 800 | 0.506 ms | **0.064 ms** | 7.9× |
+| 800, pointer resting inside | 0.427 ms | **0.062 ms** | 6.9× |
 
 Same instance count either way — the pixels are identical, and `tests/cache.rs`
 proves it the only way worth trusting: it runs a second `Ui` that never caches,
@@ -981,12 +982,29 @@ drives both with the same events, and compares the instance **bytes** every
 frame.
 
 `deps` is the one thing the library cannot check for you, so get it right — a
-length alone will miss a reorder. Everything else *is* checked, and a replay
-happens only when the subtree lands at exactly the rect and clip it was recorded
-at, the pointer is outside it, keyboard focus is outside it, nothing inside is
-still animating, and the theme has not changed. Each of those is a way the
-pixels could differ that `deps` would not mention. A miss simply builds, so a
-subtree that never qualifies is correct and costs one hash.
+length alone will miss a reorder. Everything else *is* checked: a replay happens
+only when the pointer is doing the same thing over the subtree as when it was
+recorded, keyboard focus is outside it, nothing inside is still animating, and
+the theme has not changed. A miss simply builds, so a subtree that never
+qualifies is correct and costs one hash.
+
+Two things make the difference between a cache that helps and one that only
+helps in demos:
+
+- **A pointer resting inside is not a reason to rebuild.** The widget under it
+  is the same widget, so the pixels are the same pixels — and a pointer resting
+  in a panel is what someone *reading* one looks like. On an 800-row panel that
+  turns 0.427 ms into 0.062 ms, a case that previously never cached at all.
+  Moving the pointer, or pressing a button, does rebuild.
+- **A subtree that merely moved keeps its recording.** Its instances are
+  translated and clipped afresh against whatever encloses them now, because the
+  ancestors did not move just because it did. That needed the clip a subtree
+  imposes on *itself* to be tracked separately from the clip imposed *on* it,
+  and it needed recordings to stop losing instances to culling — a culled
+  recording is only true where it was made, and a subtree sliding under a clip
+  would show holes at the edge it left. Instances culled inside a recording are
+  now kept aside and culled again, against the clip that is there, on every
+  replay: the draw list stays exactly the size a build would have produced.
 
 Widgets inside a replayed subtree do not run, so they cannot report anything.
 Interaction still *works* — hit rects are replayed too, and the pointer arriving
@@ -1061,9 +1079,10 @@ lag, fling, easing) stay as frame-trace tests like
 10. ~~**Perf**: a "sleep when idle" mode instead of redrawing continuously~~ ✅
    `repaint_after` for hosts that draw only the UI, `Ui::needs_frame` +
    `Backend::render_batches` for hosts that redraw anyway, `ui.cached` for a
-   *partly* changed UI, and `--features profile` for knowing which of those to
-   reach for; next: translating a replay so a subtree that merely moved still
-   hits, and persistent GPU buffers.
+   *partly* changed UI (including one that merely moved, or has a pointer
+   resting in it), and `--features profile` for knowing which of those to reach
+   for; next: persistent GPU buffers, and a replay that survives its subtree
+   being resized rather than only moved.
 
 ## Known scaffold limitations
 
