@@ -270,6 +270,10 @@ pub struct Surface<T> {
     has_frame: bool,
     root_rect: Rect,
     leaves: Vec<LeafGeom>,
+    /// Frames left before `leaves` describes this tree again. A change takes
+    /// two: one for `show` to rebuild the geometry, and one more because it
+    /// reads rects from the previous layout.
+    stale_geom: u8,
 }
 
 impl<T> Surface<T> {
@@ -287,6 +291,7 @@ impl<T> Surface<T> {
             has_frame: false,
             root_rect: Rect::default(),
             leaves: Vec::new(),
+            stale_geom: 0,
         }
     }
 
@@ -561,7 +566,18 @@ impl<T> DockState<T> {
         }
 
         if let Phase::Floating { surface, grab } = d.phase {
-            let target = self.find_target(self.pointer, surface);
+            let mut target = self.find_target(self.pointer, surface);
+            // Tearing a tab out changes the tree, but `leaves` still describes
+            // the layout from before it did, and is only rebuilt by the next
+            // `show`. For that one frame a hit can land on a leaf that no
+            // longer exists, or miss entirely — and a miss would unhide the
+            // floating window, which reads as the drop preview flickering and
+            // costs a host an OS window it is about to throw away. Stale
+            // geometry cannot say "nothing here"; it can only fail to answer,
+            // so the previous answer stands.
+            if target.is_none() && self.surfaces.iter().any(|s| s.stale_geom > 0) {
+                target = d.target;
+            }
             let hide = target.is_some() && cfg.hide_window_over_target && surface != d.source;
             let pointer = self.pointer;
             let main = (self.surfaces[0].origin, self.surfaces[0].scale);
@@ -620,6 +636,7 @@ impl<T> DockState<T> {
             return;
         };
         source.root = source.root.take().and_then(prune);
+        source.stale_geom = 2;
 
         let sid = SurfaceId(self.next());
         let leaf = self.next();
@@ -834,6 +851,7 @@ impl<T> DockState<T> {
         s.root = root;
         s.root_rect = ui.rect_of(root_id).unwrap_or_default();
         s.leaves = geoms;
+        s.stale_geom = s.stale_geom.saturating_sub(1);
 
         for a in actions {
             match a {

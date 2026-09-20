@@ -351,7 +351,12 @@ impl App {
             .dock
             .surfaces()
             .iter()
-            .filter(|s| os_windows && !self.wins.values().any(|w| w.dock_id == s.id))
+            // `s.visible`: a tab moving between panels tears off into a hidden
+            // floating surface, and building a window, `Ui` and renderer for one
+            // that is never shown only puts its teardown between the drop and
+            // the frame that shows the result. One dragged out to the desktop
+            // becomes visible, and gets its window then.
+            .filter(|s| os_windows && s.visible && !self.wins.values().any(|w| w.dock_id == s.id))
             .map(|s| (s.id, s.first_tab().map_or("libgui", |t| t.title()).to_string(), s.window_size, s.window_pos))
             .collect();
         for (sid, title, size, pos) in missing {

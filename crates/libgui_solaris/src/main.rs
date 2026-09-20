@@ -157,14 +157,26 @@ impl Host {
         let alive: Vec<SurfaceId> = self.app.dock.surfaces().iter().map(|s| s.id).collect();
         self.wins.retain(|_, w| alive.contains(&w.dock_id));
 
-        // New floating surfaces. Draw each one immediately, so a torn-off panel
-        // appears with its content rather than as an empty frame.
+        // New floating surfaces — but only once one is actually visible.
+        //
+        // A tab dragged from one panel to another tears off into a floating
+        // surface the moment it leaves its tab bar, and the dock hides that
+        // surface while the pointer is over a drop target. Creating its window
+        // eagerly means building an OS window, a `Ui` with its own font atlas
+        // and a renderer with its own pipelines, hiding it before it is ever
+        // drawn, and tearing it all down again on the drop — and that teardown
+        // lands between the drop and the frame that shows its result, which is
+        // felt as the tab taking its time to appear. A panel dragged out to the
+        // desktop becomes visible, and gets its window then.
+        //
+        // Each is drawn immediately on creation, so it appears with its content
+        // rather than as an empty frame.
         let missing: Vec<(SurfaceId, String, Vec2, Option<Vec2>)> = self
             .app
             .dock
             .surfaces()
             .iter()
-            .filter(|s| !self.wins.values().any(|w| w.dock_id == s.id))
+            .filter(|s| s.visible && !self.wins.values().any(|w| w.dock_id == s.id))
             .map(|s| {
                 (s.id, s.first_tab().map_or("libgui", |t| t.title()).to_string(), s.window_size, s.window_pos)
             })
