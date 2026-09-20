@@ -527,7 +527,7 @@ impl Ui {
         let shown = self.frame_text(shown);
         let resp = self.interact_focusable(id, FocusKind::Control);
         let open = self.popup_open(popup_id);
-        if resp.clicked {
+        if resp.opened() {
             if open {
                 self.close_popups();
             } else {
@@ -709,7 +709,7 @@ impl Ui {
         let anchor = self.xform().rect(resp.rect);
         if sliding && !open {
             self.open_popup(menu_id, anchor);
-        } else if resp.clicked {
+        } else if resp.opened() {
             if open {
                 self.close_popups();
             } else {

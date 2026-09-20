@@ -42,6 +42,21 @@ pub struct Response {
     pub pan2: Vec2,
 }
 
+
+impl Response {
+    /// True on the frame a menu-like widget should open: the press itself, or
+    /// a keyboard activation.
+    ///
+    /// Menus open on press, not on click. Waiting for the release makes the
+    /// menu arrive a beat after the hand, which reads as the whole UI being
+    /// slow even when the frame behind it costs a fraction of a millisecond.
+    /// A keyboard activation sets `clicked` without `active` — there was no
+    /// press to start it — so it is picked up here too.
+    pub fn opened(&self) -> bool {
+        self.pressed || (self.clicked && !self.active)
+    }
+}
+
 /// Visual style for a container.
 #[derive(Clone, Copy, Debug)]
 pub struct Frame {
@@ -834,7 +849,18 @@ impl Ui {
         // positions it, so the content size comes from last frame's measure.
         // On the first frame it opens at `min_width` and settles on the next,
         // the same one-frame rule as `Response::rect`.
-        let fitted = self.layer_min.get(&id).copied().unwrap_or(Vec2::new(min_width, 0.0));
+        let fitted = match self.layer_min.get(&id).copied() {
+            Some(v) => v,
+            None => {
+                // First frame open: the content has not been measured yet, so
+                // this frame is provisional. Ask for another one — otherwise a
+                // host that draws only when `needs_frame` says to would leave
+                // the popup pinned at zero height until unrelated input
+                // happened to wake it.
+                self.animating = true;
+                Vec2::new(min_width, 0.0)
+            }
+        };
         let rect = self.place_popup(anchor, Vec2::new(fitted.x.max(min_width), fitted.y));
         let s = self.theme.menu;
         let (pad, gap) = (s.padding, s.gap);
@@ -2018,7 +2044,14 @@ impl Ui {
         frame: Frame,
         body: impl FnOnce(&mut Self) -> R,
     ) -> (Rect, R) {
-        let fitted = self.layer_min.get(&id).copied().unwrap_or(Vec2::ZERO);
+        let fitted = match self.layer_min.get(&id).copied() {
+            Some(v) => v,
+            None => {
+                // Provisional, as in `popup`: measured next frame, so ask for one.
+                self.animating = true;
+                Vec2::ZERO
+            }
+        };
         let rect = place(fitted);
         let layout = Layout::column().width(Size::Fit).height(Size::Fit);
         (rect, self.layer_with(id, z, rect, layout, frame, body))
