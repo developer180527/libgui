@@ -23,6 +23,10 @@
 //! needs all of:
 //!
 //! - the app's `deps` hash unchanged;
+//! - the same environment: DPI scale, canvas zoom and the glyph atlas's
+//!   packing, none of which the app passes in `deps` and each of which
+//!   rewrites the very numbers a recording holds — an instance's coordinates
+//!   are window pixels and a glyph's are atlas texels;
 //! - the subtree landing at exactly the rect it was recorded at — no
 //!   translation, because an instance carries its clip in window coordinates
 //!   and a moved subtree's clip is not the one it recorded;
@@ -38,7 +42,7 @@
 use crate::draw::Instance;
 use crate::hash::{FxMap, FxSet};
 use crate::math::{Rect, Vec2};
-use crate::{Id, TextureId};
+use crate::{Id, TextureId, Transform};
 
 /// Which hit list a recorded rect belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,6 +51,14 @@ pub(crate) enum HitList {
     Top,
     Scroll,
     Drop,
+}
+
+/// What the build half of a recording saw, kept until paint closes it.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Pending {
+    pub deps: u64,
+    pub pointer: Pointer,
+    pub env: Env,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -64,11 +76,40 @@ impl Span {
 /// The pointer, as far as a subtree's appearance is concerned: where it is if
 /// it is inside, and which buttons are down. `None` when it is outside, where
 /// its exact position cannot change anything the subtree draws.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct Pointer(pub Option<(Vec2, [bool; 5])>);
+
+/// Everything outside the app's `deps` that a recording's numbers depend on.
+///
+/// A recording holds finished instances: positions in window pixels, glyph
+/// uvs in atlas texels, colours resolved from the theme. Change any of the
+/// below and those numbers mean something different, so the recording is not
+/// a recording of this frame any more. (The theme belongs on this list too,
+/// but it is compared whole and clears every recording, in `Ui::cached`.)
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Env {
+    /// Physical pixels per logical pixel: text is snapped to it.
+    pub scale: f32,
+    /// The enclosing canvas's transform. A recording holds *window*
+    /// coordinates, already through it, while the rect a replay is placed at
+    /// is in the canvas's own coordinates — so a zoom rescales the recording,
+    /// and a pan (or the canvas simply learning its own origin on its second
+    /// frame) moves it, neither of which the replay's offset can express.
+    pub xform: Transform,
+    /// Bumped whenever the atlas is repacked, which moves every glyph.
+    pub atlas_repacks: u64,
+}
+
+impl Default for Env {
+    fn default() -> Self {
+        Self { scale: 1.0, xform: Transform::IDENTITY, atlas_repacks: 0 }
+    }
+}
 
 struct Entry {
     deps: u64,
+    /// The environment the recording is only valid under: see [`Env`].
+    env: Env,
     /// What the pointer was doing when this was recorded. A pointer *resting*
     /// inside is not a reason to rebuild — the hovered widget is the same one
     /// — and refusing to replay under a still pointer is refusing exactly when
@@ -103,8 +144,8 @@ pub(crate) struct Cache {
     pending: Vec<Id>,
     /// Id spans from the build half, waiting for paint to supply the pixels.
     pending_ids: FxMap<Id, Span>,
-    /// `deps` from the build half, read again when paint closes the entry.
-    deps: FxMap<Id, (u64, Pointer)>,
+    /// What the build half saw, read again when paint closes the entry.
+    deps: FxMap<Id, Pending>,
     pub(crate) hits_this_frame: u32,
     pub(crate) misses_this_frame: u32,
 }
@@ -131,9 +172,9 @@ impl Cache {
     /// Size is never in question: a replayed node is `Fixed` at the size it
     /// recorded, so only its position can differ, and a difference there is
     /// something the replay can carry.
-    pub fn can_replay(&self, id: Id, deps: u64, rect: Rect, pointer: Pointer) -> Option<()> {
+    pub fn can_replay(&self, id: Id, deps: u64, env: Env, rect: Rect, pointer: Pointer) -> Option<()> {
         let e = self.entries.get(&id)?;
-        if e.deps != deps || e.pointer != pointer {
+        if e.deps != deps || e.pointer != pointer || e.env != env {
             return None;
         }
         // A subtree that moved under a pointer inside it has a different
@@ -162,17 +203,13 @@ impl Cache {
     }
 
     /// What the build half hashed `deps` to.
-    pub fn deps_of(&self, id: Id) -> u64 {
-        self.deps.get(&id).map_or(0, |&(d, _)| d)
+    pub fn set_deps(&mut self, id: Id, deps: u64, pointer: Pointer, env: Env) {
+        self.deps.insert(id, Pending { deps, pointer, env });
     }
 
-    pub fn set_deps(&mut self, id: Id, deps: u64, pointer: Pointer) {
-        self.deps.insert(id, (deps, pointer));
-    }
-
-    /// What the pointer was doing when the build half ran.
-    pub fn pointer_of(&self, id: Id) -> Pointer {
-        self.deps.get(&id).map_or(Pointer(None), |&(_, p)| p)
+    /// What the build half recorded alongside the pixels-to-come.
+    pub fn pending_of(&self, id: Id) -> Pending {
+        self.deps.get(&id).copied().unwrap_or_default()
     }
 
     /// Open the *paint* half: the arena marks to close it with.
@@ -182,21 +219,12 @@ impl Cache {
 
     /// Close the paint half, and the entry with it. Without a build half the
     /// recording is incomplete and is dropped rather than half-kept.
-    #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
-    pub fn close_draw(
-        &mut self,
-        id: Id,
-        deps: u64,
-        rect: Rect,
-        pointer: Pointer,
-        min: Vec2,
-        marks: (u32, u32, u32),
-    ) {
+    pub fn close_draw(&mut self, id: Id, pending: Pending, rect: Rect, min: Vec2, marks: (u32, u32, u32)) {
         let Some(ids) = self.pending_ids.remove(&id) else { return };
         let e = Entry {
-            deps,
-            pointer,
+            deps: pending.deps,
+            env: pending.env,
+            pointer: pending.pointer,
             rect,
             min,
             instances: Span { start: marks.0, end: self.instances.len() as u32 },

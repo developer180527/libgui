@@ -44,13 +44,17 @@ pub struct Atlas {
     pub max_size: u32,
     pub data: Vec<u8>,
     pub version: u64,
+    /// Bumped when the atlas is repacked (reset or grown), which moves every
+    /// glyph: anything holding uv coordinates from before is stale. `version`
+    /// cannot say this — it also bumps for each glyph merely added.
+    pub repacks: u64,
     cursor: (u32, u32),
     row_h: u32,
 }
 
 impl Atlas {
     fn new(size: u32) -> Self {
-        Self { size, max_size: 4096, data: vec![0; (size * size) as usize], version: 1, cursor: (1, 1), row_h: 0 }
+        Self { size, max_size: 4096, data: vec![0; (size * size) as usize], version: 1, repacks: 0, cursor: (1, 1), row_h: 0 }
     }
 
     /// Could a `w` x `h` glyph ever fit, even in a freshly reset atlas?
@@ -84,6 +88,7 @@ impl Atlas {
         self.cursor = (1, 1);
         self.row_h = 0;
         self.version += 1;
+        self.repacks += 1;
     }
 
     /// Double it, if it is allowed to get any bigger. Everything in it is lost
@@ -99,6 +104,7 @@ impl Atlas {
         self.cursor = (1, 1);
         self.row_h = 0;
         self.version += 1;
+        self.repacks += 1;
         true
     }
 }
@@ -139,6 +145,8 @@ pub struct Fonts {
     /// Glyphs rasterised since the counter was last taken. A steady frame
     /// rasterises none; a frame that does is doing work it will not repeat.
     rasterized: u32,
+    /// The atlas ran out during a frame. Repacking waits for the boundary.
+    repack_pending: bool,
     /// Strings shaped since the counter was last taken (run-cache misses).
     /// `Cell`, because shaping happens through `&self` on the measure path.
     shaped_runs: std::cell::Cell<u32>,
@@ -167,6 +175,32 @@ pub(crate) struct Line {
 impl Fonts {
     /// Glyphs rasterised since the last call, and reset. [`Ui`](crate::Ui)
     /// takes it once a frame for [`FrameCost`](crate::testing::FrameCost).
+    /// True while a glyph is waiting for the atlas to be repacked: the host
+    /// needs one more frame before the text is complete.
+    pub(crate) fn repack_pending(&self) -> bool {
+        self.repack_pending
+    }
+
+    /// Repack the atlas if a glyph could not be placed during the last frame.
+    /// Grow if allowed — one re-rasterisation of everything, once — else
+    /// reset, which costs the same re-rasterisation every frame the working
+    /// set stays too big. A torture test with 400 font sizes found that the
+    /// expensive way: 1,704 glyphs rasterised, every frame, forever.
+    ///
+    /// Called between frames, never inside one: repacking moves every glyph,
+    /// and instances already emitted hold the old coordinates.
+    pub(crate) fn repack(&mut self) -> bool {
+        if !self.repack_pending {
+            return false;
+        }
+        self.repack_pending = false;
+        if !self.atlas.grow() {
+            self.atlas.reset();
+        }
+        self.glyphs.clear();
+        true
+    }
+
     pub fn take_rasterized(&mut self) -> u32 {
         std::mem::take(&mut self.rasterized)
     }
@@ -192,6 +226,7 @@ impl Fonts {
             scale: 1.0,
             zoom: 1.0,
             rasterized: 0,
+            repack_pending: false,
             shaped_runs: std::cell::Cell::new(0),
             text_draws: 0,
             wraps: RefCell::new(FxMap::default()),
@@ -474,6 +509,17 @@ impl Fonts {
         if let Some(g) = self.glyphs.get(&key) {
             return *g;
         }
+        // A glyph taller than the atlas could never be stored anyway, and
+        // asking a rasteriser for one is not merely wasteful: fontdue indexes
+        // its coverage buffer with an `i32` and overflows somewhere past
+        // 46,000 px, which a zoomed canvas or a theme file can ask for. Skip
+        // it before it is rasterised; the glyph is not drawn and its advance
+        // still counts, so nothing moves. A NaN is not a size either.
+        if px > self.atlas.max_size as f32 || px.is_nan() {
+            let g = Glyph { uv: [0.0; 4], w: 0.0, h: 0.0, left: 0.0, bottom: 0.0 };
+            self.glyphs.insert(key, g);
+            return g;
+        }
         self.rasterized += 1;
         let m = self.fonts[font.0 as usize].rasterize(id, px);
         let bitmap = &m.coverage;
@@ -491,18 +537,16 @@ impl Fonts {
                 match self.atlas.alloc(w, h) {
                     Some(p) => Some(p),
                     None => {
-                        // Full. Growing costs one re-rasterisation of
-                        // everything, once; resetting the same size costs the
-                        // same re-rasterisation *every frame*, because the
-                        // working set that overflowed it is still there next
-                        // frame. A torture test with 400 font sizes found this
-                        // the expensive way: 1,704 glyphs rasterised, every
-                        // frame, forever.
-                        if !self.atlas.grow() {
-                            self.atlas.reset();
-                        }
-                        self.glyphs.clear();
-                        self.atlas.alloc(w, h)
+                        // Full. Repacking here would move every glyph already
+                        // in it, and the instances emitted earlier *this
+                        // frame* carry uv coordinates into the old packing:
+                        // the frame would draw with whatever now sits at
+                        // those texels. So it is deferred to the frame
+                        // boundary ([`Fonts::repack`]), and this glyph is
+                        // simply not drawn this frame — its advance still
+                        // counts, so nothing moves.
+                        self.repack_pending = true;
+                        None
                     }
                 }
             };

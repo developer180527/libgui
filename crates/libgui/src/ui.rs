@@ -7,6 +7,21 @@ use crate::scroll::{ScrollConfig, Smoothing};
 use crate::{Align, Axis, Atlas, Color, Cursor, DrawList, FontId, Fonts, FrameInfo, FrameInput, Gesture, Id, InputEvent, Insets, Key, KeyBindings, Layout, Painter, PlatformOutput, PointerButton, PointerKind, Rect, Shortcut, Size, Theme, Transform, UiAction, Vec2};
 use std::hash::Hash;
 
+/// `v` if it is a real number, else `fallback`.
+///
+/// Guards the values that reach libgui's own retained state — animation
+/// values, scroll offsets — where a NaN would not wash out on the next frame
+/// but stay for the lifetime of the widget. Geometry an app passes straight
+/// through to a draw call is left alone: that is the app's number, and a
+/// NaN there draws nothing rather than corrupting anything.
+pub(crate) fn sane(v: f32, fallback: f32) -> f32 {
+    if v.is_finite() {
+        v
+    } else {
+        fallback
+    }
+}
+
 /// Paint callback run after the tree (drag previews, tooltips).
 type OverlayFn = Box<dyn FnOnce(&mut Painter)>;
 use std::ops::Range;
@@ -375,6 +390,14 @@ impl ScrollAxis {
     /// than half a physical pixel left to travel, because nothing it does
     /// after that can reach the screen.
     fn settle(&mut self, dt: f32, scale: f32) {
+        // Content and viewport come from layout, which an app can feed a NaN
+        // (a `Size::Fixed(f32::NAN)`, a column width read from a broken file).
+        // Offsets are retained, so one would stay for good.
+        self.content = sane(self.content, 0.0);
+        self.viewport = sane(self.viewport, 0.0);
+        self.offset = sane(self.offset, 0.0);
+        self.target = sane(self.target, 0.0);
+        self.velocity = sane(self.velocity, 0.0);
         let max = self.max();
         self.target = self.target.clamp(0.0, max);
         match self.smoothing {
@@ -537,7 +560,14 @@ pub struct Ui {
     cached_seen: FxSet<Id>,
     /// The theme the cache was recorded against: a theme change invalidates
     /// every pixel in it.
-    cache_theme: u64,
+    /// The theme recordings were made under, compared rather than hashed: the
+    /// app owns `ui.theme` and can edit a colour in place.
+    cache_theme: Theme,
+    /// Counts animations that have not reached their target. Compared across
+    /// a `cached` body: the global `animating` flag cannot be, because
+    /// anything outside the subtree — an easing scroll, a spinner elsewhere —
+    /// sets it first and hides the subtree's own.
+    unsettled: u64,
     /// Subtrees that were animating when they last built, so a replay cannot
     /// freeze a fade half way.
     cache_busy: FxSet<Id>,
@@ -672,7 +702,8 @@ impl Ui {
             cache: crate::subtree_cache::Cache::default(),
             rects_order: Vec::new(),
             cached_seen: FxSet::default(),
-            cache_theme: 0,
+            cache_theme: Theme::dark(),
+            unsettled: 0,
             cache_busy: FxSet::default(),
             top_hits: Vec::new(),
             overlays: Vec::new(),
@@ -1135,6 +1166,21 @@ impl Ui {
 
     /// Start a frame: applies the events pushed since the last one.
     pub fn begin_frame(&mut self, info: FrameInfo) {
+        // A host's clock and window metrics arrive from outside, and one bad
+        // value would not merely draw a bad frame: `dt` drives animation, and
+        // a NaN stored in retained state stays there. (A real one: a host that
+        // times frames across a suspend, or divides by a zero refresh rate.)
+        let info = FrameInfo {
+            screen_size: Vec2::new(sane(info.screen_size.x, 0.0).max(0.0), sane(info.screen_size.y, 0.0).max(0.0)),
+            scale: {
+                let s = sane(info.scale, 1.0);
+                if s > 0.0 { s } else { 1.0 }
+            },
+            // Clamped, not just made finite: a paused-then-resumed app hands
+            // over the whole pause as one step, which would fling every
+            // animation straight to its target.
+            dt: sane(info.dt, 0.0).clamp(0.0, 0.25),
+        };
         let mut input = self.input_state.frame(info);
         // Scroll units reach `FrameInput` unconverted, because what a notch is
         // worth is the app's to set. Everything that just wants a number in px
@@ -1236,6 +1282,11 @@ impl Ui {
         self.cached_seen.clear();
         self.dup_ids.clear();
         let _ = self.fonts.take_rasterized();
+        // Between frames is the only safe moment: a repack moves every glyph,
+        // and last frame's instances are gone while this frame's are not
+        // emitted yet. Recordings made under the old packing are dropped by
+        // the `atlas_repacks` check in `Ui::cached`.
+        self.fonts.repack();
         let _ = self.fonts.take_shaped_runs();
         self.dnd_begin_frame();
         self.popup_stack.clear();
@@ -1370,7 +1421,10 @@ impl Ui {
         self.cache.sweep(&used);
         self.cached_seen = used;
 
-        let busy = self.active.is_some() || self.touch_scroll.is_some() || self.animating;
+        // A glyph that did not fit is drawn on the frame after the repack, so
+        // an otherwise idle UI has to be asked for that one more frame.
+        let busy =
+            self.active.is_some() || self.touch_scroll.is_some() || self.animating || self.fonts.repack_pending();
         let repaint_after = if busy {
             Some(0.0)
         } else if self.focused.is_some() {
@@ -1628,32 +1682,36 @@ impl Ui {
     /// Retained animation value: eases towards `target` each frame.
     pub fn animate(&mut self, id: Id, slot: u8, target: f32) -> f32 {
         let k = 1.0 - (-self.theme.metrics.anim_speed * self.input.dt).exp();
+        let target = sane(target, 0.0);
         let v = self.anims.entry((id, slot)).or_insert(target);
         *v += (target - *v) * k;
-        if (target - *v).abs() < 0.001 {
+        if (target - *v).abs() < 0.001 || !v.is_finite() {
             *v = target;
         }
         let v = *v;
         self.animating |= v != target;
+        self.unsettled += (v != target) as u64;
         v
     }
 
     /// Like [`Ui::animate`] with an explicit rate (1/s).
     pub fn animate_with_speed(&mut self, id: Id, slot: u8, target: f32, speed: f32) -> f32 {
         let k = 1.0 - (-speed * self.input.dt).exp();
+        let target = sane(target, 0.0);
         let v = self.anims.entry((id, slot)).or_insert(target);
         *v += (target - *v) * k;
-        if (target - *v).abs() < 0.01 {
+        if (target - *v).abs() < 0.01 || !v.is_finite() {
             *v = target;
         }
         let v = *v;
         self.animating |= v != target;
+        self.unsettled += (v != target) as u64;
         v
     }
 
     /// Jump an animation to `value` (it then eases towards its next target).
     pub fn set_anim(&mut self, id: Id, slot: u8, value: f32) {
-        self.anims.insert((id, slot), value);
+        self.anims.insert((id, slot), sane(value, 0.0));
     }
 
     /// Mark an explicitly-constructed id as alive this frame so its retained
@@ -1908,19 +1966,21 @@ impl Ui {
         let deps = Id::new(&deps).0;
 
         // A theme change repaints everything, so nothing recorded under the
-        // old one is worth keeping.
-        let theme = Id::new(&self.theme.name).with(self.theme.density as u8).with(self.theme.metrics.font_size as u32).0;
-        if theme != self.cache_theme {
+        // old one is worth keeping. Compared field by field, once a frame:
+        // `ui.theme` is the app's, and a hot-reloaded file or a colour picker
+        // changes a palette without changing the theme's name.
+        if self.theme != self.cache_theme {
             self.cache.clear();
-            self.cache_theme = theme;
+            self.cache_theme = self.theme.clone();
         }
+        let env = self.cache_env();
 
         let rect = self.rect_of(id).unwrap_or_default();
         let pointer = self.pointer_over(rect);
         let focus_in = self.focused.is_some_and(|f| self.rects.get(&f).is_some_and(|r| rect.contains(Vec2::new(r.x, r.y))));
         let quiet = !self.cache_busy.contains(&id);
 
-        let replay = if quiet && !focus_in { self.cache.can_replay(id, deps, rect, pointer) } else { None };
+        let replay = if quiet && !focus_in { self.cache.can_replay(id, deps, env, rect, pointer) } else { None };
         if replay.is_some() {
             let min = self.cache.entry_min(id).unwrap_or_default();
             self.cache.mark_seen(id, &mut self.seen);
@@ -1933,7 +1993,7 @@ impl Ui {
 
         // Miss: build it, and record what it produces.
         self.cache.misses_this_frame += 1;
-        let animating_before = self.animating;
+        let settled_before = self.unsettled;
         let start = self.cache.open_ids();
         let mut n = Node::new(id, Layout::column().width(Size::Fit).height(Size::Fit));
         n.recording = true;
@@ -1942,10 +2002,10 @@ impl Ui {
         body(self);
         self.close();
         self.cache.close_ids(id, start);
-        self.cache.set_deps(id, deps, pointer);
+        self.cache.set_deps(id, deps, pointer, env);
         // A subtree that is still animating cannot be replayed next frame: its
         // pixels are going to move on their own.
-        if self.animating && !animating_before {
+        if self.unsettled != settled_before {
             self.cache_busy.insert(id);
         } else {
             self.cache_busy.remove(&id);
@@ -1974,6 +2034,15 @@ impl Ui {
 
     /// The pointer as far as `rect`'s appearance is concerned: where it is if
     /// it is inside, and nothing at all if it is not.
+    /// What a recording is only valid under: see `subtree_cache::Env`.
+    fn cache_env(&self) -> crate::subtree_cache::Env {
+        crate::subtree_cache::Env {
+            scale: self.input.scale,
+            xform: self.xform(),
+            atlas_repacks: self.fonts.atlas().repacks,
+        }
+    }
+
     fn pointer_over(&self, rect: Rect) -> crate::subtree_cache::Pointer {
         let inside = self.input.mouse_inside && rect.contains(self.input.mouse_pos);
         crate::subtree_cache::Pointer(inside.then_some((self.input.mouse_pos, self.input.buttons_down)))
@@ -2753,9 +2822,8 @@ fn paint(
         }
         sink.recording -= 1;
         p.draw.close_barrier();
-        let deps = cache.deps_of(id);
-        let pointer = cache.pointer_of(id);
-        cache.close_draw(id, deps, rect, pointer, nodes[i].min, draw_marks);
+        let pending = cache.pending_of(id);
+        cache.close_draw(id, pending, rect, nodes[i].min, draw_marks);
     }
 }
 
