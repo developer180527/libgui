@@ -53,6 +53,11 @@ pub struct FrameCost {
     /// A handful is normal at the edges of a scroll area; thousands means the
     /// list should be virtualised.
     pub offscreen_nodes: u32,
+    /// Widgets left out of the frame for nesting deeper than
+    /// `MAX_DEPTH` (256). Any real layout is under fifty; hundreds means a
+    /// container is nesting itself, and the alternative to dropping them is
+    /// the three recursive layout passes overflowing the stack.
+    pub too_deep: u32,
     /// Interactive widgets whose id came from *build order* because they
     /// collided with a sibling — a missing [`Ui::with_key`]. Their focus,
     /// animation and drag state move to the neighbour when the list reorders.

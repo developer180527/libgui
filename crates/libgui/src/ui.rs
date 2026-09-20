@@ -505,6 +505,8 @@ pub struct Ui {
     /// Ids that only became unique through the build-order fallback, while
     /// `audit` is on.
     dup_ids: FxSet<Id>,
+    /// Nodes left out of the tree for nesting past [`crate::layout::MAX_DEPTH`].
+    too_deep: u32,
     cost: crate::testing::FrameCost,
     profile: crate::Profile,
     /// Subtree recordings, for [`Ui::cached`].
@@ -643,6 +645,7 @@ impl Ui {
             last_repaint: Some(0.0),
             audit: false,
             dup_ids: FxSet::default(),
+            too_deep: 0,
             cost: crate::testing::FrameCost::default(),
             profile: crate::Profile::default(),
             cache: crate::subtree_cache::Cache::default(),
@@ -1174,6 +1177,7 @@ impl Ui {
         self.typing = self.focused.is_some();
         self.sheet_done = false;
         self.rects_order.clear();
+        self.too_deep = 0;
         self.cached_seen.clear();
         self.dup_ids.clear();
         let _ = self.fonts.take_rasterized();
@@ -1250,6 +1254,7 @@ impl Ui {
             // Only the interactive ones matter: `space` and `separator` share
             // a key by design and have no state to lose. The scan is O(nodes),
             // so it only runs when someone asked for it.
+            too_deep: self.too_deep,
             unkeyed_duplicates: match self.audit {
                 true => self.nodes.iter().filter(|n| n.interactive && dup.contains(&n.id)).count() as u32,
                 false => 0,
@@ -1697,7 +1702,13 @@ impl Ui {
         debug_assert!(!self.stack.is_empty(), "libgui: widget built outside begin_frame/end_frame");
         let idx = self.nodes.len();
         self.nodes.push(node);
-        self.open_kids.push(idx as u32);
+        if self.stack.len() <= crate::layout::MAX_DEPTH {
+            self.open_kids.push(idx as u32);
+        } else {
+            // Left out of the tree, so the recursive passes never reach it.
+            // One place, rather than a depth check in each of the three.
+            self.too_deep += 1;
+        }
         idx
     }
 

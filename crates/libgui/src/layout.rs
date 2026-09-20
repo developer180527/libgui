@@ -256,6 +256,16 @@ fn other(axis: Axis) -> Axis {
     }
 }
 
+/// How deep a layout may nest.
+///
+/// `measure`, `place` and `paint` each recurse once per level, so a tree
+/// deeper than the stack can take does not render badly — it aborts the
+/// process, which is the one failure mode a library must not have. Measured:
+/// a debug build dies between 400 and 500 levels. Any real layout is under
+/// fifty, so this is generous, and what goes past it is dropped and counted
+/// rather than taken down with it.
+pub(crate) const MAX_DEPTH: usize = 256;
+
 /// Where a node's children are in the tree's child arena. Children are
 /// contiguous, so a node carries eight bytes instead of a `Vec` and its heap
 /// allocation — one per container, every frame, for a list that never changes.

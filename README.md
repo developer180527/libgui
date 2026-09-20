@@ -801,6 +801,7 @@ enforced by tests rather than left to a benchmark nobody runs
 | A 1,000,000-row virtual list vs a 100-row one | **identical** — 39 rows built, 203 instances, ~13 µs |
 | 100,000 variable-height rows | ~210 µs (locating is O(rows); building is not) |
 | Glyph rasterisation in a steady frame | **none** (atlas version unchanged) |
+| 10,000 live controls (six per row, virtualised) | 307 nodes, 1,533 instances, 0 allocations |
 | An idle UI | `repaint_after: None` — the host sleeps |
 | A static UI under a host redrawing at 120 Hz | **0** UI frames per second |
 | A cached 800-row panel beside a live widget | **0.044 ms** vs 0.487 (11x) |
@@ -811,6 +812,21 @@ where linear is 4x) rather than wall-clock times that flake on a loaded CI box.
 The one absolute budget is asserted in release only, since a debug build is an
 order of magnitude slower. `crates/libgui_bench` is the measuring tool;
 these are the regression guards.
+
+### Torture tests
+
+`tests/torture.rs` is the other half: deliberately unreasonable UIs, because the
+failure mode there is never a wrong pixel. Writing them found two real defects
+the ordinary guards could not have:
+
+- **The atlas was thrashing.** 400 font sizes — what a zooming canvas produces,
+  and what CJK will produce — filled it, and it reset to the *same size* and
+  re-rasterised all 1,704 glyphs **every frame, forever**. It now grows once
+  instead: 1,704 on the first frame, **0** after.
+- **Deep nesting aborted the process.** `measure`, `place` and `paint` each
+  recurse per level, and a debug build died between 400 and 500. A library may
+  render something badly; it may not take the process down. Nesting past 256 is
+  now dropped from the tree and reported as `FrameCost::too_deep`.
 
 ### The same guards, for your panels
 
@@ -1138,7 +1154,10 @@ lag, fling, easing) stay as frame-trace tests like
 ## Known scaffold limitations
 
 - Text fields are single-line; no wrapping, IME preedit, or undo yet. No complex shaping.
-- Glyph atlas resets when full (possible one-frame flicker).
+- Glyph atlas grows to 4096² when full (one re-rasterisation, once); past that it resets, with a
+  one-frame flicker. Multi-page + LRU is still the real answer.
+- Layouts nesting deeper than 256 are dropped and counted (`FrameCost::too_deep`), because the three
+  recursive layout passes would otherwise overflow the stack. Any real layout is under fifty.
 - Container ids are positional; give containers explicit keys once you add conditional UI.
 
 Font: Inter (SIL Open Font License, see `assets/Inter-OFL.txt`).

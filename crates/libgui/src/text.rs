@@ -38,6 +38,10 @@ impl std::error::Error for FontError {}
 /// renderer knows when to re-upload.
 pub struct Atlas {
     pub size: u32,
+    /// How large it may grow before it starts evicting instead. A single
+    /// channel, so 4096 is 16 MB — enough for CJK at several sizes, or a
+    /// zooming canvas asking for hundreds of them.
+    pub max_size: u32,
     pub data: Vec<u8>,
     pub version: u64,
     cursor: (u32, u32),
@@ -46,7 +50,7 @@ pub struct Atlas {
 
 impl Atlas {
     fn new(size: u32) -> Self {
-        Self { size, data: vec![0; (size * size) as usize], version: 1, cursor: (1, 1), row_h: 0 }
+        Self { size, max_size: 4096, data: vec![0; (size * size) as usize], version: 1, cursor: (1, 1), row_h: 0 }
     }
 
     /// Could a `w` x `h` glyph ever fit, even in a freshly reset atlas?
@@ -80,6 +84,22 @@ impl Atlas {
         self.cursor = (1, 1);
         self.row_h = 0;
         self.version += 1;
+    }
+
+    /// Double it, if it is allowed to get any bigger. Everything in it is lost
+    /// — the callers clear their caches — but it happens once, where resetting
+    /// the same size over and over happens every frame forever.
+    fn grow(&mut self) -> bool {
+        let next = self.size.saturating_mul(2);
+        if next > self.max_size {
+            return false;
+        }
+        self.size = next;
+        self.data = vec![0; (next * next) as usize];
+        self.cursor = (1, 1);
+        self.row_h = 0;
+        self.version += 1;
+        true
     }
 }
 
@@ -323,10 +343,16 @@ impl Fonts {
                 match self.atlas.alloc(w, h) {
                     Some(p) => Some(p),
                     None => {
-                        // Full: start over. Glyphs already emitted this frame may
-                        // flicker for one frame; a real implementation would use
-                        // multiple pages or LRU eviction.
-                        self.atlas.reset();
+                        // Full. Growing costs one re-rasterisation of
+                        // everything, once; resetting the same size costs the
+                        // same re-rasterisation *every frame*, because the
+                        // working set that overflowed it is still there next
+                        // frame. A torture test with 400 font sizes found this
+                        // the expensive way: 1,704 glyphs rasterised, every
+                        // frame, forever.
+                        if !self.atlas.grow() {
+                            self.atlas.reset();
+                        }
                         self.glyphs.clear();
                         self.atlas.alloc(w, h)
                     }
