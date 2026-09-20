@@ -36,6 +36,7 @@ layout persistence. See the roadmap.
 | `crates/libgui_nodes` | Node-graph editing: nodes, ports, links, selection, routing. Built *on* libgui, not in it. |
 | `crates/libgui_demo` | winit host + editor layout + an "engine" scene rendered offscreen and shown via `ui.viewport`. |
 | `crates/libgui_solaris` | A second demo: one dense, Houdini-shaped editor — menu bar, shelf, viewport, parameter panel, node network, scene-graph tree, details table and timeline, all at once. Its own theme, and a ~170-line host. |
+| `crates/libgui_cut` | A third demo: a non-linear video editor. A **timeline** — zoom, two-axis scroll, clips dragged between tracks, snapping — written as one custom surface on top of the library. |
 
 ## Frame lifecycle
 
@@ -651,6 +652,38 @@ time.
 It has its own [`Theme`] and nothing else of its own: no new widget mechanism, no
 reaching inside the core. Its host is about 170 lines, because that is what a
 host is once docking tear-off and a 3D scene are somebody else's problem.
+
+## A third demo: a video editor
+
+```bash
+cargo run --release -p libgui_cut
+```
+
+`libgui_cut` is shaped like a non-linear editor — two monitors, a project bin, an
+effect-controls tree and a sequence — because it needs the one widget no UI
+library ships: a **timeline**.
+
+The timeline is not a tree of widgets. Everything in it is decided by the same
+two numbers, pixels-per-second and the scroll offset, and a widget tree would
+spend its life keeping a ruler, a header column and a thousand clips agreeing
+about them. So it takes a single rect from libgui and does the rest itself:
+
+- **Two-axis scroll.** Horizontally the ruler and the clips move together while
+  the track headers stay put; vertically the headers and the clips move together
+  while the ruler stays.
+- **Zoom about the pointer** (Cmd/Ctrl+wheel), so the frame under the cursor is
+  still under the cursor afterwards.
+- **Drags**: clips along time and between tracks — refusing a video track for
+  audio — the playhead on the ruler, and both scrollbars.
+- **Snapping** to clip edges and the playhead, which is what makes cutting feel
+  solid rather than approximate.
+
+That is the point of the demo: libgui supplies ids, layout, input routing, the
+dock and the theme, and a custom surface of a few hundred lines supplies the
+domain. `tests/timeline.rs` drives it with real presses, drags and wheels — the
+timeline has to *behave*, not just render — and `tests/look.rs` renders the whole
+editor to a PNG with the CPU backend, so the layout can be reviewed without a
+window.
 
 `cargo test -p libgui_solaris` renders it to `editor.png` with the CPU backend,
 so the layout can be looked at without a window, and asserts what the whole

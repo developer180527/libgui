@@ -1,0 +1,19 @@
+[package]
+name = "libgui_cut"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "A third libgui demo: a non-linear video editor — timeline, clips, tracks, monitors — the layout a cutting tool actually has."
+
+[dependencies]
+libgui = { path = "../libgui" }
+libgui_keymap = { path = "../libgui_keymap" }
+libgui_wgpu = { path = "../libgui_wgpu" }
+libgui_winit = { path = "../libgui_winit" }
+wgpu.workspace = true
+winit.workspace = true
+pollster.workspace = true
+
+[dev-dependencies]
+libgui_soft = { path = "../libgui_soft" }
+png = "0.18"
