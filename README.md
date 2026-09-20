@@ -657,6 +657,13 @@ so the layout can be looked at without a window, and asserts what the whole
 screen costs: **719 nodes, 5,459 instances, one draw call, no glyph
 rasterisation and no allocations** in a steady frame.
 
+Its panels are a dock tree, not a hand-written nesting: every splitter drags,
+every panel tears off into its own OS window, and the tab strips down each
+panel's top edge are real dock tabs rather than decoration — so they switch,
+reorder, move between panels and tear off like anything else. The host is one
+OS window per dock surface, sharing a single wgpu device.
+
+
 ## Tables and data grids
 
 Virtualised rows, resizable and sortable columns, a header that stays put, and columns that can be
@@ -1060,6 +1067,40 @@ Measured, on a panel of 500 visible widgets: paint is **60%** of a frame, build
 **38%**, and layout **3.5%** — so skipping whole frames is worth far more than
 skipping layout for unchanged subtrees, which was the obvious-sounding thing to
 build and would have bought almost nothing.
+
+#### Resizing is not input
+
+There is one change `needs_frame` cannot see, and it is the one most likely to
+be felt: a resize. No `InputEvent` describes it — the new size reaches the UI
+only through `FrameInfo` — so a host that gates on `needs_frame` alone happily
+re-presents the batches it built at the *old* size. The window edge moves and
+the UI inside it does not follow, until some unrelated event wakes it up. It
+looks exactly like a slow layout, and it is not: the layout never ran.
+
+So a host with a resizable window gates on the size-aware form, passing the
+info the frame *would* be built with:
+
+```rust
+let info = FrameInfo { screen_size, scale, dt: elapsed };
+if ui.needs_frame_for(&info, elapsed) {
+    ui.begin_frame(info);
+    build(&mut ui);
+    renderer.upload(&ui.end_frame());
+}
+```
+
+The other half of a resize belongs to the host: reconfigure the swapchain
+**once per frame you actually present**, not once per resize event. A live
+resize delivers an event per pointer move, and tearing down a swapchain that
+often stalls on the frame still in flight. Both demo hosts compare the window
+against their config at the top of `draw` and reconfigure only when they
+disagree, which also covers the platforms that resize a window without sending
+an event at all (rotation, Stage Manager, split view).
+
+Resizing is otherwise ordinary work. Every panel's rect changes, so nothing can
+be replayed from the subtree cache — but nothing re-shapes text or re-rasterises
+glyphs either, and `crates/libgui_solaris/tests/resize.rs` drags the dense
+editor's corner 300 times, one frame per pixel, to keep it that way.
 
 ### Profiling: knowing rather than guessing
 

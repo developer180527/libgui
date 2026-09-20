@@ -1,13 +1,13 @@
 //! The three full-width strips: the menu bar, the shelf, and the timeline.
 
 use crate::widgets::*;
-use crate::App;
+use crate::Editor;
 use libgui::*;
 
 const TITLE: &str = "/media/alex/DWork/Grafik/3d_Szenen//24Bulb/24_bulb_v3.hiplc \
                      - Houdini Indie Limited-Commercial 19.0.589 - Python 3";
 
-pub fn menu_bar(ui: &mut Ui, app: &mut App) {
+pub fn menu_bar(ui: &mut Ui, app: &mut Editor) {
     let t = ui.theme.clone();
     let row = Layout::row()
         .width(Size::Grow(1.0))
@@ -76,7 +76,7 @@ const SHELF_TOOLS: [&str; 8] = [
 const LIGHT_TOOLS: [&str; 7] =
     ["Camera", "Point Light", "Spot Light", "Area Light", "Geometry Light", "Distant Light", "Environment Light"];
 
-pub fn shelf(ui: &mut Ui, app: &mut App) {
+pub fn shelf(ui: &mut Ui, app: &mut Editor) {
     let t = ui.theme.clone();
     let col = Layout::column().width(Size::Grow(1.0)).height(Size::Fixed(66.0));
     ui.container_id(Id::new("shelf"), col, Frame { fill: t.palette.bg_panel, clip: true, ..Frame::none() }, |ui| {
@@ -113,7 +113,7 @@ pub fn shelf(ui: &mut Ui, app: &mut App) {
     });
 }
 
-pub fn timeline(ui: &mut Ui, app: &mut App) {
+pub fn timeline(ui: &mut Ui, app: &mut Editor) {
     let t = ui.theme.clone();
     let row = Layout::row()
         .width(Size::Grow(1.0))
@@ -168,7 +168,7 @@ fn frame_field(ui: &mut Ui, key: &str, value: f32) {
 }
 
 /// The frame ruler: ticks every 24 frames, a playhead at the current one.
-fn ruler(ui: &mut Ui, app: &App) {
+fn ruler(ui: &mut Ui, app: &Editor) {
     let t = ui.theme.clone();
     let id = ui.make_id("ruler");
     let size = t.metrics.font_size_small;

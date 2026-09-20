@@ -422,7 +422,9 @@ impl App {
         //    redraws regardless; the panels around it do not have to.
         w.ui_idle += dt;
         let theme_changed = w.ui.theme != self.theme;
-        let run_ui = theme_changed || w.ui.needs_frame(w.ui_idle);
+        // Size-aware: a resize pushes no input, so `needs_frame` alone would
+        // keep re-presenting batches built for the old window.
+        let run_ui = theme_changed || w.ui.needs_frame_for(&info, w.ui_idle);
         if theme_changed {
             w.ui.theme = self.theme.clone();
         }
@@ -650,10 +652,10 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
-                let size = surface_size(&w.window);
-                w.config.width = size.width.max(1);
-                w.config.height = size.height.max(1);
-                w.surface.configure(&self.gfx.as_ref().unwrap().device, &w.config);
+                // `render` reconfigures when the window and swapchain disagree,
+                // which coalesces a whole drag into one reconfigure per drawn
+                // frame instead of one per pointer move.
+                w.window.request_redraw();
             }
             WindowEvent::CursorMoved { position, .. } => {
                 // Global pointer for docking. During a drag the source window keeps

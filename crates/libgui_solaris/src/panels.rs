@@ -1,16 +1,14 @@
 //! The viewport, the parameter editor, and the two tables under the viewport.
 
 use crate::widgets::*;
-use crate::App;
+use crate::Editor;
 use libgui::*;
 
 // ---- viewport --------------------------------------------------------------
 
-pub fn viewport(ui: &mut Ui, app: &mut App) {
-    let t = ui.theme.clone();
+pub fn viewport(ui: &mut Ui, app: &mut Editor) {
     let col = Layout::column().width(Size::Grow(1.0)).height(Size::Grow(1.0));
-    ui.container_id(Id::new("viewpanel"), col, panel_frame(&t), |ui| {
-        tabs(ui, "view", &mut app.view_tab, &["Scene View", "Animation Editor", "Geometry Spreadsheet"]);
+    ui.container_id(Id::new("viewpanel"), col, Frame::none(), |ui| {
         view_toolbar(ui);
         // The render, and the toolbars that sit over it.
         let body = Layout::row().width(Size::Grow(1.0)).height(Size::Grow(1.0));
@@ -100,7 +98,7 @@ fn render_preview(ui: &mut Ui) {
 }
 
 /// Stand-in for the render: the HUD a viewport wears, over the dark.
-fn render(ui: &mut Ui, app: &mut App) {
+fn render(ui: &mut Ui, app: &mut Editor) {
     let t = ui.theme.clone();
     let stage = Layout::column().width(Size::Grow(1.0)).height(Size::Grow(1.0));
     ui.container_id(Id::new("preview_holder"), stage, Frame { clip: true, ..Frame::none() }, |ui| {
@@ -167,16 +165,9 @@ const ATTRS: [&str; 10] = [
     "",
 ];
 
-pub fn parameters(ui: &mut Ui, app: &mut App) {
-    let t = ui.theme.clone();
-    let col = Layout::column().width(Size::Grow(1.0)).height(Size::Grow(0.52));
-    ui.container_id(Id::new("parampanel"), col, panel_frame(&t), |ui| {
-        tabs(
-            ui,
-            "param",
-            &mut app.param_tab,
-            &["rendergeometrysettings2", "Context Options Editor", "Performance Monitor", "Render Scheduler"],
-        );
+pub fn parameters(ui: &mut Ui, app: &mut Editor) {
+    let col = Layout::column().width(Size::Grow(1.0)).height(Size::Grow(1.0));
+    ui.container_id(Id::new("parampanel"), col, Frame::none(), |ui| {
         breadcrumb(ui, "param", "stage");
         let body = Layout::column()
             .width(Size::Grow(1.0))
@@ -246,7 +237,7 @@ fn field_row(ui: &mut Ui, key: &str, label: &str, fields: &[&str]) {
 
 /// The block that gives this panel its shape: a column of identical pickers on
 /// the left, and the attribute each one drives on the right.
-fn attribute_rows(ui: &mut Ui, app: &mut App) {
+fn attribute_rows(ui: &mut Ui, app: &mut Editor) {
     let grid = Layout::row().width(Size::Grow(1.0)).height(Size::Grow(1.0)).gap(14.0);
     ui.container_id(Id::new("attrgrid"), grid, Frame::none(), |ui| {
         let left = Layout::column().width(Size::Fixed(92.0)).height(Size::Fit).gap(3.0);
@@ -273,7 +264,7 @@ fn attribute_rows(ui: &mut Ui, app: &mut App) {
 /// editor lines a hundred of them up.
 const LABEL_W: f32 = 148.0;
 
-fn attribute_row(ui: &mut Ui, i: usize, name: &str, app: &mut App) {
+fn attribute_row(ui: &mut Ui, i: usize, name: &str, app: &mut Editor) {
     let t = ui.theme.clone();
     let row = Layout::row().width(Size::Grow(1.0)).height(Size::Fixed(18.0)).gap(5.0).align(Align::Start, Align::Center);
     let __id = ui.make_id(("attrrow", i));
@@ -392,11 +383,9 @@ pub fn detail_columns() -> TableState {
     TableState::new([Column::new("Name").width(80.0), Column::new("Value").width(120.0).grow(1.0)])
 }
 
-pub fn scene_graph_tree(ui: &mut Ui, app: &mut App) {
-    let t = ui.theme.clone();
-    let col = Layout::column().width(Size::Grow(0.52)).height(Size::Grow(1.0));
-    ui.container_id(Id::new("treepanel"), col, panel_frame(&t), |ui| {
-        tabs(ui, "tree", &mut app.tree_tab, &["Scene Graph Tree"]);
+pub fn scene_graph_tree(ui: &mut Ui, app: &mut Editor) {
+    let col = Layout::column().width(Size::Grow(1.0)).height(Size::Grow(1.0));
+    ui.container_id(Id::new("treepanel"), col, Frame::none(), |ui| {
         breadcrumb(ui, "tree", "stage");
         tree_toolbar(ui);
         let rows = app.tree.len();
@@ -446,11 +435,9 @@ fn tree_toolbar(ui: &mut Ui) {
     });
 }
 
-pub fn scene_graph_details(ui: &mut Ui, app: &mut App) {
-    let t = ui.theme.clone();
-    let col = Layout::column().width(Size::Grow(0.48)).height(Size::Grow(1.0));
-    ui.container_id(Id::new("detailpanel"), col, panel_frame(&t), |ui| {
-        tabs(ui, "detail", &mut app.detail_tab, &["Scene Graph Details", "Scene Graph Layers", "Layout Asset Gallery"]);
+pub fn scene_graph_details(ui: &mut Ui, app: &mut Editor) {
+    let col = Layout::column().width(Size::Grow(1.0)).height(Size::Grow(1.0));
+    ui.container_id(Id::new("detailpanel"), col, Frame::none(), |ui| {
         breadcrumb(ui, "detail", "stage");
         detail_toolbar(ui);
         let opts = TableOptions { selected: Some(0), striped: false, ..default_table(ui) };

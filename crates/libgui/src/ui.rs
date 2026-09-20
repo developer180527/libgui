@@ -1071,6 +1071,22 @@ impl Ui {
         }
     }
 
+    /// [`Ui::needs_frame`] for the frame the host is about to build, which is
+    /// what a host that can be resized should call.
+    ///
+    /// A resize is not input: no `InputEvent` describes it, and the new size
+    /// arrives only in [`FrameInfo`]. So `needs_frame` alone cannot see one,
+    /// and a host that gates on it reuses the batches it built at the *old*
+    /// size until some unrelated event happens to wake it — the window edge
+    /// moves and the UI inside it does not follow. Passing the info the frame
+    /// would be built with closes that hole.
+    pub fn needs_frame_for(&self, info: &FrameInfo, elapsed: f32) -> bool {
+        if info.screen_size != self.input.screen_size || info.scale != self.input.scale {
+            return true;
+        }
+        self.needs_frame(elapsed)
+    }
+
     pub fn focused(&self) -> Option<Id> {
         self.focused
     }

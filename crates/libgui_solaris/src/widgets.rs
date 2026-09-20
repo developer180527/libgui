@@ -4,10 +4,6 @@
 
 use libgui::*;
 
-pub fn panel_frame(t: &Theme) -> Frame {
-    Frame { fill: t.palette.bg_panel, border: t.palette.border, border_width: 1.0, radius: 0.0, shadow: false, clip: true }
-}
-
 /// The strip of tabs every panel in a tool like this wears, with the `+` that
 /// adds another.
 pub fn tabs(ui: &mut Ui, key: &str, selected: &mut usize, labels: &[&str]) {

@@ -2,7 +2,7 @@
 //! scene's nodes in it.
 
 use crate::widgets::*;
-use crate::App;
+use crate::Editor;
 use libgui::*;
 use libgui_nodes::{GraphStyle, Link, NodeConfig, NodeId, PortId};
 
@@ -47,13 +47,10 @@ pub fn links() -> Vec<Link> {
     vec![l(0, 1, 0), l(2, 4, 0), l(3, 4, 1), l(4, 6, 0), l(6, 8, 0), l(5, 8, 1), l(7, 9, 0), l(1, 8, 0)]
 }
 
-pub fn network(ui: &mut Ui, app: &mut App) {
+pub fn network(ui: &mut Ui, app: &mut Editor) {
     let t = ui.theme.clone();
-    let col = Layout::column().width(Size::Grow(1.0)).height(Size::Grow(0.48));
-    ui.container_id(Id::new("netpanel"), col, panel_frame(&t), |ui| {
-        let mut sel = app.net_tab;
-        tabs(ui, "net", &mut sel, &["/stage", "Material Palette", "Preset Browser", "Texture Manager", "Live Statistics"]);
-        app.net_tab = sel;
+    let col = Layout::column().width(Size::Grow(1.0)).height(Size::Grow(1.0));
+    ui.container_id(Id::new("netpanel"), col, Frame::none(), |ui| {
         breadcrumb(ui, "net", "stage");
         net_menu(ui);
         let mut style = GraphStyle::from_theme(&t);
