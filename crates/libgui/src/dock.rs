@@ -277,6 +277,12 @@ pub struct Surface<T> {
 }
 
 impl<T> Surface<T> {
+    /// A surface rebuilt from a saved layout. Everything the live dock
+    /// derives each frame — geometry, staleness — starts fresh.
+    pub(crate) fn restored(id: SurfaceId, root: Option<DockNode<T>>, floating: bool) -> Self {
+        Self::new(id, root, floating)
+    }
+
     fn new(id: SurfaceId, root: Option<DockNode<T>>, floating: bool) -> Self {
         Self {
             id,
@@ -414,6 +420,34 @@ impl<T> DockState<T> {
         }
     }
 
+    /// Take a surface's tree out, to wrap or replace it — the counterpart of
+    /// [`DockState::set_root`], e.g. for docking a panel a restored layout did
+    /// not mention.
+    pub fn take_root(&mut self, surface: SurfaceId) -> Option<DockNode<T>> {
+        self.surface_mut(surface).and_then(|s| s.root.take())
+    }
+
+    /// Put `tab` in the surface's first pane, or make that pane if the
+    /// surface is empty.
+    ///
+    /// The blunt way to place a panel: enough for "this version added a
+    /// Timeline and the saved layout predates it", where anywhere visible
+    /// beats nowhere. Build a tree with [`DockState::leaf`] and
+    /// [`DockState::split`] to put it somewhere specific.
+    pub fn add_tab(&mut self, surface: SurfaceId, tab: T) {
+        let id = self.next();
+        if let Some(s) = self.surface_mut(surface) {
+            match &mut s.root {
+                Some(root) => {
+                    let leaf = root.first_leaf_mut();
+                    leaf.tabs.push(tab);
+                    leaf.active = leaf.tabs.len() - 1;
+                }
+                None => s.root = Some(DockNode::Leaf(Leaf { id, tabs: vec![tab], active: 0 })),
+            }
+        }
+    }
+
     // ---- queries --------------------------------------------------------
 
     pub fn surfaces(&self) -> &[Surface<T>] {
@@ -424,7 +458,7 @@ impl<T> DockState<T> {
         self.surfaces.iter().find(|s| s.id == id)
     }
 
-    fn surface_mut(&mut self, id: SurfaceId) -> Option<&mut Surface<T>> {
+    pub(crate) fn surface_mut(&mut self, id: SurfaceId) -> Option<&mut Surface<T>> {
         self.surfaces.iter_mut().find(|s| s.id == id)
     }
 
@@ -433,6 +467,32 @@ impl<T> DockState<T> {
     }
 
     /// A tab drag is in progress (past the threshold).
+    /// Ids for a tree being rebuilt from a saved layout. The saved ids are
+    /// not reused: they only ever identified panes within one run.
+    pub(crate) fn new_node_id(&mut self) -> u64 {
+        self.next()
+    }
+
+    pub(crate) fn new_surface_id(&mut self) -> SurfaceId {
+        SurfaceId(self.next())
+    }
+
+    pub(crate) fn push_surface(&mut self, surface: Surface<T>) {
+        self.surfaces.push(surface);
+    }
+
+    /// Drop every surface but the main one, and empty that: a restore
+    /// replaces the whole dock rather than merging into it.
+    pub(crate) fn reset_surfaces(&mut self) {
+        self.surfaces.truncate(1);
+        let main = &mut self.surfaces[0];
+        main.root = None;
+        main.visible = true;
+        self.drag = None;
+        self.focused_leaf = None;
+        self.reorder_shift = None;
+    }
+
     pub fn is_dragging(&self) -> bool {
         self.drag.is_some_and(|d| d.phase != Phase::Pending)
     }

@@ -13,7 +13,7 @@
 
 use crate::{Color, Insets};
 
-#[cfg(feature = "theme-toml")]
+#[cfg(feature = "serde")]
 macro_rules! serde_struct {
     ($item:item) => {
         #[derive(serde::Serialize, serde::Deserialize)]
@@ -21,7 +21,7 @@ macro_rules! serde_struct {
         $item
     };
 }
-#[cfg(not(feature = "theme-toml"))]
+#[cfg(not(feature = "serde"))]
 macro_rules! serde_struct {
     ($item:item) => {
         $item
@@ -29,7 +29,7 @@ macro_rules! serde_struct {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-#[cfg_attr(feature = "theme-toml", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "lowercase"))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize), serde(rename_all = "lowercase"))]
 pub enum Density {
     /// Dense desktop tools (Unity, Houdini, Blender-like).
     Compact,

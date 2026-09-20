@@ -8,6 +8,7 @@
 mod backend;
 mod dnd;
 mod dock;
+mod dock_layout;
 mod draw;
 pub mod focus;
 mod font;
@@ -39,6 +40,7 @@ mod wrap;
 
 pub use backend::{Backend, Globals, INSTANCE_STRIDE, VERTICES_PER_INSTANCE};
 pub use dock::{DockConfig, FloatingMode, DockNode, DockState, DropKind, DropTarget, Side, Surface, SurfaceId, TabViewer};
+pub use dock_layout::{DockLayout, LayoutError, NodeLayout, Restored, SurfaceLayout};
 pub use dnd::{DragSource, DropZone, Payload};
 pub use draw::{Batch, DrawList, Instance, TextureId};
 pub use id::{Id, StableHasher};

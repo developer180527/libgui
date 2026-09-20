@@ -10,6 +10,7 @@ use libgui::{
     Size, SurfaceId, TextureId, Theme, ThemeWatcher, Ui, Vec2,
 };
 use panels::{default_layout, Action, Demo, Panels, Tab, THEMES};
+use libgui::DockLayout;
 use scene::{Scene, SceneParams};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -162,12 +163,14 @@ fn vec(p: PhysicalPosition<i32>) -> Vec2 {
 impl App {
     fn new() -> Self {
         let mut dock = DockState::new();
-        default_layout(&mut dock);
+        let mut demo = Demo::default();
+        let note = load_layout(&mut dock);
+        demo.log(note);
         Self {
             gfx: None,
             wins: HashMap::new(),
             dock,
-            demo: Demo::default(),
+            demo,
             clipboard: Clipboard::new(),
             left_down: false,
             decoration: Vec2::ZERO,
@@ -332,6 +335,9 @@ impl App {
     /// Make OS windows match the dock: create/destroy/move/show/hide.
     fn sync_windows(&mut self, el: &ActiveEventLoop) {
         self.dock.config = self.demo.dock_cfg.clone();
+        if std::mem::take(&mut self.demo.save_layout) {
+            save_layout(&self.dock, &mut self.demo);
+        }
         if std::mem::take(&mut self.demo.reset_layout) {
             let cfg = self.dock.config.clone();
             self.dock = DockState::new();
@@ -551,6 +557,65 @@ impl App {
     }
 }
 
+/// Where the workspace is remembered between runs. libgui does no file I/O:
+/// it hands over a `DockLayout`, and the app decides where that lives.
+fn layout_path() -> std::path::PathBuf {
+    if let Ok(p) = std::env::var("LIBGUI_LAYOUT") {
+        return p.into();
+    }
+    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_else(|_| ".".into());
+    std::path::Path::new(&home).join(".libgui-demo-layout.toml")
+}
+
+/// Restore the saved workspace, falling back to the default layout. A layout
+/// is advice: panels it does not mention are docked anyway, so a build that
+/// adds a panel does not hide it from everyone who has a saved layout.
+fn load_layout(dock: &mut DockState<Tab>) -> String {
+    let path = layout_path();
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        default_layout(dock);
+        return "default layout".into();
+    };
+    let saved = match DockLayout::from_toml(&text) {
+        Ok(l) => l,
+        Err(e) => {
+            default_layout(dock);
+            return format!("layout unreadable ({e}), using the default");
+        }
+    };
+    match dock.restore(&saved, Tab::from_key) {
+        Ok(report) if !report.is_empty() => {
+            let missing = report.missing_from(Tab::ALL.iter().map(|t| t.key()));
+            for key in &missing {
+                if let Some(tab) = Tab::from_key(*key) {
+                    dock.add_tab(SurfaceId::MAIN, tab);
+                }
+            }
+            let mut msg = format!("layout restored from {}", path.display());
+            if !missing.is_empty() {
+                msg += &format!(" (+{} new panel(s))", missing.len());
+            }
+            if !report.dropped.is_empty() {
+                msg += &format!(" ({} unknown panel(s) dropped)", report.dropped.len());
+            }
+            msg
+        }
+        _ => {
+            default_layout(dock);
+            "saved layout had nothing this build knows, using the default".into()
+        }
+    }
+}
+
+fn save_layout(dock: &DockState<Tab>, demo: &mut Demo) {
+    let text = dock.layout(&Panels { d: demo, viewport_tex: VIEWPORT_TEX, scale: 1.0 }).to_toml();
+    let path = layout_path();
+    match std::fs::write(&path, text) {
+        Ok(()) => demo.log(format!("layout saved to {}", path.display())),
+        Err(e) => demo.log(format!("could not save layout: {e}")),
+    }
+}
+
 /// App-wide commands, from the demo's keymap (`panels::keymap`): libgui
 /// supplies the matching and routing, never the bindings. Checked after the
 /// panels so a focused panel wins.
@@ -581,6 +646,9 @@ fn top_bar(ui: &mut Ui, d: &mut Demo) {
         ui.menu_button("View", |ui| {
             if ui.menu_item_shortcut("Reset layout", &d.keys.label(Action::ResetLayout)).clicked {
                 d.reset_layout = true;
+            }
+            if ui.menu_item("Save layout now").clicked {
+                d.save_layout = true;
             }
             if ui.menu_item("Reset view").clicked {
                 d.reset_view();
@@ -651,6 +719,9 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => {
                 if w.dock_id == SurfaceId::MAIN {
+                    // The workspace is saved on the way out, torn-off windows
+                    // and all, so the next run opens where this one left off.
+                    save_layout(&self.dock, &mut self.demo);
                     el.exit();
                 } else {
                     self.dock.close_surface(w.dock_id);
@@ -762,4 +833,56 @@ fn main() {
         app.demo.density_choice = ["theme", "compact", "regular", "touch"].iter().position(|x| *x == d.to_lowercase()).unwrap_or(0);
     }
     event_loop.run_app(&mut app).expect("run");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Panels are identified in a saved layout by a hash of a fixed name. If
+    /// two ever collide, or one stops round-tripping, every user's saved
+    /// workspace quietly rearranges itself.
+    #[test]
+    fn every_panel_has_its_own_stable_key() {
+        for tab in Tab::ALL {
+            assert_eq!(Tab::from_key(tab.key()), Some(tab), "{} does not round-trip", tab.title());
+            let clashes = Tab::ALL.iter().filter(|o| o.key() == tab.key()).count();
+            assert_eq!(clashes, 1, "{} shares its key with another panel", tab.title());
+        }
+    }
+
+    /// The demo's own save/load path, through a real file: the dock comes
+    /// back arranged the way it was left.
+    #[test]
+    fn the_workspace_survives_a_restart() {
+        let path = std::env::temp_dir().join(format!("libgui-layout-test-{}.toml", std::process::id()));
+        std::env::set_var("LIBGUI_LAYOUT", &path);
+        let _ = std::fs::remove_file(&path);
+
+        // First run: no file, so the default layout, then the user tears the
+        // console off into its own stack and it gets saved on the way out.
+        let mut dock = DockState::new();
+        let note = load_layout(&mut dock);
+        assert!(note.contains("default"), "{note}");
+        let mut demo = Demo::default();
+        dock.add_tab(SurfaceId::MAIN, Tab::Console);
+        let before = dock.layout(&Panels { d: &mut demo, viewport_tex: VIEWPORT_TEX, scale: 1.0 });
+        save_layout(&dock, &mut demo);
+        assert!(path.exists(), "nothing was written");
+
+        // Second run: the saved workspace comes back.
+        let mut again = DockState::new();
+        let note = load_layout(&mut again);
+        assert!(note.contains("restored"), "{note}");
+        let after = again.layout(&Panels { d: &mut demo, viewport_tex: VIEWPORT_TEX, scale: 1.0 });
+        assert_eq!(after, before, "the workspace came back different");
+
+        // A corrupt file falls back instead of starting with a blank window.
+        std::fs::write(&path, "this is not a layout").unwrap();
+        let mut broken = DockState::new();
+        let note = load_layout(&mut broken);
+        assert!(note.contains("unreadable"), "{note}");
+        assert!(broken.surfaces()[0].tab_count() > 0, "a bad file left an empty dock");
+        let _ = std::fs::remove_file(&path);
+    }
 }

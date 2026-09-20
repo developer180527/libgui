@@ -32,6 +32,41 @@ pub const THEMES: [(&str, Option<&str>); 6] = [
 ];
 
 impl Tab {
+    /// Every panel this build offers, for restoring a saved layout.
+    pub const ALL: [Tab; 9] = [
+        Tab::Viewport,
+        Tab::Outliner,
+        Tab::Graph,
+        Tab::Inspector,
+        Tab::Assets,
+        Tab::Console,
+        Tab::Stats,
+        Tab::Appearance,
+        Tab::DockTuning,
+    ];
+
+    /// Identity in a saved layout: a hash of a name that does not move, not
+    /// `self as u64`, which would renumber every panel after one inserted in
+    /// the middle and silently reshuffle everyone's saved workspace.
+    pub fn key(self) -> u64 {
+        let name = match self {
+            Tab::Viewport => "viewport",
+            Tab::Outliner => "outliner",
+            Tab::Graph => "graph",
+            Tab::Inspector => "inspector",
+            Tab::Assets => "assets",
+            Tab::Console => "console",
+            Tab::Stats => "stats",
+            Tab::Appearance => "appearance",
+            Tab::DockTuning => "dock-tuning",
+        };
+        libgui::Id::new(name).0
+    }
+
+    pub fn from_key(key: u64) -> Option<Tab> {
+        Tab::ALL.iter().copied().find(|t| t.key() == key)
+    }
+
     pub fn title(self) -> &'static str {
         match self {
             Tab::Viewport => "Scene",
@@ -213,6 +248,8 @@ pub struct Demo {
     /// Edited by the Dock Tuning panel; the host copies it into the dock.
     pub dock_cfg: DockConfig,
     pub reset_layout: bool,
+    /// Set by the View menu; the host saves the dock, which it owns.
+    pub save_layout: bool,
     /// Index into `THEMES`.
     pub theme_choice: usize,
     /// 0 = the theme's own density, then Compact / Regular / Touch.
@@ -269,6 +306,7 @@ impl Default for Demo {
             viewport_px: (1, 1),
             dock_cfg: DockConfig::default(),
             reset_layout: false,
+            save_layout: false,
             theme_choice: 0,
             density_choice: 0,
             theme_status: String::new(),
@@ -374,7 +412,7 @@ impl TabViewer for Panels<'_> {
     }
 
     fn id(&self, tab: &Tab) -> u64 {
-        *tab as u64
+        tab.key()
     }
 
     fn scroll(&self, tab: &Tab) -> bool {

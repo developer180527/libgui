@@ -1237,6 +1237,48 @@ ui.reserve(4_000);   // a container counts as a widget; overestimate freely
 Measured on 4,000 widgets with no text: **109 allocations on the first frame
 without it, 1 with it, 0 on every frame after either way.**
 
+## Saving the workspace
+
+A tool that forgets where its panels were is one people re-arrange every
+morning. `dock.layout(&viewer)` snapshots the split tree, the fractions, which
+tabs are in which pane and which is active, and the floating windows;
+`dock.restore(&saved, ..)` puts it back.
+
+```rust
+// Saving, when the window closes:
+std::fs::write(path, dock.layout(&viewer).to_toml())?;   // the app's I/O, not libgui's
+
+// Loading, at startup:
+let saved = DockLayout::from_toml(&std::fs::read_to_string(path)?)?;
+let report = dock.restore(&saved, Tab::from_key)?;       // None for a panel this build lost
+for key in report.missing_from(Tab::ALL.iter().map(|t| t.key())) {
+    dock.add_tab(SurfaceId::MAIN, Tab::from_key(key).unwrap());   // a panel this build gained
+}
+```
+
+- **Tabs are saved by `TabViewer::id`**, so that id must mean the same thing in
+  the next version of your app: hash a fixed name (`"outliner"`), never use
+  `self as u64`, which renumbers every panel after one inserted in the middle.
+- **A layout is advice, not a command.** The app that loads it is rarely the one
+  that saved it: a tab this build no longer has is dropped, along with the pane
+  and the window it would have left empty; a tab the layout never mentioned is
+  reported in `Restored::missing_from` rather than silently lost; and a layout
+  written by a newer libgui is refused whole, so you can fall back to your
+  default rather than half-apply it.
+- **Files get hand-edited and copied between machines**, so nonsense in one is
+  repaired rather than trusted: a NaN fraction, a zero-size window, an active
+  index past the end of its stack.
+- **The file names its panels.** Tab ids are opaque numbers, so each pane also
+  records its tabs' titles — for whoever opens a customer's layout to work out
+  what is where. They are written on save and ignored on restore.
+- **libgui does no I/O.** It hands over a `DockLayout` of plain data; where that
+  lives is the app's business. `to_toml`/`from_toml` come with the `theme-toml`
+  feature (on by default); with `serde` alone, use any format you like.
+
+`libgui_demo` does exactly this: the workspace is written to
+`~/.libgui-demo-layout.toml` (or `$LIBGUI_LAYOUT`) on exit and restored at
+startup, and `View ▸ Save layout now` writes it on demand.
+
 ## Golden images
 
 Every scene in `crates/libgui_soft/tests/scenes/mod.rs` (widgets at rest, each
@@ -1268,7 +1310,7 @@ lag, fling, easing) stay as frame-trace tests like
    across lines, selection across lines), double-click word select, undo.
 2. ~~Scroll areas~~ ✅ ~~virtualised lists, variable row heights, trees~~ ✅ `ui.virtual_list`, `ui.virtual_rows`, `ui.tree_row`; next: horizontal scroll, keyboard PageUp/Down, multi-select and drag-to-reparent.
 3. ~~Keyboard/shortcut routing~~ ✅ ~~menus, popups/context menus, tooltips, z-order~~ ✅ `Layer`, `popup`, `menu_button`, `context_menu`, `tooltip`; next: checkable/icon menu items, keyboard navigation within a menu, "safe triangle" submenu tracking.
-4. ~~Docking + tabs + splitters~~ ✅ Unity-style with OS-window tear-off; next: layout save/load, tab close/context menu, maximize pane.
+4. ~~Docking + tabs + splitters~~ ✅ Unity-style with OS-window tear-off; ~~layout save/load~~ ✅ `dock.layout()` / `dock.restore()`, versioned and repairing; next: tab close/context menu, maximize pane.
 5. ~~Paths~~ ✅ `p.line` / `polyline` / `bezier` / `wire`, a `Line` primitive at `CONTRACT_VERSION` 2;
    next: stroked/filled arbitrary paths, dashes, arrowheads, and a real line/area plot (`plot` is
    still a debug bar chart).
@@ -1294,6 +1336,7 @@ lag, fling, easing) stay as frame-trace tests like
 
 ## Known scaffold limitations
 
+- Restoring a layout does not restore keyboard focus or which pane was focused.
 - Text fields are single-line and have no undo. Multi-line *editing* is not there yet: `paragraph`
   wraps read-only text, and `ImePreedit` shows a composition.
 - No complex shaping and no font fallback. The bundled Inter has no CJK, Arabic or Indic glyphs, so

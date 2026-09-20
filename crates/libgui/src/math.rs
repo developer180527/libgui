@@ -1,6 +1,7 @@
 use std::ops::{Add, AddAssign, Mul, Sub};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize), serde(deny_unknown_fields))]
 pub struct Vec2 {
     pub x: f32,
     pub y: f32,
@@ -44,6 +45,7 @@ impl Mul<f32> for Vec2 {
 
 /// Axis-aligned rectangle in logical pixels.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize), serde(deny_unknown_fields))]
 pub struct Rect {
     pub x: f32,
     pub y: f32,

@@ -9,8 +9,10 @@ rust-version = "1.87"
 default = ["theme-toml", "fontdue"]
 # The built-in font backend (see `FontRasterizer` to plug in your own).
 fontdue = ["dep:fontdue"]
-# Parse and export TOML themes (pure data, no I/O).
-theme-toml = ["dep:serde", "dep:toml"]
+# Serialise libgui's own data: themes, saved dock layouts. Pure data, no I/O.
+serde = ["dep:serde"]
+# Parse and export TOML themes and dock layouts (pure data, no I/O).
+theme-toml = ["serde", "dep:toml"]
 # Hot-reload a theme file by polling it: the only filesystem access in libgui.
 theme-watch = ["theme-toml"]
 # Time a frame's phases (`FrameOutput::profile`). The only clock in libgui, and
