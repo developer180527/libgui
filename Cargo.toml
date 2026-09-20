@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/libgui", "crates/libgui_winit", "crates/libgui_shaders", "crates/libgui_wgpu", "crates/libgui_demo", "crates/libgui_bench", "crates/libgui_nodes", "crates/libgui_soft", "crates/libgui_keymap"]
+members = ["crates/libgui", "crates/libgui_winit", "crates/libgui_shaders", "crates/libgui_wgpu", "crates/libgui_demo", "crates/libgui_bench", "crates/libgui_nodes", "crates/libgui_soft", "crates/libgui_keymap", "crates/libgui_solaris"]
 
 [workspace.package]
 edition = "2021"

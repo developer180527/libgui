@@ -1,2 +1,4 @@
 target/
 .DS_Store
+# Written by libgui_solaris's `look` test, for eyeballing the layout.
+crates/libgui_solaris/editor.png

@@ -35,6 +35,7 @@ layout persistence. See the roadmap.
 | `crates/libgui_soft` | CPU reference `Backend`: renders a frame to an RGBA8 image, the same bytes on every machine. Golden-image tests live here. |
 | `crates/libgui_nodes` | Node-graph editing: nodes, ports, links, selection, routing. Built *on* libgui, not in it. |
 | `crates/libgui_demo` | winit host + editor layout + an "engine" scene rendered offscreen and shown via `ui.viewport`. |
+| `crates/libgui_solaris` | A second demo: one dense, Houdini-shaped editor — menu bar, shelf, viewport, parameter panel, node network, scene-graph tree, details table and timeline, all at once. Its own theme, and a ~170-line host. |
 
 ## Frame lifecycle
 
@@ -632,6 +633,29 @@ replaceable host adapter, and any other host writes its own.
 
 The demo's outliner does both: rows reorder by dragging, and files dropped from Finder or Explorer
 become objects.
+
+## A second demo
+
+```bash
+cargo run --release -p libgui_solaris
+```
+
+The first demo shows the features one at a time, which is how you learn them and
+not how anyone uses them. `libgui_solaris` puts a whole tool's worth of UI on one
+screen — a menu bar, a shelf, a viewport with rails and a HUD, a parameter editor
+with fifty controls, a node network, a scene-graph tree, a details table and a
+timeline — because density is the thing that actually breaks: the type size, the
+splitters, the id scheme and the frame budget all hold up fine one panel at a
+time.
+
+It has its own [`Theme`] and nothing else of its own: no new widget mechanism, no
+reaching inside the core. Its host is about 170 lines, because that is what a
+host is once docking tear-off and a 3D scene are somebody else's problem.
+
+`cargo test -p libgui_solaris` renders it to `editor.png` with the CPU backend,
+so the layout can be looked at without a window, and asserts what the whole
+screen costs: **719 nodes, 5,459 instances, one draw call, no glyph
+rasterisation and no allocations** in a steady frame.
 
 ## Tables and data grids
 

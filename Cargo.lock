@@ -846,6 +846,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "libgui_solaris"
+version = "0.1.0"
+dependencies = [
+ "libgui",
+ "libgui_keymap",
+ "libgui_nodes",
+ "libgui_soft",
+ "libgui_wgpu",
+ "libgui_winit",
+ "png",
+ "pollster",
+ "wgpu",
+ "winit",
+]
+
+[[package]]
 name = "libgui_wgpu"
 version = "0.1.0"
 dependencies = [
