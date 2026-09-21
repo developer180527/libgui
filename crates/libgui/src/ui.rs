@@ -2335,6 +2335,28 @@ impl Ui {
     /// A scroll area with an id the caller already made (so it can read the
     /// area's retained state first, as [`Ui::virtual_list_with`] does).
     fn scroll_area_id<R>(&mut self, id: Id, opts: ScrollOptions, body: impl FnOnce(&mut Self) -> R) -> R {
+        self.open_scroll_area_id(id, opts);
+        let r = body(self);
+        self.close_container();
+        r
+    }
+
+    /// Open a scroll area without a closure, for a binding that cannot hold
+    /// one. Close it with [`Ui::close_scroll_area`]; the same rules as
+    /// [`Ui::open_container`] apply.
+    pub fn open_scroll_area(&mut self, key: &str) {
+        let gap = self.theme.metrics.space;
+        let opts = ScrollOptions { gap, ..ScrollOptions::new(Size::Grow(1.0)) };
+        let id = self.make_id(("scroll", key));
+        self.open_scroll_area_id(id, opts);
+    }
+
+    /// Close the innermost [`Ui::open_scroll_area`].
+    pub fn close_scroll_area(&mut self) {
+        self.close_container();
+    }
+
+    fn open_scroll_area_id(&mut self, id: Id, opts: ScrollOptions) {
         let bar_y = id.with("bar");
         let bar_x = id.with("bar_x");
         self.mark_seen(bar_y);
@@ -2439,9 +2461,6 @@ impl Ui {
         });
         let i = self.attach(n);
         self.open(i);
-        let r = body(self);
-        self.close();
-        r
     }
 
     /// Scrolling list that only builds the rows you can see.
