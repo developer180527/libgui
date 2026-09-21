@@ -40,6 +40,12 @@ pub struct Response {
     pub active: bool,
     pub pressed: bool,
     pub clicked: bool,
+    /// Clicked twice in the same place, inside
+    /// [`Ui::double_click_time`](Ui::double_click_time). Both `clicked` and
+    /// this are true on that frame: a double click is a click that happens to
+    /// be the second one, and a widget that only cares about single clicks
+    /// needs no change.
+    pub double_clicked: bool,
     /// Movement since last frame while active. Raw (unaccelerated) motion while
     /// the pointer is locked, otherwise the change in pointer position.
     pub drag_delta: Vec2,
@@ -514,6 +520,10 @@ pub struct Ui {
     /// Actions the focused field was offered this frame and could not use, so
     /// their chords fall through to the app. See [`Ui::release_action`].
     released_actions: Vec<UiAction>,
+    /// The last click: which widget, when, and where. One entry, not one per
+    /// widget — a double click is two clicks on the *same* widget, so a click
+    /// anywhere else ends any sequence in progress.
+    last_click: Option<(Id, f64, Vec2)>,
     /// Bytes of document the text widgets read this frame; see
     /// [`crate::testing::FrameCost::text_scanned`].
     pub(crate) text_scanned: usize,
@@ -545,6 +555,13 @@ pub struct Ui {
     /// focus. Platform convention, so libgui has no opinion: see
     /// [`crate::FocusPolicy`] and `libgui_keymap`.
     pub focus_policy: crate::FocusPolicy,
+    /// How long after a click a second one still counts as a double click, in
+    /// seconds.
+    ///
+    /// A **platform convention**, not a library constant: macOS and Windows
+    /// both expose it as a system setting, and an app that reads it should
+    /// write it here. The default is the value both platforms ship.
+    pub double_click_time: f32,
     /// Focus arrived by keyboard, so it is worth drawing a ring. A click moves
     /// focus without one, the way every desktop behaves — a ring that appears
     /// under the mouse is noise.
@@ -705,6 +722,7 @@ impl Ui {
             shortcut_scopes: Vec::new(),
             consumed_keys: Vec::new(),
             released_actions: Vec::new(),
+            last_click: None,
             text_scanned: 0,
             typing: false,
             open_chain: Vec::new(),
@@ -720,6 +738,7 @@ impl Ui {
             focus_order: Vec::new(),
             pending_tab: None,
             focus_policy: crate::FocusPolicy::default(),
+            double_click_time: 0.5,
             focus_visible: false,
             text_states: FxMap::default(),
             text_history: FxMap::default(),
@@ -1333,6 +1352,13 @@ impl Ui {
         self.shortcut_scopes.clear();
         self.consumed_keys.clear();
         self.released_actions.clear();
+        // A press somewhere else ends any double-click in progress — on
+        // another widget or on nothing at all. Without this, clicking a
+        // button, then the background, then the button again reports a double
+        // click, which is not what the two clicks meant.
+        if self.pressed && self.hovered != self.last_click.map(|(id, _, _)| id) {
+            self.last_click = None;
+        }
         self.text_scanned = 0;
         // Focus is resolved during a frame, so this is last frame's answer —
         // the same one-frame-late rule the rest of the input model uses.
@@ -1729,6 +1755,7 @@ impl Ui {
             active,
             pressed: hovered && self.pressed,
             clicked: active && hovered && self.released,
+            double_clicked: active && hovered && self.released && self.is_double_click(id),
             // Zero on the frame the drag starts: the pointer movement that
             // brought it onto the widget happened *before* the press, and with
             // a teleporting pointer (a pen, synthetic input) that jump is large.
@@ -1741,6 +1768,29 @@ impl Ui {
             pinch: if over { self.gesture.zoom - 1.0 } else { 0.0 },
             pan2: if over { self.gesture.pan } else { Vec2::ZERO },
         }
+    }
+
+    /// Was this release the second click of a double click?
+    ///
+    /// Two clicks on the same widget, within [`Ui::double_click_time`] and
+    /// without the pointer wandering more than a few pixels between them —
+    /// the third click starts a new pair rather than reporting again, so a
+    /// rapid run of clicks alternates single, double, single, double instead
+    /// of firing a double every frame.
+    fn is_double_click(&mut self, id: Id) -> bool {
+        let at = self.input.mouse_pos;
+        let now = self.time;
+        let double = match self.last_click {
+            Some((prev, when, pos)) => {
+                prev == id
+                    && now - when <= self.double_click_time as f64
+                    && (pos.x - at.x).abs() <= 4.0
+                    && (pos.y - at.y).abs() <= 4.0
+            }
+            None => false,
+        };
+        self.last_click = if double { None } else { Some((id, now, at)) };
+        double
     }
 
     /// Retained animation value: eases towards `target` each frame.

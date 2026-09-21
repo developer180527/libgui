@@ -237,3 +237,52 @@ fn the_focus_ring_appears_for_the_keyboard_and_not_for_a_click() {
     assert_eq!(ui.focused(), Some(checkbox), "the click moved focus off the widget it pressed");
     assert!(!ring_drawn(&mut ui, &mut form), "a click drew a focus ring");
 }
+
+/// Two clicks in the same place, close together in time, are a double click —
+/// and a third starts a new pair rather than reporting one every frame.
+#[test]
+fn a_double_click_is_two_clicks_on_one_widget() {
+    use libgui::*;
+    const FONT: &[u8] = include_bytes!("../../../assets/Inter.ttf");
+    let mut ui = Ui::new(Theme::dark(), FONT).expect("font");
+
+    let at = Vec2::new(40.0, 20.0);
+    // Returns (clicked, double_clicked) for the frame, rather than writing to
+    // a captured variable the assertions would have to borrow around.
+    fn frame(ui: &mut Ui, dt: f32, events: Vec<InputEvent>) -> (bool, bool) {
+        for e in events {
+            ui.push(e);
+        }
+        ui.begin_frame(FrameInfo { screen_size: Vec2::new(200.0, 100.0), scale: 1.0, dt });
+        let r = ui.button("target");
+        let out = (r.clicked, r.double_clicked);
+        let _ = ui.end_frame();
+        out
+    }
+    let down = InputEvent::PointerButton { button: PointerButton::Primary, pressed: true };
+    let up = InputEvent::PointerButton { button: PointerButton::Primary, pressed: false };
+    // One click: press on one frame, release on the next.
+    let click = |ui: &mut Ui| {
+        frame(ui, 0.016, vec![InputEvent::PointerButton { button: PointerButton::Primary, pressed: true }]);
+        frame(ui, 0.016, vec![InputEvent::PointerButton { button: PointerButton::Primary, pressed: false }])
+    };
+
+    frame(&mut ui, 0.016, vec![InputEvent::PointerMoved { pos: at }]);
+    assert_eq!(click(&mut ui), (true, false), "the first click was a double click");
+    assert_eq!(click(&mut ui), (true, true), "the second click was not a double click");
+    // A third starts a new pair: a run of clicks goes single, double, single,
+    // double — not double for every one after the first.
+    assert_eq!(click(&mut ui), (true, false), "the third click reported a double as well");
+
+    // Too slow is two single clicks.
+    assert_eq!(click(&mut ui), (true, true));
+    frame(&mut ui, 2.0, vec![]);
+    assert_eq!(click(&mut ui), (true, false), "clicks a second apart counted as a double");
+
+    // And so is clicking somewhere else in between.
+    frame(&mut ui, 0.016, vec![InputEvent::PointerMoved { pos: Vec2::new(180.0, 90.0) }]);
+    let _ = click(&mut ui);
+    frame(&mut ui, 0.016, vec![InputEvent::PointerMoved { pos: at }]);
+    assert_eq!(click(&mut ui), (true, false), "a click elsewhere did not end the pair");
+    let _ = (down, up);
+}
