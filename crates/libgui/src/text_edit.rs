@@ -14,20 +14,29 @@ use crate::text_history::{Change, Edited, History};
 use crate::{FrameText, Id};
 use crate::{Color, Cursor, Insets, Layout, Motion, Rect, Response, Size, Ui, UiAction, Vec2};
 
-/// Retained per-field state. Indices are in chars, not bytes.
+/// Retained per-field state. **Indices are byte offsets** into the app's
+/// string, so the field never converts between counts and offsets — see
+/// `Edit`.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct TextState {
     cursor: usize,
     anchor: usize,
     scroll: f32,
-    /// Vertical scroll, for a text area.
-    scroll_y: f32,
+    /// Vertical scroll, for a text area, as an **anchor**: the first visible
+    /// line's number, its byte offset, and how far into it the view starts.
+    ///
+    /// Not a pixel offset, because turning one into "which line is at the top"
+    /// means counting newlines from the start of the document — on every
+    /// frame, with no input. Anchored, the field reads what it draws.
+    top_line: usize,
+    top_byte: usize,
+    top_frac: f32,
     /// Time of the last caret move; the caret stays solid for a moment after it.
     last_move: f64,
-    /// The column Up/Down aim for. Walking past a short line and back must
-    /// return to the column you started in, so the *intended* column is
-    /// remembered rather than recomputed from the caret each time.
-    goal: Option<usize>,
+    /// The x Up/Down aim for. Walking past a short line and back must return
+    /// to where you started, so the *intended position* is remembered rather
+    /// than recomputed from the caret each time.
+    goal: Goal,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -38,14 +47,17 @@ pub struct TextResponse {
     /// Enter was pressed (focus is released).
     pub submitted: bool,
     pub focused: bool,
-    /// Where the caret is, as `(line, column)` — both zero-based, both counted
-    /// in `char`s, not bytes. A single-line field is always on line 0.
+    /// Where the caret is, as `(line, column)`, both zero-based. The column is
+    /// in **characters**, because that is what a status bar means by "Col 4";
+    /// a single-line field is always on line 0.
     ///
-    /// Only the field knows this, and a status bar ("Ln 12, Col 4"), a
-    /// line-scoped command, or a transform over the selection all need it.
+    /// Only the field knows this, and a status bar, a line-scoped command, or
+    /// a transform over the selection all need it.
     pub caret: (usize, usize),
-    /// The selected range as `(start, end)` char indices, ordered, equal when
-    /// nothing is selected. Slice the same `String` you passed in with it.
+    /// The selected range as `(start, end)` **byte offsets**, ordered, equal
+    /// when nothing is selected. Slice the same `String` you passed in with
+    /// it directly — `&text[r.selection.0..r.selection.1]` — with no
+    /// conversion, which is the point of them being bytes.
     pub selection: (usize, usize),
     /// Has typing of its own to take back. When this is false the undo chord
     /// is released to the app, so an Edit menu can say whose undo it is
@@ -55,6 +67,12 @@ pub struct TextResponse {
 }
 
 /// Pure editing operations on a `String` + caret/selection.
+///
+/// **Offsets are bytes**, not chars, and that is the point: a byte offset is
+/// what slices a `String`, so every operation here is local. Counting in
+/// characters meant converting one to a byte offset by walking from the start
+/// of the document, so a caret move in a large file paid for the whole file.
+/// Every index below is on a char boundary, kept there by the motions.
 struct Edit<'a> {
     text: &'a mut String,
     cursor: usize,
@@ -66,13 +84,56 @@ struct Edit<'a> {
     change: Option<Change>,
 }
 
-fn byte_at(s: &str, char_idx: usize) -> usize {
-    s.char_indices().nth(char_idx).map(|(b, _)| b).unwrap_or(s.len())
+/// The column Up and Down aim for, as an **x position in logical pixels**.
+///
+/// Not a character column: in a proportional font the thirtieth `i` and the
+/// thirtieth `W` are nowhere near each other, so a caret walking down a page
+/// would slide sideways. What a person means by "the same place on the next
+/// line" is a position, and only the widget knows how to map one — hence
+/// [`Columns`].
+pub(crate) type Goal = Option<f32>;
+
+/// Maps between an x position within one line and a byte offset in it.
+///
+/// `Edit` does not know about fonts, and vertical motion cannot be done
+/// without them. The text area passes its own; a single-line field has no
+/// line to move to, so it passes one that is never asked.
+pub(crate) trait Columns {
+    /// x of the caret before `byte` in `line`.
+    fn x_at(&self, line: &str, byte: usize) -> f32;
+    /// The byte offset in `line` whose caret is nearest `x`.
+    fn byte_at(&self, line: &str, x: f32) -> usize;
+}
+
+/// A stand-in for tests of the motions that never leave a line.
+#[cfg(test)]
+pub(crate) struct NoColumns;
+
+#[cfg(test)]
+impl Columns for NoColumns {
+    fn x_at(&self, _line: &str, _byte: usize) -> f32 {
+        0.0
+    }
+    fn byte_at(&self, _line: &str, _x: f32) -> usize {
+        0
+    }
+}
+
+/// The char boundary at or before `at`. A field is handed the app's string
+/// every frame and the app may have rewritten it, so an offset kept from last
+/// frame can land mid-character; slicing there would panic.
+fn floor_boundary(text: &str, at: usize) -> usize {
+    let mut at = at.min(text.len());
+    while at > 0 && !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    at
 }
 
 impl Edit<'_> {
+    /// Length in **bytes**.
     fn len(&self) -> usize {
-        self.text.chars().count()
+        self.text.len()
     }
 
     fn selection(&self) -> (usize, usize) {
@@ -85,17 +146,16 @@ impl Edit<'_> {
 
     fn selected_text(&self) -> String {
         let (a, b) = self.selection();
-        self.text[byte_at(self.text, a)..byte_at(self.text, b)].to_string()
+        self.text[a..b].to_string()
     }
 
     fn replace(&mut self, a: usize, b: usize, with: &str) {
-        let (ba, bb) = (byte_at(self.text, a), byte_at(self.text, b));
-        if ba == bb && with.is_empty() {
+        if a == b && with.is_empty() {
             return; // nothing happened: backspace at the start, delete at the end
         }
-        self.change = Some(Change { at: a, removed: self.text[ba..bb].to_string(), inserted: with.to_string() });
-        self.text.replace_range(ba..bb, with);
-        self.cursor = a + with.chars().count();
+        self.change = Some(Change { at: a, removed: self.text[a..b].to_string(), inserted: with.to_string() });
+        self.text.replace_range(a..b, with);
+        self.cursor = a + with.len();
         self.anchor = self.cursor;
     }
 
@@ -104,65 +164,91 @@ impl Edit<'_> {
         self.replace(a, b, s);
     }
 
+    /// The char boundary before `pos`, or `pos` at the start.
+    fn prev_char(&self, pos: usize) -> usize {
+        self.text[..pos].char_indices().next_back().map_or(0, |(i, _)| i)
+    }
+
+    /// The char boundary after `pos`, or `pos` at the end.
+    fn next_char(&self, pos: usize) -> usize {
+        self.text[pos..].chars().next().map_or(pos, |c| pos + c.len_utf8())
+    }
+
     fn word_left(&self, from: usize) -> usize {
-        let chars: Vec<char> = self.text.chars().collect();
         let mut i = from;
-        while i > 0 && chars[i - 1].is_whitespace() {
-            i -= 1;
+        let head = &self.text[..from];
+        for (at, c) in head.char_indices().rev() {
+            if c.is_whitespace() {
+                i = at;
+            } else {
+                break;
+            }
         }
-        while i > 0 && !chars[i - 1].is_whitespace() {
-            i -= 1;
+        for (at, c) in self.text[..i].char_indices().rev() {
+            if c.is_whitespace() {
+                return at + c.len_utf8();
+            }
+            i = at;
         }
         i
     }
 
     fn word_right(&self, from: usize) -> usize {
-        let chars: Vec<char> = self.text.chars().collect();
         let mut i = from;
-        while i < chars.len() && chars[i].is_whitespace() {
-            i += 1;
-        }
-        while i < chars.len() && !chars[i].is_whitespace() {
-            i += 1;
-        }
-        i
-    }
-
-    /// First char of the line `pos` is on.
-    fn line_start(&self, pos: usize) -> usize {
-        let mut start = 0;
-        for (i, c) in self.text.chars().enumerate().take(pos) {
-            if c == '\n' {
-                start = i + 1;
+        for (at, c) in self.text[from..].char_indices() {
+            if c.is_whitespace() {
+                i = from + at + c.len_utf8();
+            } else {
+                i = from + at;
+                break;
             }
         }
-        start
+        for (at, c) in self.text[i..].char_indices() {
+            if c.is_whitespace() {
+                return i + at;
+            }
+            let _ = c;
+        }
+        self.len()
+    }
+
+    /// First byte of the line `pos` is on. Scans back to the previous newline
+    /// only — the length of one line, not of the document.
+    fn line_start(&self, pos: usize) -> usize {
+        self.text[..pos].rfind('\n').map_or(0, |i| i + 1)
     }
 
     /// The newline that ends `pos`'s line, or the end of the text.
     fn line_end(&self, pos: usize) -> usize {
-        self.text.chars().enumerate().skip(pos).find(|(_, c)| *c == '\n').map_or(self.len(), |(i, _)| i)
+        self.text[pos..].find('\n').map_or(self.len(), |i| pos + i)
     }
 
-    /// The same column on the line above, clamped to its length. `None` when
-    /// there is no line above — a single-line field is always in that case.
-    fn line_above(&self, pos: usize, col: usize) -> Option<usize> {
+    /// The line `pos` is on, as a string slice.
+    fn line_at(&self, pos: usize) -> &str {
+        &self.text[self.line_start(pos)..self.line_end(pos)]
+    }
+
+    /// The same x on the line above. `None` when there is no line above — a
+    /// single-line field is always in that case.
+    fn line_above(&self, pos: usize, x: f32, cols: &dyn Columns) -> Option<usize> {
         let start = self.line_start(pos);
         if start == 0 {
             return None;
         }
         let prev_start = self.line_start(start - 1);
-        Some((prev_start + col).min(start - 1))
+        let prev = &self.text[prev_start..start - 1];
+        Some(prev_start + cols.byte_at(prev, x))
     }
 
-    fn line_below(&self, pos: usize, col: usize) -> Option<usize> {
+    fn line_below(&self, pos: usize, x: f32, cols: &dyn Columns) -> Option<usize> {
         let end = self.line_end(pos);
         if end >= self.len() {
             return None;
         }
         let next_start = end + 1;
         let next_end = self.line_end(next_start);
-        Some((next_start + col).min(next_end))
+        let next = &self.text[next_start..next_end];
+        Some(next_start + cols.byte_at(next, x))
     }
 
     fn move_to(&mut self, to: usize, extend: bool) {
@@ -172,33 +258,39 @@ impl Edit<'_> {
         }
     }
 
-    /// Where `motion` takes the caret. `goal` is the column Up and Down aim
-    /// for; with no line to move to they fall back to the ends of the text,
-    /// which is what a single-line field wants from them.
-    fn target(&self, motion: Motion, goal: Option<usize>) -> usize {
+    /// Where `motion` takes the caret. `goal` is the x Up and Down aim for;
+    /// with no line to move to they fall back to the ends of the text, which
+    /// is what a single-line field wants from them.
+    fn target(&self, motion: Motion, goal: Goal, cols: &dyn Columns) -> usize {
         let n = self.len();
-        let col = || goal.unwrap_or_else(|| self.cursor - self.line_start(self.cursor));
+        let x = || goal.unwrap_or_else(|| self.caret_x(cols));
         match motion {
-            Motion::Left => self.cursor.saturating_sub(1),
-            Motion::Right => (self.cursor + 1).min(n),
+            Motion::Left => self.prev_char(self.cursor),
+            Motion::Right => self.next_char(self.cursor),
             Motion::WordLeft => self.word_left(self.cursor),
             Motion::WordRight => self.word_right(self.cursor),
             Motion::LineStart => self.line_start(self.cursor),
             Motion::LineEnd => self.line_end(self.cursor),
-            Motion::Up => self.line_above(self.cursor, col()).unwrap_or(0),
-            Motion::Down => self.line_below(self.cursor, col()).unwrap_or(n),
+            Motion::Up => self.line_above(self.cursor, x(), cols).unwrap_or(0),
+            Motion::Down => self.line_below(self.cursor, x(), cols).unwrap_or(n),
             Motion::DocStart => 0,
             Motion::DocEnd => n,
         }
     }
 
+    /// The caret's x within its own line.
+    fn caret_x(&self, cols: &dyn Columns) -> f32 {
+        let start = self.line_start(self.cursor);
+        cols.x_at(self.line_at(self.cursor), self.cursor - start)
+    }
+
     /// Apply one action. Returns true if the text changed.
     ///
-    /// `goal` is the column Up/Down aim for: kept by the caller across
-    /// actions, set by a vertical move and cleared by anything else.
-    fn action(&mut self, action: UiAction, goal: &mut Option<usize>) -> bool {
-        // Only vertical motion keeps a goal column; everything else decides a
-        // new one by where the caret lands.
+    /// `goal` is the x Up/Down aim for: kept by the caller across actions, set
+    /// by a vertical move and cleared by anything else.
+    fn action(&mut self, action: UiAction, goal: &mut Goal, cols: &dyn Columns) -> bool {
+        // Only vertical motion keeps a goal; everything else decides a new one
+        // by where the caret lands.
         let vertical = matches!(action, UiAction::Move { motion: Motion::Up | Motion::Down, .. });
         if !vertical {
             *goal = None;
@@ -210,11 +302,13 @@ impl Edit<'_> {
                 let to = match motion {
                     Motion::Left if self.has_selection() && !select => self.selection().0,
                     Motion::Right if self.has_selection() && !select => self.selection().1,
-                    m => self.target(m, *goal),
+                    m => {
+                        if vertical && goal.is_none() {
+                            *goal = Some(self.caret_x(cols));
+                        }
+                        self.target(m, *goal, cols)
+                    }
                 };
-                if vertical && goal.is_none() {
-                    *goal = Some(self.cursor - self.line_start(self.cursor));
-                }
                 self.move_to(to, select);
                 false
             }
@@ -223,14 +317,14 @@ impl Edit<'_> {
                 true
             }
             UiAction::Delete(motion) => {
-                let to = self.target(motion, None);
+                let to = self.target(motion, None, cols);
                 if to == self.cursor {
                     return false;
                 }
                 self.replace(self.cursor.min(to), self.cursor.max(to), "");
                 true
             }
-            UiAction::SelectAll => {
+    UiAction::SelectAll => {
                 self.anchor = 0;
                 self.cursor = self.len();
                 false
@@ -297,6 +391,9 @@ fn apply_events(ui: &mut Ui, id: Id, text: &mut String, st: &mut TextState, mult
     // applied instead, which costs the length of the edit rather than the
     // length of the document. See `text_history`.
     let now = ui.time;
+    // Vertical motion needs to measure text, and only the font can: the x a
+    // caret is at on one line decides where it lands on the next.
+    let size = ui.theme.metrics.font_size;
     let events = ui.input.events.clone();
     let mut e = Edit { text, cursor: st.cursor, anchor: st.anchor, change: None };
     for ev in events {
@@ -358,14 +455,16 @@ fn apply_events(ui: &mut Ui, id: Id, text: &mut String, st: &mut TextState, mult
                 }
             }
             Event::Action(a @ UiAction::Delete(_)) => {
+                let cols = LineColumns { fonts: &ui.fonts, font: ui.font, size };
                 out.changed |= edited(&mut e, &mut hist, Edited::Deleting, now, |e| {
-                    e.action(a, &mut None);
+                    e.action(a, &mut None, &cols);
                 });
             }
             Event::Action(a @ (UiAction::Move { .. } | UiAction::SelectAll)) => {
                 // A caret move ends the run: what is typed next is its own step.
                 hist.break_run();
-                out.changed |= e.action(a, &mut st.goal);
+                let cols = LineColumns { fonts: &ui.fonts, font: ui.font, size };
+                out.changed |= e.action(a, &mut st.goal, &cols);
             }
             _ => continue,
         }
@@ -391,20 +490,14 @@ impl Ui {
         }
 
         let mut st = self.text_states.get(&id).copied().unwrap_or_default();
-        let mut carets = self.fonts.carets(self.font, size, text);
-        let n = carets.len() - 1;
-        st.cursor = st.cursor.min(n);
-        st.anchor = st.anchor.min(n);
+        // An offset the app's own write left inside a character, or past the
+        // end, is pulled back to a boundary rather than panicking on the next
+        // slice.
+        st.cursor = floor_boundary(text, st.cursor);
+        st.anchor = floor_boundary(text, st.anchor);
         let text_x = resp.rect.x + pad - st.scroll;
-        let hit = |carets: &[f32], x: f32| -> usize {
-            let local = x - text_x;
-            let mut best = 0;
-            for (i, c) in carets.iter().enumerate() {
-                if (c - local).abs() < (carets[best] - local).abs() {
-                    best = i;
-                }
-            }
-            best
+        let hit = |ui: &Ui, x: f32, text: &str| -> usize {
+            ui.fonts.byte_at_x(ui.font, size, text, x - text_x)
         };
 
         if resp.pressed {
@@ -414,14 +507,14 @@ impl Ui {
             if let Some(h) = self.text_history.get_mut(&id) {
                 h.break_run();
             }
-            let i = hit(&carets, resp.mouse_pos.x);
+            let i = hit(self, resp.mouse_pos.x, text);
             st.cursor = i;
             if !self.input.modifiers.shift {
                 st.anchor = i;
             }
             st.last_move = self.time;
         } else if resp.active && self.mouse_delta.x != 0.0 {
-            st.cursor = hit(&carets, resp.mouse_pos.x); // drag-select
+            st.cursor = hit(self, resp.mouse_pos.x, text); // drag-select
             st.last_move = self.time;
         }
 
@@ -433,9 +526,6 @@ impl Ui {
             changed = out.changed;
             submitted = out.submitted;
             (can_undo, can_redo) = (out.can_undo, out.can_redo);
-            if changed {
-                carets = self.fonts.carets(self.font, size, text);
-            }
         }
         let focused = self.focused == Some(id);
         self.focus_order.push(id);
@@ -445,8 +535,8 @@ impl Ui {
 
         // Keep the caret in view.
         let visible_w = (resp.rect.w - 2.0 * pad).max(0.0);
-        let total_w = *carets.last().unwrap();
-        let cx = carets[st.cursor];
+        let total_w = self.fonts.caret_x(self.font, size, text, text.len());
+        let cx = self.fonts.caret_x(self.font, size, text, st.cursor);
         if resp.rect.w > 0.0 {
             if cx - st.scroll > visible_w {
                 st.scroll = cx - visible_w;
@@ -481,12 +571,17 @@ impl Ui {
         let hover_t = self.animate_bool(id, 1, resp.hovered);
         let caret_on = focused && (((self.time - st.last_move) * 1.8) as i64 % 2 == 0);
         let (sa, sb) = (st.cursor.min(st.anchor), st.cursor.max(st.anchor));
-        let sel = (carets[sa], carets[sb]);
-        let shown = text.clone();
+        let sel = (self.fonts.caret_x(self.font, size, text, sa), self.fonts.caret_x(self.font, size, text, sb));
+        // Handles into the frame's text arena rather than owned copies: the
+        // paint closure runs after layout, so it needs the text to outlive
+        // this call, and three `String`s per field per frame is exactly the
+        // kind of churn the arena exists to avoid.
+        let empty = text.is_empty();
+        let shown = self.frame_text(text);
         // Split at the caret, so the composing text can be drawn between them.
-        let head = shown[..byte_at(&shown, st.cursor)].to_string();
-        let tail = shown[byte_at(&shown, st.cursor)..].to_string();
-        let placeholder = placeholder.to_string();
+        let head = self.frame_text(&text[..st.cursor]);
+        let tail = self.frame_text(&text[st.cursor..]);
+        let placeholder = self.frame_text(placeholder);
         let scroll = st.scroll;
 
         let layout = Layout::leaf(Size::Grow(1.0), Size::Fixed(h)).padding(Insets::xy(pad, 0.0));
@@ -507,20 +602,20 @@ impl Ui {
                 let c = if focus_t > 0.5 { s.selection } else { s.selection.with_alpha(s.selection.a * 0.5) };
                 p.rect(Rect::new(x0 + sel.0, ty, sel.1 - sel.0, line_h), c, 2.0);
             }
-            if shown.is_empty() && pre_text.is_none() {
-                p.text(Vec2::new(inner.x, ty), size, s.placeholder, &placeholder);
+            if empty && pre_text.is_none() {
+                p.text(Vec2::new(inner.x, ty), size, s.placeholder, placeholder);
             } else if let Some(pre) = pre_text {
                 // Three runs: what is committed before the caret, what the IME
                 // is composing, and what is committed after it.
-                p.text(Vec2::new(x0, ty), size, s.text, &head);
+                p.text(Vec2::new(x0, ty), size, s.text, head);
                 let px = x0 + sel.0;
                 p.text(Vec2::new(px, ty), size, s.text, pre);
-                p.text(Vec2::new(px + pre_w, ty), size, s.text, &tail);
+                p.text(Vec2::new(px + pre_w, ty), size, s.text, tail);
                 // Underlined, which is how every platform says "not committed".
                 let u = p.hairline(px, ty + line_h - 2.0, 1.0, 1.0);
                 p.rect(Rect::new(u.x, u.y, pre_w, u.w), s.text, 0.0);
             } else {
-                p.text(Vec2::new(x0, ty), size, s.text, &shown);
+                p.text(Vec2::new(x0, ty), size, s.text, shown);
             }
             if caret_on {
                 // While composing, the caret belongs to the IME's own cursor
@@ -547,7 +642,7 @@ mod tests {
         let (mut text, cursor, anchor) = state;
         let mut e = Edit { text: &mut text, cursor, anchor, change: None };
         for &a in actions {
-            e.action(a, &mut None);
+            e.action(a, &mut None, &NoColumns);
         }
         let (c, a) = (e.cursor, e.anchor);
         (text, c, a)
@@ -586,8 +681,9 @@ mod tests {
     #[test]
     fn selection_replace_and_unicode() {
         // Select "wörld" with a selecting word-left, then type over it.
-        let (mut text, cursor, anchor) = run(edit("héllo wörld", 11), &[sel(WordLeft)]);
-        assert_eq!((cursor, anchor), (6, 11));
+        // Offsets are bytes: "héllo " is 7 bytes, and "wörld" is 6.
+        let (mut text, cursor, anchor) = run(edit("héllo wörld", 13), &[sel(WordLeft)]);
+        assert_eq!((cursor, anchor), (7, 13));
         let mut e = Edit { text: &mut text, cursor, anchor, change: None };
         assert_eq!(e.selected_text(), "wörld");
         e.insert("libgui");
@@ -686,12 +782,6 @@ impl Default for TextAreaOptions {
     }
 }
 
-/// Where one line of the text starts and ends, in chars.
-struct Line {
-    start: usize,
-    end: usize,
-}
-
 /// One visible line, ready to paint: its y, its glyphs, the part of it that is
 /// selected, and its number for the gutter.
 struct Row {
@@ -701,20 +791,100 @@ struct Row {
     number: FrameText,
 }
 
-/// The lines `text` is made of. One pass; a real editor keeps this index
-/// between frames, which is the next thing to do here if a document gets big
-/// enough to notice.
-fn lines_of(text: &str) -> Vec<Line> {
-    let mut out = Vec::new();
-    let mut start = 0;
-    for (i, c) in text.chars().enumerate() {
-        if c == '\n' {
-            out.push(Line { start, end: i });
-            start = i + 1;
+/// Newlines in `s`. Bytes, not chars: the only thing a line boundary is.
+fn count_lines(s: &str) -> usize {
+    s.as_bytes().iter().filter(|&&b| b == b'\n').count()
+}
+
+/// Move `start` (a line start) by `delta` whole lines, staying a line start.
+/// Walks only the lines it crosses, which is what makes a scroll or a caret
+/// nudge cost the distance moved rather than the size of the document.
+fn advance_lines(text: &str, start: usize, delta: isize) -> usize {
+    let mut at = start;
+    for _ in 0..delta.unsigned_abs() {
+        if delta > 0 {
+            match text[at..].find('\n') {
+                Some(i) => at += i + 1,
+                None => return at,
+            }
+        } else {
+            if at == 0 {
+                return 0;
+            }
+            at = text[..at - 1].rfind('\n').map_or(0, |i| i + 1);
         }
     }
-    out.push(Line { start, end: text.chars().count() });
-    out
+    at
+}
+
+/// Move the anchor by `delta` whole lines, keeping its line number in step.
+fn move_anchor(text: &str, st: &mut TextState, delta: isize) {
+    let to = advance_lines(text, st.top_byte, delta);
+    // `advance_lines` stops at the ends, so the line number follows what it
+    // actually did rather than what it was asked to do.
+    let moved = if to >= st.top_byte {
+        count_lines(&text[st.top_byte..to]) as isize
+    } else {
+        -(count_lines(&text[to..st.top_byte]) as isize)
+    };
+    st.top_byte = to;
+    st.top_line = (st.top_line as isize + moved).max(0) as usize;
+}
+
+/// Fold whole lines out of the fractional offset, and stop at the ends.
+///
+/// Scrolling down stops with the last line at the bottom of the view, which
+/// needs to know only whether `rows` more lines exist — a look ahead of one
+/// screen, not a count of the document.
+fn normalise_anchor(text: &str, st: &mut TextState, lh: f32, rows: usize) {
+    while st.top_frac < 0.0 {
+        if st.top_byte == 0 {
+            st.top_frac = 0.0;
+            break;
+        }
+        move_anchor(text, st, -1);
+        st.top_frac += lh;
+    }
+    while st.top_frac >= lh {
+        // At the bottom when a screenful from here reaches the end.
+        let end_of_screen = advance_lines(text, st.top_byte, rows as isize);
+        if text[end_of_screen..].find('\n').is_none() && end_of_screen >= text.len().saturating_sub(1) {
+            st.top_frac = st.top_frac.min(lh - 1.0).max(0.0);
+            break;
+        }
+        let before = st.top_byte;
+        move_anchor(text, st, 1);
+        if st.top_byte == before {
+            st.top_frac = 0.0;
+            break;
+        }
+        st.top_frac -= lh;
+    }
+}
+
+/// The line number and line start of `at`, counted from the beginning. The one
+/// place the field reads the whole document — when the anchor is lost because
+/// the app replaced the string underneath it.
+fn locate(text: &str, at: usize) -> (usize, usize) {
+    let head = &text[..at];
+    (count_lines(head), head.rfind('\n').map_or(0, |i| i + 1))
+}
+
+/// The text area's [`Columns`]: x within a line, measured in the field's own
+/// font and size.
+struct LineColumns<'a> {
+    fonts: &'a crate::Fonts,
+    font: crate::FontId,
+    size: f32,
+}
+
+impl Columns for LineColumns<'_> {
+    fn x_at(&self, line: &str, byte: usize) -> f32 {
+        self.fonts.caret_x(self.font, self.size, line, byte)
+    }
+    fn byte_at(&self, line: &str, x: f32) -> usize {
+        self.fonts.byte_at_x(self.font, self.size, line, x)
+    }
 }
 
 impl Ui {
@@ -723,8 +893,15 @@ impl Ui {
     /// Enter breaks a line and Cmd/Ctrl+Enter commits, which is the
     /// convention everywhere a text box has more than one line. Undo is the
     /// field's own: it takes back typing, and never your document's history.
-    /// While no field has focus the chord does not reach libgui at all, so
-    /// your app's undo is what runs.
+    /// While no field has focus the chord does not reach libgui at all — and
+    /// a focused field with nothing left to take back releases it — so your
+    /// app's undo is what runs in both cases.
+    ///
+    /// **It reads what it draws.** The scroll position is an anchor (the first
+    /// visible line and where it starts), not a pixel offset, so nothing has
+    /// to count newlines from the beginning of the document to find out what
+    /// is on screen. A focused, idle frame over a multi-megabyte file costs
+    /// the same as one over a short note.
     ///
     /// Lines are hard: there is no word wrapping yet, and a long line scrolls
     /// sideways rather than folding.
@@ -747,26 +924,32 @@ impl Ui {
         // ---- geometry ----------------------------------------------------
         let gutter = if opts.line_numbers { (size * 2.6).ceil() } else { 0.0 };
         let view = Rect::new(resp.rect.x + pad + gutter, resp.rect.y + pad, (resp.rect.w - pad * 2.0 - gutter).max(1.0), (resp.rect.h - pad * 2.0).max(1.0));
-        let lines = lines_of(text);
-        let total = lines.len();
-        let content_h = total as f32 * lh;
+        let rows_visible = ((view.h / lh).ceil() as usize).max(1);
+
+        // ---- the anchor ----------------------------------------------------
+        // Everything below is measured from the first visible line, so an idle
+        // frame reads the lines it draws and nothing else. The anchor is
+        // checked first, because the app owns the string and may have replaced
+        // it between frames: a byte offset that is no longer a line start
+        // means the document underneath moved.
+        st.top_byte = st.top_byte.min(text.len());
+        if st.top_byte > 0 && text.as_bytes().get(st.top_byte - 1) != Some(&b'\n') {
+            st.top_byte = 0;
+            st.top_line = 0;
+            st.top_frac = 0.0;
+        }
+        st.cursor = floor_boundary(text, st.cursor);
+        st.anchor = floor_boundary(text, st.anchor);
 
         // ---- pointer -------------------------------------------------------
-        // Char index under a window point, which is what a click and a drag
-        // both need.
-        let index_at = |ui: &mut Ui, p: Vec2, lines: &[Line], text: &str| -> usize {
-            let row = (((p.y - view.y + st.scroll_y) / lh).floor().max(0.0) as usize).min(total.saturating_sub(1));
-            let line = &lines[row];
-            let src: String = text.chars().skip(line.start).take(line.end - line.start).collect();
-            let carets = ui.fonts.carets(ui.font, size, &src);
-            let local = p.x - view.x + st.scroll;
-            let mut best = 0;
-            for (i, c) in carets.iter().enumerate() {
-                if (c - local).abs() < (carets[best] - local).abs() {
-                    best = i;
-                }
-            }
-            line.start + best
+        // Byte offset under a window point. The point is inside the view, so
+        // the line it names is reached from the anchor, not from the start of
+        // the document.
+        let row_at = |ui: &Ui, p: Vec2, text: &str, st: &TextState| -> usize {
+            let delta = ((p.y - view.y + st.top_frac) / lh).floor().max(0.0) as isize;
+            let start = advance_lines(text, st.top_byte, delta);
+            let end = text[start..].find('\n').map_or(text.len(), |i| start + i);
+            start + ui.fonts.byte_at_x(ui.font, size, &text[start..end], p.x - view.x + st.scroll)
         };
 
         if resp.pressed {
@@ -774,7 +957,7 @@ impl Ui {
             if let Some(h) = self.text_history.get_mut(&id) {
                 h.break_run();
             }
-            let i = index_at(self, resp.mouse_pos, &lines, text);
+            let i = row_at(self, resp.mouse_pos, text, &st);
             st.cursor = i;
             if !self.input.modifiers.shift {
                 st.anchor = i;
@@ -782,7 +965,7 @@ impl Ui {
             st.goal = None;
             st.last_move = self.time;
         } else if resp.active && (self.mouse_delta.x != 0.0 || self.mouse_delta.y != 0.0) {
-            st.cursor = index_at(self, resp.mouse_pos, &lines, text);
+            st.cursor = row_at(self, resp.mouse_pos, text, &st);
             st.last_move = self.time;
         }
 
@@ -798,35 +981,60 @@ impl Ui {
         }
         let focused = self.focused == Some(id);
         self.focus_order.push(id);
+        st.cursor = floor_boundary(text, st.cursor);
+        st.anchor = floor_boundary(text, st.anchor);
 
-        // Re-index after an edit, and clamp a caret that a shorter text left
-        // past the end.
-        let lines = if changed { lines_of(text) } else { lines };
-        let n = text.chars().count();
-        st.cursor = st.cursor.min(n);
-        st.anchor = st.anchor.min(n);
-        let total = lines.len();
+        // An edit before the anchor moves it: the same line now starts
+        // somewhere else, and may not be the same line number either. Both
+        // follow from the edit itself, so neither needs a search.
+        if st.top_byte > text.len() || (st.top_byte > 0 && text.as_bytes().get(st.top_byte - 1) != Some(&b'\n')) {
+            self.text_scanned += st.cursor;
+            let (line, byte) = locate(text, st.cursor);
+            st.top_line = line;
+            st.top_byte = byte;
+            st.top_frac = 0.0;
+        }
+
+        // ---- where the caret is, relative to the anchor ---------------------
+        let line_start = text[..st.cursor].rfind('\n').map_or(0, |i| i + 1);
+        let line_end = text[st.cursor..].find('\n').map_or(text.len(), |i| st.cursor + i);
+        let caret_row = if st.cursor >= st.top_byte {
+            self.text_scanned += st.cursor - st.top_byte;
+            st.top_line + count_lines(&text[st.top_byte..st.cursor])
+        } else {
+            self.text_scanned += st.top_byte - st.cursor;
+            st.top_line.saturating_sub(count_lines(&text[st.cursor..st.top_byte]))
+        };
 
         // ---- scrolling -----------------------------------------------------
         let wheel = if resp.hovered { self.input.scroll.y } else { 0.0 };
-        let max_y = (total as f32 * lh - view.h).max(0.0);
-        st.scroll_y = (st.scroll_y - wheel).clamp(0.0, max_y);
+        st.top_frac -= wheel;
+        normalise_anchor(text, &mut st, lh, rows_visible);
 
-        let row = lines.iter().position(|l| st.cursor <= l.end).unwrap_or(0);
-        let col = st.cursor - lines[row].start;
-        // Keep the caret in view, vertically and sideways.
-        let caret_y = row as f32 * lh;
-        if focused {
-            if caret_y < st.scroll_y {
-                st.scroll_y = caret_y;
-            } else if caret_y + lh > st.scroll_y + view.h {
-                st.scroll_y = caret_y + lh - view.h;
+        // Keep the caret in view — but only on the frames the caret actually
+        // moved. Doing it on every frame means a wheel scroll is undone before
+        // it is drawn: the view snaps back to a caret that has not moved,
+        // which is what "the text area will not scroll while it has focus"
+        // looked like.
+        let caret_moved = st.last_move == self.time;
+        if focused && caret_moved {
+            let delta = if caret_row < st.top_line {
+                caret_row as isize - st.top_line as isize
+            } else if caret_row + 1 > st.top_line + rows_visible {
+                (caret_row + 1 - rows_visible) as isize - st.top_line as isize
+            } else {
+                0
+            };
+            if delta != 0 {
+                move_anchor(text, &mut st, delta);
+                st.top_frac = 0.0;
             }
-            st.scroll_y = st.scroll_y.clamp(0.0, max_y);
         }
-        let line_src: String = text.chars().skip(lines[row].start).take(lines[row].end - lines[row].start).collect();
-        let caret_carets = self.fonts.carets(self.font, size, &line_src);
-        let caret_x = caret_carets[col.min(caret_carets.len() - 1)];
+
+        let line_src = &text[line_start..line_end];
+        let caret_x = self.fonts.caret_x(self.font, size, line_src, st.cursor - line_start);
+        // The column, in chars, for whoever draws a status bar.
+        let col = line_src[..st.cursor - line_start].chars().count();
         if focused {
             if caret_x - st.scroll > view.w - 2.0 {
                 st.scroll = caret_x - view.w + 2.0;
@@ -838,30 +1046,37 @@ impl Ui {
         }
 
         // ---- what to draw --------------------------------------------------
-        // Only the visible lines: a thousand-line script costs what a screenful
-        // does, the same rule the virtual list follows.
-        let first = (st.scroll_y / lh).floor().max(0.0) as usize;
-        let visible = ((view.h / lh).ceil() as usize + 2).min(total.saturating_sub(first));
+        // From the anchor forward: a five-thousand-line script draws what a
+        // screenful draws, and reads no more of the document than that.
         let (sel_a, sel_b) = (st.cursor.min(st.anchor), st.cursor.max(st.anchor));
-        let mut rows: Vec<Row> = Vec::with_capacity(visible);
-        for (r, l) in lines.iter().enumerate().skip(first).take(visible) {
-            let src: String = text.chars().skip(l.start).take(l.end - l.start).collect();
-            let carets = self.fonts.carets(self.font, size, &src);
-            let y = r as f32 * lh - st.scroll_y;
-            // This line's share of the selection, if any.
-            let sel = if sel_b > sel_a && sel_b > l.start && sel_a <= l.end {
-                let a = sel_a.max(l.start) - l.start;
-                let b = sel_b.min(l.end) - l.start;
-                let (x0, x1) = (carets[a.min(carets.len() - 1)], carets[b.min(carets.len() - 1)]);
+        let mut rows: Vec<Row> = Vec::with_capacity(rows_visible + 1);
+        let mut at = st.top_byte;
+        for r in st.top_line..st.top_line + rows_visible + 1 {
+            let end = text[at..].find('\n').map_or(text.len(), |i| at + i);
+            let src = &text[at..end];
+            let y = (r - st.top_line) as f32 * lh - st.top_frac;
+            // This line's share of the selection, if any. Measured only when
+            // there is one: a caret table per visible line is what made an
+            // idle text area allocate on every frame.
+            let sel = if sel_b > sel_a && sel_b > at && sel_a <= end {
+                let x0 = self.fonts.caret_x(self.font, size, src, sel_a.max(at) - at);
+                let x1 = self.fonts.caret_x(self.font, size, src, sel_b.min(end) - at);
                 // A selected newline shows as a sliver past the last glyph.
-                let x1 = if sel_b > l.end { x1 + size * 0.35 } else { x1 };
+                let x1 = if sel_b > end { x1 + size * 0.35 } else { x1 };
                 Some((x0, x1))
             } else {
                 None
             };
             let number = if opts.line_numbers { self.frame_text(&(r + 1).to_string()) } else { self.frame_text("") };
-            rows.push(Row { y, text: self.frame_text(&src), selection: sel, number });
+            self.text_scanned += end - at;
+            rows.push(Row { y, text: self.frame_text(src), selection: sel, number });
+            if end >= text.len() {
+                break;
+            }
+            at = end + 1;
         }
+        let caret_y = (caret_row as f32 - st.top_line as f32) * lh - st.top_frac;
+        let row = caret_row;
 
         let caret_on = focused && (((self.time - st.last_move) * 1.8) as i64 % 2 == 0);
         let focus_t = self.animate_bool(id, 0, focused);
@@ -873,7 +1088,7 @@ impl Ui {
             Size::Fit => Size::Fixed(opts.rows as f32 * lh + pad * 2.0),
             h => h,
         };
-        let (scroll_x, scroll_y) = (st.scroll, st.scroll_y);
+        let scroll_x = st.scroll;
         let caret_pos = Vec2::new(caret_x, caret_y);
         let layout = Layout::leaf(Size::Grow(1.0), height);
         self.add_leaf(id, layout, Vec2::new(80.0, lh + pad * 2.0), true, move |p, r| {
@@ -907,10 +1122,9 @@ impl Ui {
 
         if focused {
             let x = resp.rect.x + pad + gutter - scroll_x + caret_pos.x;
-            let y = resp.rect.y + pad + caret_pos.y - scroll_y;
+            let y = resp.rect.y + pad + caret_pos.y;
             self.ime_rect = Some(Rect::new(x, y, 1.0, lh));
         }
-        let _ = content_h;
         TextResponse { response: resp, changed, submitted, focused, caret: (row, col), selection: (sel_a, sel_b), can_undo, can_redo }
     }
 }

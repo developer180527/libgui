@@ -514,6 +514,9 @@ pub struct Ui {
     /// Actions the focused field was offered this frame and could not use, so
     /// their chords fall through to the app. See [`Ui::release_action`].
     released_actions: Vec<UiAction>,
+    /// Bytes of document the text widgets read this frame; see
+    /// [`crate::testing::FrameCost::text_scanned`].
+    pub(crate) text_scanned: usize,
     /// A text field had focus when the frame began: its editing keys are its own.
     typing: bool,
     /// The open popup chain: a root menu, then its submenus. Retained.
@@ -702,6 +705,7 @@ impl Ui {
             shortcut_scopes: Vec::new(),
             consumed_keys: Vec::new(),
             released_actions: Vec::new(),
+            text_scanned: 0,
             typing: false,
             open_chain: Vec::new(),
             open_anchors: FxMap::default(),
@@ -1329,6 +1333,7 @@ impl Ui {
         self.shortcut_scopes.clear();
         self.consumed_keys.clear();
         self.released_actions.clear();
+        self.text_scanned = 0;
         // Focus is resolved during a frame, so this is last frame's answer —
         // the same one-frame-late rule the rest of the input model uses.
         self.typing = self.focused.is_some();
@@ -1430,6 +1435,7 @@ impl Ui {
                 true => self.nodes.iter().filter(|n| n.interactive && dup.contains(&n.id)).count() as u32,
                 false => 0,
             },
+            text_scanned: self.text_scanned,
         };
 
         // Feed this frame's measured content back into scroll state.

@@ -35,6 +35,8 @@ fn bindings() -> KeyBindings {
 struct World {
     ui: Ui,
     text: String,
+    /// The last frame's caret, as `(line, column)`.
+    caret: (usize, usize),
     /// Set when the *app's* undo shortcut fired, which must not happen while a
     /// field has focus.
     app_undo: usize,
@@ -44,7 +46,7 @@ impl World {
     fn new(text: &str) -> Self {
         let mut ui = Ui::new(Theme::dark(), FONT).expect("font");
         ui.set_key_bindings(bindings());
-        Self { ui, text: text.to_string(), app_undo: 0 }
+        Self { ui, text: text.to_string(), caret: (0, 0), app_undo: 0 }
     }
 
     /// One frame: a text area, and the app's own Undo command after it — the
@@ -56,6 +58,7 @@ impl World {
             self.app_undo += 1;
         }
         let _ = self.ui.end_frame();
+        self.caret = r.caret;
         r
     }
 
@@ -318,4 +321,135 @@ fn a_pasted_tab_is_not_flattened_to_a_space() {
     w.frame();
     assert!(w.text.contains('\t'), "the tab was flattened: {:?}", w.text);
     assert_eq!(w.text, "build:\n\tcc -o out main.c\n");
+}
+
+/// A text area must read **what it draws**, not the document.
+///
+/// It used to build a `Vec` of every line from a `char` walk, count the
+/// characters again for the caret clamp, and convert char indices to byte
+/// offsets by walking from the start a third time — on every frame, with no
+/// input. The scroll position is now an anchor (which line is at the top, and
+/// where it starts) rather than a pixel offset, so nothing has to count
+/// newlines from the beginning to find out what is on screen.
+#[test]
+fn a_frame_reads_what_it_draws_not_the_document() {
+    let small: String = (0..200).map(|i| format!("line {i}\n")).collect();
+    let large: String = (0..200_000).map(|i| format!("line {i}\n")).collect();
+    assert!(large.len() > 2_000_000, "the fixture is not big enough to tell the two apart");
+
+    let read = |doc: &str, focus: bool| -> usize {
+        let mut w = World::new(doc);
+        w.warm();
+        if focus {
+            w.click(Vec2::new(60.0, 20.0));
+            w.frame();
+        }
+        w.frame();
+        w.ui.frame_cost().text_scanned
+    };
+
+    let (a, b) = (read(&small, false), read(&large, false));
+    assert_eq!(a, b, "an idle frame read {a} bytes of a small document and {b} of a large one");
+    assert!(a < 4_000, "an idle frame read {a} bytes to draw a screenful");
+
+    // Focused, with a caret to place: still bounded by the window.
+    let (a, b) = (read(&small, true), read(&large, true));
+    assert_eq!(a, b, "a focused frame's reading followed the document's size");
+}
+
+/// Up and Down aim for a **position**, not a character column. In a
+/// proportional font the thirtieth `i` and the thirtieth `W` are nowhere near
+/// each other, so a caret walking down a page of mixed text used to slide
+/// sideways.
+#[test]
+fn vertical_motion_holds_its_x_not_its_column() {
+    // Line 1 is wide characters, line 2 narrow, line 3 wide again. Landing on
+    // the same *column* in line 2 would be a third of the way along it; the
+    // same x is most of the way along.
+    let mut w = World::new("WWWWWWWWWW\niiiiiiiiiiiiiiiiiiiiiiiiiiiiii\nWWWWWWWWWW");
+    w.warm();
+    w.click(Vec2::new(60.0, 20.0));
+    w.key(Key::Home, &[]);
+    w.key(Key::ArrowRight, &[]);
+    w.key(Key::ArrowRight, &[]); // after two Ws
+    w.key(Key::ArrowDown, &[]);
+    w.type_text("|");
+
+    let line2 = w.text.lines().nth(1).expect("second line");
+    let at = line2.find('|').expect("the marker did not land on the second line");
+    assert!(
+        at > 4,
+        "two Ws wide landed at character {at} of the narrow line — that is a column, not a position"
+    );
+
+    // And coming back up returns to where it started, rather than to wherever
+    // the narrow line's column happened to be.
+    let mut w = World::new("WWWWWWWWWW\niiii\nWWWWWWWWWW");
+    w.warm();
+    w.click(Vec2::new(60.0, 20.0));
+    w.key(Key::Home, &[]);
+    for _ in 0..5 {
+        w.key(Key::ArrowRight, &[]);
+    }
+    w.key(Key::ArrowDown, &[]); // the short line clamps
+    w.key(Key::ArrowDown, &[]); // back to a wide line at the original x
+    w.type_text("|");
+    let line3 = w.text.lines().nth(2).expect("third line");
+    assert_eq!(line3.find('|'), Some(5), "the goal position was lost crossing the short line");
+}
+
+/// The scroll position is an anchor now, so the things a pixel offset gave for
+/// free have to be checked: that the wheel moves the view, that it stops at
+/// both ends, and that the caret drags the view along with it.
+#[test]
+fn the_view_scrolls_and_stops_at_both_ends() {
+    let doc: String = (0..200).map(|i| format!("line {i}\n")).collect();
+    let mut w = World::new(&doc);
+    w.warm();
+
+    // Which line is at the top: click the first row and ask.
+    let top_line = |w: &mut World| -> usize {
+        w.click(Vec2::new(30.0, 12.0));
+        w.frame();
+        w.caret.0
+    };
+    assert_eq!(top_line(&mut w), 0, "the view did not start at the top");
+
+    let wheel = |w: &mut World, dy: f32| {
+        // Hover first, in its own frame: a widget learns it is hovered from
+        // the rect layout gave it last frame.
+        w.ui.push(InputEvent::PointerMoved { pos: Vec2::new(60.0, 40.0) });
+        w.frame();
+        w.ui.push(InputEvent::Wheel { delta: Vec2::new(0.0, dy), unit: WheelUnit::Pixel });
+        w.frame();
+    };
+
+    wheel(&mut w, -100.0); // down
+    let scrolled = top_line(&mut w);
+    assert!(scrolled > 0, "the wheel did not scroll the view");
+
+    wheel(&mut w, 1000.0); // far up
+    assert_eq!(top_line(&mut w), 0, "scrolling up did not stop at the first line");
+
+    // Far down: the last line stays in view rather than scrolling off.
+    for _ in 0..40 {
+        wheel(&mut w, -1000.0);
+    }
+    let bottom = top_line(&mut w);
+    assert!(bottom > 100, "scrolling down barely moved: top line {bottom}");
+    assert!(bottom < 200, "the view scrolled past the end of the document: top line {bottom}");
+
+    // The caret drags the view with it: back to the top, then down past the
+    // bottom of the window.
+    wheel(&mut w, 100_000.0);
+    w.click(Vec2::new(30.0, 12.0));
+    w.key(Key::Home, &[]);
+    let start = w.caret.0;
+    for _ in 0..12 {
+        w.key(Key::ArrowDown, &[]);
+    }
+    assert_eq!(w.caret.0, start + 12, "the caret did not move twelve lines");
+    w.type_text("X");
+    let line = w.text.lines().nth(start + 12).expect("that line");
+    assert!(line.contains('X'), "the caret and the view disagree about which line is which");
 }

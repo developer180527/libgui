@@ -381,6 +381,60 @@ impl Fonts {
         Vec2::new((w * k).ceil(), ((asc - desc) * k).ceil())
     }
 
+    /// x of the caret before byte offset `byte`, in logical px from the start
+    /// of `text`.
+    ///
+    /// The same answer as [`Fonts::carets`] at that index, without building
+    /// the vector: a text widget wants one or two of these per frame, and
+    /// allocating a caret table per visible line is what made a text area
+    /// allocate on every frame at rest.
+    pub fn caret_x(&self, font: FontId, size: f32, text: &str, byte: usize) -> f32 {
+        let px = self.px(size);
+        let r = self.fit(size, px);
+        let s = self.text_scale();
+        let run = self.run(font, px, text);
+        if byte >= text.len() {
+            return (run.width * r).round() / s;
+        }
+        let mut pen = 0.0f32;
+        for g in run.glyphs.iter() {
+            if (g.cluster as usize) >= byte {
+                break;
+            }
+            pen += g.advance;
+        }
+        (pen * r).round() / s
+    }
+
+    /// The byte offset in `text` whose caret is nearest `x` (logical px from
+    /// the start of the text). Always a char boundary.
+    ///
+    /// This is the hit test behind a click and behind Up/Down: both ask "which
+    /// character is under this position", which is a question about pixels and
+    /// not about character counts.
+    pub fn byte_at_x(&self, font: FontId, size: f32, text: &str, x: f32) -> usize {
+        let px = self.px(size);
+        let r = self.fit(size, px);
+        let s = self.text_scale();
+        let run = self.run(font, px, text);
+        let (mut best, mut best_d) = (0usize, f32::INFINITY);
+        let (mut j, mut pen) = (0usize, 0.0f32);
+        for (byte, _) in text.char_indices() {
+            while j < run.glyphs.len() && (run.glyphs[j].cluster as usize) < byte {
+                pen += run.glyphs[j].advance;
+                j += 1;
+            }
+            let d = ((pen * r).round() / s - x).abs();
+            if d < best_d {
+                (best, best_d) = (byte, d);
+            }
+        }
+        if ((run.width * r).round() / s - x).abs() < best_d {
+            return text.len();
+        }
+        best
+    }
+
     /// Caret x positions (logical px from the text start) before each char and
     /// after the last one: `len == chars + 1`.
     ///

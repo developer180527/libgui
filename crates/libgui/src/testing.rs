@@ -63,6 +63,14 @@ pub struct FrameCost {
     /// animation and drag state move to the neighbour when the list reorders.
     /// Only counted while [`Ui::audit`] is on, which [`steady_frame`] turns on.
     pub unkeyed_duplicates: u32,
+    /// Bytes of document a text widget read this frame.
+    ///
+    /// A text area has to find its line boundaries, and there is no way to do
+    /// that without reading the text — but it should read it **once**. This
+    /// counts, so "the field walks the document three times a frame" is a test
+    /// failure rather than something you find with a profiler. A field with no
+    /// text, or one whose widget did not build, reads nothing.
+    pub text_scanned: usize,
 }
 
 /// Upper bounds on a [`FrameCost`]. Unset fields are not checked.

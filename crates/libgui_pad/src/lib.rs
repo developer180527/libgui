@@ -102,9 +102,11 @@ pub struct Pad {
     /// word processor keeps the paper white in its dark mode.
     pub paper: bool,
 
-    /// Where the caret was on the last frame, from [`TextResponse::caret`].
-    /// Commands act on it, which is why the field has to report it.
+    /// Where the caret was on the last frame, from [`TextResponse::caret`]:
+    /// a line number and a character column. Commands act on it, which is why
+    /// the field has to report it.
     pub caret: (usize, usize),
+    /// The selected range, as byte offsets into `text`.
     pub selection: (usize, usize),
     /// The page has the keyboard — so the undo chord *may* be the field's.
     pub editing: bool,
@@ -272,9 +274,8 @@ impl Pad {
             Cmd::InsertDate => {
                 self.snapshot();
                 let stamp = utc_now();
-                let at = char_index(&self.text, self.caret);
-                let byte = byte_of(&self.text, at);
-                self.text.insert_str(byte, &stamp);
+                let at = line_byte(&self.text, self.caret);
+                self.text.insert_str(at, &stamp);
                 self.status = format!("Inserted {stamp}");
             }
             Cmd::DuplicateLine => {
@@ -323,12 +324,15 @@ impl Pad {
                 let up = cmd == Cmd::Upper;
                 // The selection, or the caret's line when there is none — the
                 // rule every editor uses for a line-or-selection command.
+                // Byte offsets both ways: the field reports the selection in
+                // bytes, and a line's span is measured the same way, so a
+                // command never converts between counts and offsets.
                 let (a, b) = if self.has_selection() { self.selection } else { line_span(&self.text, self.caret.0) };
-                let (ba, bb) = (byte_of(&self.text, a), byte_of(&self.text, b));
-                let slice = &self.text[ba..bb];
+                let slice = &self.text[a..b];
                 let cased = if up { slice.to_uppercase() } else { slice.to_lowercase() };
-                self.text.replace_range(ba..bb, &cased);
-                self.status = format!("{} {} characters", if up { "Upper-cased" } else { "Lower-cased" }, b - a);
+                let n = slice.chars().count();
+                self.text.replace_range(a..b, &cased);
+                self.status = format!("{} {n} characters", if up { "Upper-cased" } else { "Lower-cased" });
             }
             Cmd::ReplaceAll => {
                 if self.find.is_empty() {
@@ -424,29 +428,26 @@ pub(crate) fn lines(text: &str) -> Vec<String> {
     text.split('\n').map(str::to_string).collect()
 }
 
-/// Byte offset of a char index — what `String` wants, given what the field
-/// reports.
-fn byte_of(text: &str, char_idx: usize) -> usize {
-    text.char_indices().nth(char_idx).map(|(b, _)| b).unwrap_or(text.len())
+/// Byte offset of the caret's `(line, column)` — the column counted in chars,
+/// as the field reports it.
+fn line_byte(text: &str, caret: (usize, usize)) -> usize {
+    // The line's own span, not the rest of the document: a column past the end
+    // of its line clamps there rather than running on into the next one.
+    let (start, end) = line_span(text, caret.0);
+    let line = &text[start..end];
+    line.char_indices().nth(caret.1).map_or(end, |(b, _)| start + b)
 }
 
-/// The caret's `(line, column)` as one char index into the document.
-fn char_index(text: &str, caret: (usize, usize)) -> usize {
-    let mut at = 0;
-    for (i, line) in text.split('\n').enumerate() {
-        if i == caret.0 {
-            return at + caret.1.min(line.chars().count());
-        }
-        at += line.chars().count() + 1;
-    }
-    text.chars().count()
-}
-
-/// The char range one line covers, newline excluded.
+/// The byte range one line covers, newline excluded.
 fn line_span(text: &str, line: usize) -> (usize, usize) {
-    let start = char_index(text, (line, 0));
-    let len = text.split('\n').nth(line).map_or(0, |l| l.chars().count());
-    (start, start + len)
+    let mut start = 0;
+    for _ in 0..line {
+        match text[start..].find('\n') {
+            Some(i) => start += i + 1,
+            None => return (text.len(), text.len()),
+        }
+    }
+    (start, text[start..].find('\n').map_or(text.len(), |i| start + i))
 }
 
 /// Case-insensitive replace, so Find and Replace agree about what a match is.
@@ -499,14 +500,18 @@ fn utc_stamp(secs: i64) -> String {
 mod tests {
     use super::*;
 
+    /// The field reports a character column; a `String` is sliced by bytes.
+    /// This is the one place Pad converts, and the line it converts within is
+    /// the only thing it walks.
     #[test]
-    fn caret_to_char_index_and_back() {
+    fn a_caret_becomes_a_byte_offset() {
         let text = "one\ntwö\nthree";
-        assert_eq!(char_index(text, (0, 0)), 0);
-        assert_eq!(char_index(text, (1, 2)), 6, "the multi-byte line counted bytes, not chars");
-        assert_eq!(line_span(text, 1), (4, 7));
+        assert_eq!(line_byte(text, (0, 0)), 0);
+        assert_eq!(line_span(text, 1), (4, 8), "the multi-byte line was measured in chars");
+        // Column 3 of "twö" is past 'ö', which is two bytes.
+        assert_eq!(line_byte(text, (1, 3)), 8);
         // A column past the end of its line clamps rather than running on.
-        assert_eq!(char_index(text, (1, 99)), 7);
+        assert_eq!(line_byte(text, (1, 99)), 8);
     }
 
     #[test]

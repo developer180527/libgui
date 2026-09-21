@@ -97,6 +97,65 @@ fn a_frame_stays_within_its_allocation_budget() {
     a_table_costs_nothing_per_frame(&mut ui);
     a_frame_without_text_allocates_nothing(false);
     a_frame_without_text_allocates_nothing(true);
+    a_text_area_costs_nothing_at_rest(&mut ui);
+}
+
+/// The text widgets, which no allocation test used to build — so nobody
+/// noticed that a text area allocated on every frame at rest, and more of them
+/// the longer the document.
+///
+/// What it was doing: a `Vec` of every line in the document, rebuilt each
+/// frame from a `char` walk, plus a caret table (another `Vec`) for every
+/// visible line, plus a `String` copy of each visible line to measure it. Now
+/// the lines are slices of the app's own string and the caret positions are
+/// asked for one at a time.
+fn a_text_area_costs_nothing_at_rest(ui: &mut Ui) {
+    let short: String = (0..10).map(|i| format!("line {i}\n")).collect();
+    let long: String = (0..5_000).map(|i| format!("line {i}\n")).collect();
+
+    let sample = |ui: &mut Ui, text: &mut String| -> u64 {
+        for _ in 0..40 {
+            ui.begin_frame(FrameInfo::default());
+            ui.text_area("doc", text, 12);
+            let _ = ui.end_frame();
+        }
+        ALLOCS.store(0, Relaxed);
+        ui.begin_frame(FrameInfo::default());
+        ui.text_area("doc", text, 12);
+        let _ = ui.end_frame();
+        ALLOCS.load(Relaxed)
+    };
+
+    let (mut a, mut b) = (short.clone(), long.clone());
+    let ten = sample(ui, &mut a);
+    let five_thousand = sample(ui, &mut b);
+    println!("a text area at rest: {ten} allocations over 10 lines, {five_thousand} over 5,000");
+
+    // The document's size must not appear in the count at all: the widget
+    // reads the text to find its lines, but it draws a screenful either way.
+    assert_eq!(
+        ten, five_thousand,
+        "a text area allocated {ten} times over 10 lines and {five_thousand} over 5,000 — \
+         the cost follows the document, not the window"
+    );
+    // One: the list of visible rows handed to the paint closure. A constant,
+    // not a cost per line — the rest is slices of the app's own string.
+    assert!(ten <= 1, "an idle text area allocated {ten} times");
+
+    // And a single-line field, which a form has dozens of.
+    let mut one = String::from("a value in a field");
+    for _ in 0..40 {
+        ui.begin_frame(FrameInfo::default());
+        ui.text_input("field", &mut one, "");
+        let _ = ui.end_frame();
+    }
+    ALLOCS.store(0, Relaxed);
+    ui.begin_frame(FrameInfo::default());
+    ui.text_input("field", &mut one, "");
+    let _ = ui.end_frame();
+    let input = ALLOCS.load(Relaxed);
+    println!("a text input at rest: {input} allocations");
+    assert_eq!(input, 0, "an idle text input allocated {input} times");
 }
 
 /// libgui keeps no process-global state, so the allocator is whatever the

@@ -173,15 +173,23 @@ ui.text_area_with("script", &mut src, TextAreaOptions { rows: 20, line_numbers: 
   so the core has no platform or clipboard dependency. `libgui_demo` is a winit + arboard reference.
 - `ui.ime_rect()` gives the caret rect for positioning an IME candidate window.
 - **`text_area`** is the same editor with more than one line: vertical and horizontal scrolling, a
-  caret that stays in view, selection across lines, Up/Down that keep the column you started in over
-  a short line, an optional line-number gutter, and only the visible lines built — five thousand
-  lines cost what a screenful does. Enter breaks a line and Cmd/Ctrl+Enter commits; a single-line
-  field, having nowhere to put a newline, treats the same action as "commit", so one binding serves
-  both. Lines are hard here: `ui.paragraph` wraps, the editor does not, and a long line scrolls
-  sideways instead.
-- `TextResponse` reports `caret` as `(line, column)` and `selection` as a char range, because a
-  status bar ("Ln 12, Col 4"), a line-scoped command and a transform over the selection all need
-  what only the field knows. `libgui_pad` is built on those two fields.
+  caret that stays in view, selection across lines, Up/Down that hold the *position* you started
+  from over a short line (an x, not a character column — in a proportional font the thirtieth `i`
+  and the thirtieth `W` are nowhere near each other), an optional line-number gutter, and only the
+  visible lines built. Enter breaks a line and Cmd/Ctrl+Enter commits; a single-line field, having
+  nowhere to put a newline, treats the same action as "commit", so one binding serves both. Lines
+  are hard here: `ui.paragraph` wraps, the editor does not, and a long line scrolls sideways instead.
+- **It reads what it draws.** The scroll position is an *anchor* — which line is at the top and
+  where it starts — not a pixel offset, because turning a pixel offset into "which line is on
+  screen" means counting newlines from the beginning of the document on every frame. A focused,
+  idle frame over a 3.5 MB file costs **0.01 ms** and allocates once, whatever the file's size;
+  `text_scanned` in `FrameCost` counts the bytes so a regression is a test failure rather than
+  something you find with a profiler.
+- `TextResponse` reports `caret` as `(line, column)` — the column in characters, which is what a
+  status bar means by "Col 4" — and `selection` as a **byte range** you can slice the same `String`
+  with directly. Offsets are bytes throughout the field, because a byte offset is what slices a
+  `String`: counting in characters meant walking from the start of the document to convert one,
+  so every caret move in a large file paid for the whole file. `libgui_pad` is built on both.
 
 ### Undo is two different things, and only one of them is libgui's
 
