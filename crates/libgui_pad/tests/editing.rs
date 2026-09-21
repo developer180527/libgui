@@ -19,6 +19,12 @@ struct World {
 }
 
 impl World {
+    fn text(&self) -> &str {
+        &self.pad.text
+    }
+}
+
+impl World {
     fn new(text: &str) -> Self {
         // Pinned to one platform so the chord the test presses is the chord
         // the app bound, on whatever machine this runs.
@@ -146,26 +152,46 @@ fn replace_all_is_a_single_undoable_step() {
     assert_eq!(w.pad.text, "red fish, Red fish, blue fish", "one undo did not take the whole replace back");
 }
 
-/// A command writes the document from outside the field, so the field's
-/// typing history goes with it — it described text that no longer exists.
-/// Pad's own stack is what takes the command back.
+/// A command writes the document from outside the field, so the field's typing
+/// history describes text that is no longer there. The field notices when the
+/// chord arrives, drops that history and **releases the chord**, so Pad's own
+/// undo takes the command back — with the caret still in the page.
+///
+/// Before that release existed, the focused field swallowed the chord with
+/// nothing to undo and Cmd+Z after a command silently did nothing.
 #[test]
-fn a_command_drops_the_fields_typing_history() {
+fn the_chord_falls_through_once_the_field_has_nothing_to_undo() {
     let mut w = World::new("hello");
     w.click(IN_PAGE);
     w.type_text(" there");
-    assert_eq!(w.pad.text, "hello there");
+    assert_eq!(w.text(), "hello there");
 
     w.command(Cmd::Upper);
-    assert_eq!(w.pad.text, "HELLO THERE");
+    assert_eq!(w.text(), "HELLO THERE");
+    assert!(w.pad.editing, "the page lost the caret");
 
-    // The caret is still in the page, so this is the field's chord — and the
-    // field has nothing left to undo, so the text stands.
+    // Caret still in the page. The field's step described " there", which is
+    // not in the buffer any more, so the chord is the app's.
     w.undo_chord(false);
-    assert_eq!(w.pad.text, "HELLO THERE", "the field undid its way back over a write it did not make");
+    assert_eq!(w.text(), "hello there", "Cmd+Z after a command did nothing");
 
-    // The app's stack still has it.
-    w.click(OFF_PAGE);
+    // And again: the app keeps unwinding its own history from here.
     w.undo_chord(false);
-    assert_eq!(w.pad.text, "hello there");
+    assert_eq!(w.text(), "hello there", "a second undo took back typing the app never recorded");
+    assert!(!w.pad.can_undo(), "the document's history should be spent");
+}
+
+/// The other half of the same rule: while the field *does* have something of
+/// its own, the chord stays with it and the app never sees it.
+#[test]
+fn the_field_keeps_the_chord_while_it_has_typing_to_take_back() {
+    let mut w = World::new("hello");
+    w.click(IN_PAGE);
+    w.command(Cmd::Upper); // something in the app's history
+    assert!(w.pad.can_undo());
+
+    w.type_text("!");
+    w.undo_chord(false);
+    assert!(!w.text().contains('!'), "the field did not take back its own typing");
+    assert!(w.pad.can_undo(), "the app's undo ran while the field had typing to take back");
 }

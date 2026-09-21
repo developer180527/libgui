@@ -104,6 +104,7 @@ fn sheet(ui: &mut Ui, pad: &mut Pad) {
         pad.caret = r.caret;
         pad.selection = r.selection;
         pad.editing = r.focused;
+        pad.field_can_undo = r.focused && r.can_undo;
         if r.changed {
             pad.edited = true;
         }

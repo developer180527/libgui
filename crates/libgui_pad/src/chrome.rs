@@ -66,13 +66,12 @@ fn file_menu(ui: &mut Ui, pad: &mut Pad) {
 }
 
 fn edit_menu(ui: &mut Ui, pad: &mut Pad) {
-    let editing = pad.editing;
+    // Whose the chord is right now — which is not "does the page have focus":
+    // a field with nothing of its own to take back releases it.
+    let field_owns = pad.field_can_undo;
     let (can_undo, can_redo) = (pad.can_undo(), pad.can_redo());
     ui.menu_button("Edit", |ui| {
-        // While the caret is in the page, these are the *field's* and the
-        // chord never reaches Pad — so the menu says whose they are instead of
-        // pretending it could run them.
-        if editing {
+        if field_owns {
             let _ = ui.menu_item_ex("Undo typing", Some("the page has the caret"), false);
             let _ = ui.menu_item_ex("Redo typing", Some("the page has the caret"), false);
         } else {
@@ -213,7 +212,7 @@ pub fn status_bar(ui: &mut Ui, pad: &mut Pad) {
         // The whole point of the demo, in one label: which undo the chord
         // would reach if it were pressed right now.
         let chord = pad.keys().label(Cmd::Undo);
-        let (who, colour) = if pad.editing {
+        let (who, colour) = if pad.field_can_undo {
             ("the page's typing", t.palette.accent)
         } else if pad.can_undo() {
             ("this document's last command", t.palette.text)

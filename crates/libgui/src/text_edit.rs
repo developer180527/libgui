@@ -10,7 +10,7 @@
 //! never meet.
 
 use crate::input::UiEvent as Event;
-use crate::text_history::Edited;
+use crate::text_history::{Change, Edited, History};
 use crate::{FrameText, Id};
 use crate::{Color, Cursor, Insets, Layout, Motion, Rect, Response, Size, Ui, UiAction, Vec2};
 
@@ -47,6 +47,11 @@ pub struct TextResponse {
     /// The selected range as `(start, end)` char indices, ordered, equal when
     /// nothing is selected. Slice the same `String` you passed in with it.
     pub selection: (usize, usize),
+    /// Has typing of its own to take back. When this is false the undo chord
+    /// is released to the app, so an Edit menu can say whose undo it is
+    /// instead of guessing from focus.
+    pub can_undo: bool,
+    pub can_redo: bool,
 }
 
 /// Pure editing operations on a `String` + caret/selection.
@@ -54,6 +59,11 @@ struct Edit<'a> {
     text: &'a mut String,
     cursor: usize,
     anchor: usize,
+    /// What the last mutation did, for the undo history. Every edit goes
+    /// through `replace`, so this is the one place a change is described —
+    /// and describing it here is what lets the history store the edit rather
+    /// than a copy of the whole document.
+    change: Option<Change>,
 }
 
 fn byte_at(s: &str, char_idx: usize) -> usize {
@@ -80,6 +90,10 @@ impl Edit<'_> {
 
     fn replace(&mut self, a: usize, b: usize, with: &str) {
         let (ba, bb) = (byte_at(self.text, a), byte_at(self.text, b));
+        if ba == bb && with.is_empty() {
+            return; // nothing happened: backspace at the start, delete at the end
+        }
+        self.change = Some(Change { at: a, removed: self.text[ba..bb].to_string(), inserted: with.to_string() });
         self.text.replace_range(ba..bb, with);
         self.cursor = a + with.chars().count();
         self.anchor = self.cursor;
@@ -229,10 +243,15 @@ impl Edit<'_> {
 /// Control characters a field cannot show. A single-line field turns newlines
 /// and tabs into spaces; a text area keeps newlines and drops the rest, since
 /// it has somewhere to put a line break and nowhere to put a bell.
+/// Strip what a field cannot hold. A text area keeps newlines and **tabs** —
+/// flattening a tab to a space destroys the indentation of any pasted code,
+/// and turns a pasted Makefile into one that does not build. A single-line
+/// field has nowhere to put either, so both become a space rather than
+/// vanishing and joining two words.
 fn sanitize(s: &str, multiline: bool) -> String {
     s.chars()
         .filter_map(|c| match c {
-            '\n' if multiline => Some('\n'),
+            '\n' | '\t' if multiline => Some(c),
             '\r' if multiline => None,
             '\n' | '\r' | '\t' => Some(' '),
             c if c.is_control() => None,
@@ -241,10 +260,28 @@ fn sanitize(s: &str, multiline: bool) -> String {
         .collect()
 }
 
+/// Apply one edit and record it. The caret before the edit is what undo puts
+/// back, and an action that changed nothing (backspace at the start) records
+/// nothing — there is no step to take back.
+fn edited(e: &mut Edit, hist: &mut History, kind: Edited, now: f64, body: impl FnOnce(&mut Edit)) -> bool {
+    let (cursor, anchor) = (e.cursor, e.anchor);
+    e.change = None;
+    body(e);
+    match e.change.take() {
+        Some(change) => {
+            hist.record(kind, change, cursor, anchor, now);
+            true
+        }
+        None => false,
+    }
+}
+
 /// What a frame of editing did.
 struct Edited2 {
     changed: bool,
     submitted: bool,
+    can_undo: bool,
+    can_redo: bool,
 }
 
 /// Apply this frame's text, clipboard and action events to `text`.
@@ -253,46 +290,38 @@ struct Edited2 {
 /// newlines, and in treating Enter as "commit" because it has nowhere to put
 /// a line break.
 fn apply_events(ui: &mut Ui, id: Id, text: &mut String, st: &mut TextState, multiline: bool) -> Edited2 {
-    let mut out = Edited2 { changed: false, submitted: false };
+    let mut out = Edited2 { changed: false, submitted: false, can_undo: false, can_redo: false };
     let mut hist = ui.text_history.remove(&id).unwrap_or_default();
-    // The app may have written this string itself since the last frame — its
-    // own undo, a reload, a value shared with another widget. The field's
-    // history described the old buffer, so it goes.
-    hist.sync(text);
-
+    // No whole-document comparison here to spot the app writing the string
+    // behind the field's back: a step is checked against the buffer when it is
+    // applied instead, which costs the length of the edit rather than the
+    // length of the document. See `text_history`.
+    let now = ui.time;
     let events = ui.input.events.clone();
-    let mut e = Edit { text, cursor: st.cursor, anchor: st.anchor };
+    let mut e = Edit { text, cursor: st.cursor, anchor: st.anchor, change: None };
     for ev in events {
         match ev {
             Event::Text(s) => {
                 let s = sanitize(&s, multiline);
                 if !s.is_empty() {
-                    hist.record(Edited::Typing, e.text, e.cursor, e.anchor);
-                    e.insert(&s);
-                    out.changed = true;
+                    out.changed |= edited(&mut e, &mut hist, Edited::Typing, now, |e| e.insert(&s));
                 }
             }
             Event::Paste(s) => {
                 let s = sanitize(&s, multiline);
                 if !s.is_empty() {
                     // A paste is one step whatever it lands next to.
-                    hist.record(Edited::Discrete, e.text, e.cursor, e.anchor);
-                    e.insert(&s);
-                    out.changed = true;
+                    out.changed |= edited(&mut e, &mut hist, Edited::Discrete, now, |e| e.insert(&s));
                 }
             }
             Event::Action(UiAction::Copy) if e.has_selection() => ui.copied = Some(e.selected_text()),
             Event::Action(UiAction::Cut) if e.has_selection() => {
                 ui.copied = Some(e.selected_text());
-                hist.record(Edited::Discrete, e.text, e.cursor, e.anchor);
-                e.insert("");
-                out.changed = true;
+                out.changed |= edited(&mut e, &mut hist, Edited::Discrete, now, |e| e.insert(""));
             }
             Event::Action(UiAction::InsertNewline) => {
                 if multiline {
-                    hist.record(Edited::Typing, e.text, e.cursor, e.anchor);
-                    e.insert("\n");
-                    out.changed = true;
+                    out.changed |= edited(&mut e, &mut hist, Edited::Typing, now, |e| e.insert("\n"));
                 } else {
                     // Nowhere to put a line break: Enter commits instead.
                     out.submitted = true;
@@ -304,31 +333,34 @@ fn apply_events(ui: &mut Ui, id: Id, text: &mut String, st: &mut TextState, mult
                 ui.focused = None;
             }
             Event::Action(UiAction::Cancel) => ui.focused = None,
+            // Undo and redo the field cannot serve are *released*: the action
+            // is reported as unclaimed, so `consume_shortcut` lets the chord
+            // through to the app. A caret resting in a search box must not
+            // make the app's own undo unreachable.
             Event::Action(UiAction::Undo) => {
-                if let Some((t, c, a)) = hist.undo(e.text, e.cursor, e.anchor) {
-                    *e.text = t;
-                    e.cursor = c.min(e.len());
-                    e.anchor = a.min(e.len());
-                    out.changed = true;
+                match hist.undo(e.text, e.cursor, e.anchor) {
+                    Some((c, a)) => {
+                        e.cursor = c.min(e.len());
+                        e.anchor = a.min(e.len());
+                        out.changed = true;
+                    }
+                    None => ui.release_action(UiAction::Undo),
                 }
             }
             Event::Action(UiAction::Redo) => {
-                if let Some((t, c, a)) = hist.redo(e.text, e.cursor, e.anchor) {
-                    *e.text = t;
-                    e.cursor = c.min(e.len());
-                    e.anchor = a.min(e.len());
-                    out.changed = true;
+                match hist.redo(e.text, e.cursor, e.anchor) {
+                    Some((c, a)) => {
+                        e.cursor = c.min(e.len());
+                        e.anchor = a.min(e.len());
+                        out.changed = true;
+                    }
+                    None => ui.release_action(UiAction::Redo),
                 }
             }
             Event::Action(a @ UiAction::Delete(_)) => {
-                let pushed = hist.record(Edited::Deleting, e.text, e.cursor, e.anchor);
-                let did = e.action(a, &mut st.goal);
-                if !did && pushed {
-                    // Backspace at the start: nothing happened, so there is
-                    // nothing to undo either.
-                    hist.forget_last();
-                }
-                out.changed |= did;
+                out.changed |= edited(&mut e, &mut hist, Edited::Deleting, now, |e| {
+                    e.action(a, &mut None);
+                });
             }
             Event::Action(a @ (UiAction::Move { .. } | UiAction::SelectAll)) => {
                 // A caret move ends the run: what is typed next is its own step.
@@ -341,9 +373,8 @@ fn apply_events(ui: &mut Ui, id: Id, text: &mut String, st: &mut TextState, mult
     }
     st.cursor = e.cursor;
     st.anchor = e.anchor;
-    if out.changed {
-        hist.committed(e.text);
-    }
+    out.can_undo = hist.can_undo();
+    out.can_redo = hist.can_redo();
     ui.text_history.insert(id, hist);
     out
 }
@@ -396,10 +427,12 @@ impl Ui {
 
         let mut changed = false;
         let mut submitted = false;
+        let (mut can_undo, mut can_redo) = (false, false);
         if self.focused == Some(id) {
             let out = apply_events(self, id, text, &mut st, false);
             changed = out.changed;
             submitted = out.submitted;
+            (can_undo, can_redo) = (out.can_undo, out.can_redo);
             if changed {
                 carets = self.fonts.carets(self.font, size, text);
             }
@@ -498,7 +531,7 @@ impl Ui {
             p.draw.pop_clip();
         });
 
-        TextResponse { response: resp, changed, submitted, focused, caret: (0, st.cursor), selection: (sa, sb) }
+        TextResponse { response: resp, changed, submitted, focused, caret: (0, st.cursor), selection: (sa, sb), can_undo, can_redo }
     }
 }
 
@@ -512,7 +545,7 @@ mod tests {
 
     fn run(state: (String, usize, usize), actions: &[UiAction]) -> (String, usize, usize) {
         let (mut text, cursor, anchor) = state;
-        let mut e = Edit { text: &mut text, cursor, anchor };
+        let mut e = Edit { text: &mut text, cursor, anchor, change: None };
         for &a in actions {
             e.action(a, &mut None);
         }
@@ -555,7 +588,7 @@ mod tests {
         // Select "wörld" with a selecting word-left, then type over it.
         let (mut text, cursor, anchor) = run(edit("héllo wörld", 11), &[sel(WordLeft)]);
         assert_eq!((cursor, anchor), (6, 11));
-        let mut e = Edit { text: &mut text, cursor, anchor };
+        let mut e = Edit { text: &mut text, cursor, anchor, change: None };
         assert_eq!(e.selected_text(), "wörld");
         e.insert("libgui");
         assert_eq!(text, "héllo libgui");
@@ -633,7 +666,7 @@ mod tests {
     #[test]
     fn sanitize_single_line() {
         assert_eq!(sanitize("a\nb\tc\u{7}", false), "a b c", "a single-line field flattens a newline");
-        assert_eq!(sanitize("a\nb\r\tc\u{7}", true), "a\nb c", "a text area keeps the newline and drops the rest");
+        assert_eq!(sanitize("a\nb\r\tc\u{7}", true), "a\nb\tc", "a text area keeps newlines and tabs");
     }
 }
 
@@ -756,10 +789,12 @@ impl Ui {
         // ---- keyboard ------------------------------------------------------
         let mut changed = false;
         let mut submitted = false;
+        let (mut can_undo, mut can_redo) = (false, false);
         if self.focused == Some(id) {
             let out = apply_events(self, id, text, &mut st, true);
             changed = out.changed;
             submitted = out.submitted;
+            (can_undo, can_redo) = (out.can_undo, out.can_redo);
         }
         let focused = self.focused == Some(id);
         self.focus_order.push(id);
@@ -876,6 +911,6 @@ impl Ui {
             self.ime_rect = Some(Rect::new(x, y, 1.0, lh));
         }
         let _ = content_h;
-        TextResponse { response: resp, changed, submitted, focused, caret: (row, col), selection: (sel_a, sel_b) }
+        TextResponse { response: resp, changed, submitted, focused, caret: (row, col), selection: (sel_a, sel_b), can_undo, can_redo }
     }
 }

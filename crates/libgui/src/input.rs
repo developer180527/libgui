@@ -249,10 +249,14 @@ pub enum UiAction {
     /// Undo the last edit **in the focused field**.
     ///
     /// This is not your document's undo. It covers what was typed into a text
-    /// field before it was committed, the way every OS text control does, and
-    /// its history dies with the focus. While no field has focus the chord
-    /// never reaches libgui at all, so your app's undo is what runs — see
-    /// [`crate::Ui::consume_shortcut`].
+    /// field, the way every OS text control does. The history belongs to the
+    /// widget's id and outlives a trip through another field — it is dropped
+    /// when the widget stops being built, not when it loses focus, so coming
+    /// back to a field finds its typing still undoable.
+    ///
+    /// While no field has focus the chord never reaches libgui at all, and a
+    /// focused field with nothing left to undo releases it, so your app's undo
+    /// is what runs in both cases — see [`crate::Ui::consume_shortcut`].
     Undo,
     Redo,
     /// Back out: unfocus a field, close the innermost popup (Escape).

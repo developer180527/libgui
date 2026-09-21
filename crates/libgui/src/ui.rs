@@ -511,6 +511,9 @@ pub struct Ui {
     shortcut_scopes: Vec<bool>,
     /// Keys already claimed this frame, so one press drives one command.
     consumed_keys: Vec<Key>,
+    /// Actions the focused field was offered this frame and could not use, so
+    /// their chords fall through to the app. See [`Ui::release_action`].
+    released_actions: Vec<UiAction>,
     /// A text field had focus when the frame began: its editing keys are its own.
     typing: bool,
     /// The open popup chain: a root menu, then its submenus. Retained.
@@ -698,6 +701,7 @@ impl Ui {
             key_salt: Vec::new(),
             shortcut_scopes: Vec::new(),
             consumed_keys: Vec::new(),
+            released_actions: Vec::new(),
             typing: false,
             open_chain: Vec::new(),
             open_anchors: FxMap::default(),
@@ -804,12 +808,32 @@ impl Ui {
     /// ```ignore
     /// if ui.consume_shortcut(Shortcut::plain(Key::S).ctrl()) { save(); }
     /// ```
+    /// Called by a widget that was handed a [`UiAction`] this frame and could
+    /// not use it, so the chord behind it goes back to the app. Cleared every
+    /// frame; see [`Ui::consume_shortcut`].
+    pub fn release_action(&mut self, action: UiAction) {
+        if !self.released_actions.contains(&action) {
+            self.released_actions.push(action);
+        }
+    }
+
     pub fn consume_shortcut(&mut self, sc: Shortcut) -> bool {
         if !self.shortcut_scopes.iter().all(|&a| a) {
             return false;
         }
         if self.typing && (sc.types_text() || self.input.keys_bound.contains(&sc.key)) {
-            return false;
+            // …unless the focused field met that action this frame and had
+            // nothing to do with it. An undo chord over a field with an empty
+            // history is the app's, the way an NSTextView shares its window's
+            // undo manager — otherwise a caret resting in a search box makes
+            // the app's own undo unreachable.
+            let released = self
+                .key_bindings()
+                .resolve(sc.key, &self.input.modifiers)
+                .is_some_and(|a| self.released_actions.contains(&a));
+            if !released {
+                return false;
+            }
         }
         if !self.input.keys_pressed.contains(&sc.key) || self.consumed_keys.contains(&sc.key) {
             return false;
@@ -1304,6 +1328,7 @@ impl Ui {
         self.key_salt.clear();
         self.shortcut_scopes.clear();
         self.consumed_keys.clear();
+        self.released_actions.clear();
         // Focus is resolved during a frame, so this is last frame's answer —
         // the same one-frame-late rule the rest of the input model uses.
         self.typing = self.focused.is_some();

@@ -36,6 +36,10 @@ impl std::error::Error for FontError {}
 
 /// Single-channel coverage atlas. `version` bumps whenever pixels change so the
 /// renderer knows when to re-upload.
+/// How many spaces wide a tab is laid out. Fixed rather than a true tab stop;
+/// see `Fonts::lay_out_tabs`.
+pub const TAB_WIDTH: usize = 4;
+
 pub struct Atlas {
     pub size: u32,
     /// How large it may grow before it starts evicting instead. A single
@@ -133,6 +137,8 @@ pub struct Fonts {
     glyphs: FxMap<(u16, u32, u32), Glyph>,
     /// Scratch for shaping a string the run cache has not seen yet.
     shaped: RefCell<Vec<ShapedGlyph>>,
+    /// The blank glyph and space advance per (font, px), for laying out tabs.
+    shaped_space: RefCell<crate::hash::FxMap<(u16, u32), (u32, f32)>>,
     /// (font, px) -> text -> shaped run, in physical px. Keyed *before*
     /// dividing by `scale`, so one entry stays correct across DPI changes.
     runs: RefCell<FxMap<(u16, u32), FxMap<String, Run>>>,
@@ -220,6 +226,7 @@ impl Fonts {
             fonts: Vec::new(),
             glyphs: FxMap::default(),
             shaped: RefCell::new(Vec::new()),
+            shaped_space: RefCell::new(Default::default()),
             lines: RefCell::new(FxMap::default()),
             runs: RefCell::new(FxMap::default()),
             atlas: Atlas::new(2048),
@@ -314,6 +321,9 @@ impl Fonts {
             let mut shaped = self.shaped.borrow_mut();
             shaped.clear();
             self.fonts[font.0 as usize].shape(text, px, &mut shaped);
+            if text.contains('\t') {
+                self.lay_out_tabs(font, px, text, &mut shaped);
+            }
             Run { width: shaped.iter().map(|g| g.advance).sum(), glyphs: Rc::from(shaped.as_slice()) }
         };
         let mut cache = self.runs.borrow_mut();
@@ -323,6 +333,34 @@ impl Fonts {
         }
         m.insert(text.to_string(), run.clone());
         run
+    }
+
+    /// Give every tab a blank glyph and a fixed advance.
+    ///
+    /// A font maps `\t` to whatever it likes — Inter draws a `.notdef` box —
+    /// so text carrying tabs has to be laid out here rather than left to the
+    /// shaper. The advance is [`TAB_WIDTH`] spaces, not a true tab *stop*
+    /// aligned to a multiple: indentation, which is what tabs in a text field
+    /// are for, comes out right either way, and a stop would have to know
+    /// where the line began.
+    fn lay_out_tabs(&self, font: FontId, px: f32, text: &str, glyphs: &mut [crate::ShapedGlyph]) {
+        // The space glyph is blank in every font, which saves inventing a
+        // "draw nothing" glyph id that the rasteriser would have to know about.
+        let mut space = self.shaped_space.borrow_mut();
+        let key = (font.0, px as u32);
+        let (blank, width) = *space.entry(key).or_insert_with(|| {
+            let mut out = Vec::new();
+            self.fonts[font.0 as usize].shape(" ", px, &mut out);
+            out.first().map_or((0, px * 0.25), |g| (g.glyph, g.advance))
+        });
+        let bytes = text.as_bytes();
+        for g in glyphs.iter_mut() {
+            if bytes.get(g.cluster as usize) == Some(&b'\t') {
+                g.glyph = blank;
+                g.advance = width * TAB_WIDTH as f32;
+                g.offset = Vec2::ZERO;
+            }
+        }
     }
 
     fn width_px(&self, font: FontId, px: f32, text: &str) -> f32 {
@@ -736,5 +774,52 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tab_tests {
+    use super::*;
+
+    const FONT: &[u8] = include_bytes!("../../../assets/Inter.ttf");
+
+    fn fonts() -> (Fonts, FontId) {
+        let mut f = Fonts::new();
+        let id = f.add_font(FONT).expect("font");
+        (f, id)
+    }
+
+    /// A tab is laid out as four spaces and draws nothing.
+    ///
+    /// Left to the shaper, Inter maps `\t` to a `.notdef` box: preserving a
+    /// pasted tab would then show a box where the indentation should be, which
+    /// is a worse bug than the space it used to be flattened into.
+    #[test]
+    fn a_tab_is_four_spaces_wide_and_blank() {
+        let (f, id) = fonts();
+        let space = f.measure(id, 14.0, " ").x;
+        let tab = f.measure(id, 14.0, "\t").x;
+        assert!(
+            (tab - space * TAB_WIDTH as f32).abs() <= 1.0,
+            "a tab measured {tab}, four spaces measure {}",
+            space * TAB_WIDTH as f32
+        );
+
+        // The glyph is the space's, which every font draws as nothing.
+        let mut shaped = Vec::new();
+        f.fonts[id.0 as usize].shape(" ", 14.0, &mut shaped);
+        let blank = shaped[0].glyph;
+        let run = f.run(id, 14.0, "\tx");
+        assert_eq!(run.glyphs[0].glyph, blank, "the tab kept the font's own tab glyph");
+    }
+
+    /// Carets land after the tab's full width, so a click in indented text
+    /// picks the character it looks like it picked.
+    #[test]
+    fn carets_follow_the_tab_advance() {
+        let (f, id) = fonts();
+        let carets = f.carets(id, 14.0, "\tx");
+        let space = f.measure(id, 14.0, " ").x;
+        assert!(carets[1] >= space * 3.0, "the caret after a tab sat at {}", carets[1]);
     }
 }

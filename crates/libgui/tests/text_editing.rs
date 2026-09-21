@@ -250,3 +250,72 @@ fn a_long_document_costs_what_a_screenful_costs() {
     );
     assert!(b.nodes <= a.nodes + 2, "5,000 lines built {} nodes against {}", b.nodes, a.nodes);
 }
+
+// ---- regressions from review ----------------------------------------------
+
+/// A field's history must survive an ordinary document. Whole-text snapshots
+/// hit the byte cap after a few edits of a 200 KB file and silently threw the
+/// older steps away — on the widget that advertises five thousand lines.
+#[test]
+fn a_large_document_keeps_its_undo_steps() {
+    let big: String = (0..4_000).map(|i| format!("line {i} of a document that is not small\n")).collect();
+    assert!(big.len() > 150_000, "the fixture is not big enough to test the cap");
+
+    let mut w = World::new(&big);
+    w.warm();
+    w.click(Vec2::new(60.0, 20.0));
+    for i in 0..5 {
+        w.type_text(&format!("{i}"));
+        w.key(Key::ArrowRight, &[]); // break the run: five separate steps
+    }
+    assert_ne!(w.text, big, "the edits did not land");
+
+    // Five edits, five undos. With whole-document snapshots the byte cap threw
+    // all but the last away and said nothing about it.
+    for i in 0..5 {
+        let before = w.text.clone();
+        w.key(Key::Z, &[Key::ControlLeft]);
+        assert_ne!(w.text, before, "undo {i} did nothing — a step was trimmed away");
+    }
+    assert_eq!(w.text, big, "five undos did not get back to the original document");
+}
+
+/// With the caret in a field that has nothing left to undo, the chord belongs
+/// to the app again — the way an NSTextView shares its window's undo manager.
+/// Otherwise a focused field swallows Cmd+Z forever and the app's own undo is
+/// unreachable without clicking away first.
+#[test]
+fn an_empty_field_history_lets_the_chord_through() {
+    let mut w = World::new("hello");
+    w.warm();
+    w.click(Vec2::new(60.0, 20.0));
+    assert!(w.ui.wants_keyboard(), "the field did not take focus");
+
+    // Nothing has been typed, so the field has nothing of its own to undo.
+    w.key(Key::Z, &[Key::ControlLeft]);
+    assert_eq!(w.app_undo, 1, "a focused field with an empty history swallowed the app's undo");
+    assert_eq!(w.text, "hello", "the field changed the text with an empty history");
+
+    // Type: now the field owns the chord again.
+    w.type_text(" there");
+    w.key(Key::Z, &[Key::ControlLeft]);
+    assert_eq!(w.text, "hello", "the field did not take back its own typing");
+    assert_eq!(w.app_undo, 1, "the app's undo fired while the field had something to undo");
+
+    // And once that is spent, it falls through again.
+    w.key(Key::Z, &[Key::ControlLeft]);
+    assert_eq!(w.app_undo, 2, "the chord did not fall through once the field was spent");
+}
+
+/// Pasted tabs survive. Flattening them to one space destroys the indentation
+/// of any pasted code, and a pasted Makefile stops working.
+#[test]
+fn a_pasted_tab_is_not_flattened_to_a_space() {
+    let mut w = World::new("");
+    w.warm();
+    w.click(Vec2::new(60.0, 20.0));
+    w.ui.push(InputEvent::Paste("build:\n\tcc -o out main.c\n".into()));
+    w.frame();
+    assert!(w.text.contains('\t'), "the tab was flattened: {:?}", w.text);
+    assert_eq!(w.text, "build:\n\tcc -o out main.c\n");
+}

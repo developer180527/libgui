@@ -106,8 +106,11 @@ pub struct Pad {
     /// Commands act on it, which is why the field has to report it.
     pub caret: (usize, usize),
     pub selection: (usize, usize),
-    /// The page has the keyboard — so the undo chord is the field's.
+    /// The page has the keyboard — so the undo chord *may* be the field's.
     pub editing: bool,
+    /// The page has typing of its own to take back. When it does not, the
+    /// chord is released and reaches Pad even with the caret in the page.
+    pub field_can_undo: bool,
     pub edited: bool,
     pub status: String,
 
@@ -156,6 +159,7 @@ impl Pad {
             caret: (0, 0),
             selection: (0, 0),
             editing: false,
+            field_can_undo: false,
             edited: false,
             status: "Ready. Nothing is saved.".into(),
             undo: Vec::new(),
