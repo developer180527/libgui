@@ -29,6 +29,8 @@ struct World {
     state: TableState,
     rows: usize,
     opts: TableOptions,
+    /// The window, so a test can resize it between frames.
+    size: Vec2,
 }
 
 impl World {
@@ -43,11 +45,11 @@ impl World {
             striped: s.row_fill_alt.a > 0.0,
             grid_lines: true,
         };
-        Self { ui, state: columns(), rows: 1000, opts }
+        Self { ui, state: columns(), rows: 1000, opts, size: info().screen_size }
     }
 
     fn frame(&mut self) -> TableResponse {
-        self.ui.begin_frame(info());
+        self.ui.begin_frame(FrameInfo { screen_size: self.size, ..info() });
         let rows = self.rows;
         let opts = self.opts;
         let r = self.ui.table_with("files", &mut self.state, rows, opts, |ui, row, col| {
@@ -72,6 +74,26 @@ impl World {
         let row_id = list.with(("vlist_row", row)).with(("trow", row));
         let pane = if col < self.state.frozen { row_id.with("f") } else { row_id.with("s") };
         self.ui.rect_of(pane.with(("td", col))).unwrap_or_else(|| panic!("no cell ({row}, {col})"))
+    }
+
+    /// Rect of a column's resize grip, which lives in the header pane.
+    fn grip(&self, col: usize) -> Rect {
+        let table = Id::new("root").with(("table", "files"));
+        let pane = if col < self.state.frozen { table.with("hf") } else { table.with("hx") };
+        self.ui.rect_of(pane.with(("grip", col))).unwrap_or_else(|| panic!("no grip {col}"))
+    }
+
+    /// Every column's header and its cells have to be laid out at the same x
+    /// and the same width. If they ever disagree, the column has sheared away
+    /// from its own title.
+    fn assert_panes_agree(&self, what: &str) {
+        for c in 0..self.state.columns.len() {
+            let (h, b) = (self.header(c), self.cell(0, c));
+            assert!(
+                (h.x - b.x).abs() < 0.01 && (h.w - b.w).abs() < 0.01,
+                "{what}: column {c} header {h:?} but cells {b:?}"
+            );
+        }
     }
 
     fn header(&self, col: usize) -> Rect {
@@ -371,4 +393,77 @@ fn the_sideways_scrollbar_drags() {
     w.release();
     w.frame();
     assert_eq!(w.state.scroll_x, max, "the scrollbar ran past the end");
+}
+
+/// Resizing a column mutates a width that the header has already been laid out
+/// at, while the rows below are built later in the same frame. Both have to
+/// see the same number — and they have to keep seeing it when the window is
+/// resizing under the drag, which is when `grow`'s share of the leftover
+/// changes too.
+#[test]
+fn a_column_resize_keeps_the_header_and_its_cells_together() {
+    let mut w = World::new();
+    w.warm();
+    w.assert_panes_agree("at rest");
+
+    // Grab the second column's grip and widen it, 6 px a frame, while the
+    // window narrows by 20.
+    let g = w.grip(1);
+    let at = Vec2::new(g.x, g.center().y);
+    w.ui.push(InputEvent::PointerMoved { pos: at });
+    w.frame();
+    w.ui.push(InputEvent::PointerButton { button: PointerButton::Primary, pressed: true });
+    w.frame();
+
+    let start = w.state.columns[1].width;
+    for i in 1..=8 {
+        w.size.x -= 20.0;
+        w.ui.push(InputEvent::PointerMoved { pos: Vec2::new(at.x + 6.0 * i as f32, at.y) });
+        w.frame();
+        w.assert_panes_agree(&format!("dragging during resize, frame {i}"));
+        // And the column follows the pointer rather than the window.
+        let want = start + 6.0 * i as f32;
+        let got = w.state.columns[1].width;
+        assert!((got - want).abs() < 0.51, "frame {i}: column is {got} wide, pointer says {want}");
+    }
+    w.ui.push(InputEvent::PointerButton { button: PointerButton::Primary, pressed: false });
+    w.frame();
+    w.assert_panes_agree("after the drag");
+}
+
+/// A frozen column may have `grow`, and then its pane is wider than the sum of
+/// its stored widths. The viewport, the scroll range and the scrollbar all
+/// hang off that number, so it has to be the width the pane is really at.
+#[test]
+fn a_frozen_column_may_grow() {
+    let mut w = World::new();
+    w.state = TableState::new([
+        Column::new("Name").width(150.0).grow(1.0),
+        Column::new("Kind").width(100.0),
+        Column::new("Size").width(90.0),
+    ]);
+    w.state.frozen = 1;
+    w.warm();
+    w.assert_panes_agree("frozen column with grow");
+
+    // The frozen pane took the leftover, so the scrolling columns start where
+    // it actually ends.
+    let frozen = w.header(0);
+    let first_scrolling = w.header(1);
+    assert!(frozen.w > 150.0, "the frozen column did not take its share: {frozen:?}");
+    assert!(
+        (first_scrolling.x - frozen.right()).abs() < 0.01,
+        "the scrolling pane starts at {} but the frozen pane ends at {}",
+        first_scrolling.x,
+        frozen.right()
+    );
+
+    // And it stays true as the window resizes, which is what moves the share.
+    for i in 0..6 {
+        w.size.x -= 25.0;
+        w.frame();
+        w.assert_panes_agree(&format!("resize {i}"));
+        let (frozen, next) = (w.header(0), w.header(1));
+        assert!((next.x - frozen.right()).abs() < 0.01, "resize {i}: panes drifted apart");
+    }
 }

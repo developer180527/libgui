@@ -98,6 +98,21 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings -D rustdoc::broken_intra_doc_links
 
+  # The one `unsafe` module in the tree stores paint closures in a byte
+  # buffer by hand, so its invariants are checked by a machine rather than by
+  # reading: Miri runs its tests under Stacked Borrows, where a stale pointer,
+  # a double drop or a misaligned read is an error rather than a segfault on
+  # someone else's machine.
+  miri:
+    name: miri · paint_arena
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+        with: { components: miri }
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo miri test -p libgui --lib paint_arena
+
   # Two floors, because the dependency graph differs by platform: wgpu-hal pulls
   # `ordered-float` (1.90) on Linux/Windows/Android but not on macOS. The
   # GPU-free crates are the ones most people embed, so their lower floor is

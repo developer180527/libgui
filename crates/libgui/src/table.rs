@@ -228,11 +228,15 @@ impl Ui {
         // Only the leftover share depends on it, so a table whose columns are
         // all fixed is exact on its very first frame.
         let outer = self.rect_of(id).unwrap_or_default();
-        let frozen_w: f32 = state.columns[..state.frozen].iter().map(|c| c.width).sum();
         let fixed: f32 = state.columns.iter().map(|c| c.width).sum();
         let weight: f32 = state.columns.iter().map(|c| c.grow).sum();
         let spare = if weight > 0.0 { (outer.w - fixed).max(0.0) } else { 0.0 };
         let width_of = |c: &Column| c.width + if weight > 0.0 { spare * c.grow / weight } else { 0.0 };
+        // The width the frozen pane is actually laid out at, share of the
+        // leftover included. Summing the raw widths instead would put the
+        // viewport, the scroll range and the scrollbar's origin somewhere the
+        // pane is not — visible the moment a frozen column has `grow`.
+        let frozen_w: f32 = state.columns[..state.frozen].iter().map(width_of).sum();
         let scroll_w = state.columns[state.frozen..].iter().map(width_of).sum::<f32>();
         let viewport_w = (outer.w - frozen_w).max(0.0);
         let max_x = (scroll_w - viewport_w).max(0.0);
@@ -370,9 +374,26 @@ fn header_pane(
             // Read the fields rather than cloning the column: the title is a
             // `String`, and cloning it would be an allocation per column per
             // frame — the thing the rest of the library just stopped doing.
+            // The resize is read *before* this column's width is, so the
+            // header cell and the body cells below it are laid out at the
+            // same width. Reading it afterwards left the header a drag-delta
+            // behind its own column for every frame of the drag.
+            let resizable = state.columns[c].resizable;
+            let grip = resizable.then(|| {
+                let grip_id = ui.make_id(("grip", c));
+                let g = ui.interact_drag(grip_id);
+                if g.hovered || g.active {
+                    ui.cursor = Cursor::ResizeHorizontal;
+                }
+                if g.active && g.drag_delta.x != 0.0 {
+                    let col = &mut state.columns[c];
+                    col.width = (col.width + g.drag_delta.x).max(col.min_width);
+                    resized = Some(c);
+                }
+                (grip_id, ui.animate_bool(grip_id, 0, g.hovered || g.active))
+            });
             let col = &state.columns[c];
-            let (cw, align, sortable, resizable) = (width_of(col), col.align, col.sortable, col.resizable);
-            let (start_w, min_w) = (col.width, col.min_width);
+            let (cw, align, sortable) = (width_of(col), col.align, col.sortable);
             let title = ui.frame_text(&state.columns[c].title);
             let cell_id = ui.make_id(("th", c));
             let r = ui.interact(cell_id);
@@ -407,18 +428,9 @@ fn header_pane(
                 }
             });
             // The drag zone straddles the column edge: zero-width in the flow,
-            // so it shifts nothing, and hit-tested above the header cell.
-            if resizable {
-                let grip_id = ui.make_id(("grip", c));
-                let g = ui.interact_drag(grip_id);
-                if g.hovered || g.active {
-                    ui.cursor = Cursor::ResizeHorizontal;
-                }
-                if g.active && g.drag_delta.x != 0.0 {
-                    state.columns[c].width = (start_w + g.drag_delta.x).max(min_w);
-                    resized = Some(c);
-                }
-                let live = ui.animate_bool(grip_id, 0, g.hovered || g.active);
+            // so it shifts nothing, and hit-tested above the header cell. Only
+            // the painting is left to do here; the drag was read above.
+            if let Some((grip_id, live)) = grip {
                 let grip = s.resize_grip;
                 let line = s.grid;
                 let hotc = s.resize_hover;

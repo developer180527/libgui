@@ -259,6 +259,85 @@ mod tests {
         assert_eq!(drops.get(), 1, "the boxed path leaked or double-dropped");
     }
 
+    /// Boxing keeps the alignment promise on the way *out* as well as in: the
+    /// closure is read back through a `*mut Box<F>` and called, and `F` here
+    /// may not sit at an address that is not a multiple of 64.
+    #[test]
+    fn an_over_aligned_capture_is_aligned_when_it_runs() {
+        #[repr(align(64))]
+        struct Wide([u64; 8]);
+        let mut a = PaintArena::default();
+        let ran = Rc::new(Cell::new(0));
+        let mut ids = Vec::new();
+        for i in 0..8u64 {
+            let w = Wide([i; 8]);
+            let ran = ran.clone();
+            // A second, ordinary closure between them, so the two storage
+            // paths interleave in one buffer.
+            ids.push(a.push(move |_: &mut Painter, _: Rect| {
+                assert_eq!(&w as *const Wide as usize % 64, 0, "the boxed capture was not 64-aligned");
+                assert!(w.0.iter().all(|&v| v == w.0[0]), "the capture was torn");
+                ran.set(ran.get() + 1);
+            }));
+            let small = i;
+            ids.push(a.push(move |_: &mut Painter, _: Rect| {
+                let _ = small;
+            }));
+        }
+        // Boxed, not inlined: sixteen entries, eight of them 64 bytes wide,
+        // cannot fit in a buffer this size if they were stored in place.
+        assert!(a.capacity() < 8 * 64, "the over-aligned captures were stored inline: {}", a.capacity());
+        with_painter(|p| {
+            for id in &ids {
+                a.run(*id, p, Rect::default());
+            }
+        });
+        assert_eq!(ran.get(), 8);
+    }
+
+    /// The drop path goes through `drop_boxed`, which drops an `F` that may do
+    /// anything a `Drop` may do — including allocate, which is the case the
+    /// buffer's own bookkeeping could be caught out by.
+    #[test]
+    fn a_drop_that_allocates_runs_exactly_once() {
+        #[repr(align(64))]
+        struct Loud {
+            log: Rc<std::cell::RefCell<Vec<String>>>,
+            name: usize,
+            _pad: [u64; 8],
+        }
+        impl Drop for Loud {
+            fn drop(&mut self) {
+                // Allocates twice: the string, and the vector's growth.
+                self.log.borrow_mut().push(format!("dropped {}", self.name));
+            }
+        }
+        let log: Rc<std::cell::RefCell<Vec<String>>> = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut a = PaintArena::default();
+        let mut ids = Vec::new();
+        for name in 0..6 {
+            let l = Loud { log: log.clone(), name, _pad: [0; 8] };
+            ids.push(a.push(move |_: &mut Painter, _: Rect| {
+                let _ = &l;
+            }));
+        }
+        // Run half of them; the rest are dropped by `clear`.
+        with_painter(|p| {
+            for id in ids.iter().take(3) {
+                a.run(*id, p, Rect::default());
+            }
+        });
+        assert_eq!(log.borrow().len(), 3, "running a closure did not drop its capture");
+        a.clear();
+        assert_eq!(log.borrow().len(), 6, "clear dropped the wrong number: {:?}", log.borrow());
+        drop(a);
+        assert_eq!(log.borrow().len(), 6, "something was dropped twice");
+        let mut names: Vec<String> = log.borrow().clone();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), 6, "a capture was dropped twice: {names:?}");
+    }
+
     /// A real `Painter` over an empty draw list and no fonts: the closures
     /// under test do not draw, but a fake reference would be undefined
     /// behaviour whether or not anything read it.
