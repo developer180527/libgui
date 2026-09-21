@@ -105,6 +105,7 @@ impl libgui::Backend for MyRhiUi {
 Pipeline, same for every API (details in `libgui_shaders` docs):
 
 - Instance buffer, 96-byte stride, six `float4` attributes at locations 0 to 5; 6 vertices per instance.
+  (No instancing in your RHI? See `libgui::mesh` below.)
 - Group 0 / binding 0: `Globals` uniform (16 B). Group 1 / binding 0: one texture. **No samplers**
   (texel loads + in-shader bilinear), so HLSL is just `b0` + `t0, space1`.
 - Premultiplied alpha blend, no depth, no culling, UNORM (non-sRGB) target.
@@ -115,6 +116,41 @@ Pipeline, same for every API (details in `libgui_shaders` docs):
 
 Pick the shader flavour your RHI consumes from `libgui_shaders::{HLSL, MSL, SPIRV, GLSL_VERTEX, GLSL_FRAGMENT, WGSL}`,
 or export them to files for a C++ shader pipeline. Edit only `shaders/ui.wgsl`; a shader error fails the build.
+
+### If your renderer cannot instance: `libgui::mesh`
+
+Not every renderer can draw the instance buffer above. **bgfx** carries at most five `vec4`s of
+instance data (80 bytes) and an instance needs six. **GLES2 and WebGL1** have no per-instance
+attributes at all. Plenty of engine RHIs expose a vertex + index draw and nothing else.
+
+So the expansion ships here rather than being rediscovered per renderer:
+
+```rust
+let mut mesh = Mesh::new();          // keep it; the buffers are reused
+mesh.build(out.draw);                // per frame, no allocation in a steady one
+for b in &mesh.batches {
+    bind(b.texture);                 // TextureId, same meaning as above
+    draw_indexed(&mesh.vertices, &mesh.indices[b.indices.clone()]);
+}
+```
+
+One quad per primitive — four vertices, six indices. The vertex **mirrors the shader's varyings,
+not its inputs**: it is what `vs_main` outputs, computed on the CPU. So porting `ui.wgsl` is a
+four-line vertex shader that turns `Vertex::pos` (logical px) into clip space and passes the rest
+through, plus `fs_main` transliterated, reading varyings that are all already there. Nothing needs
+`@interpolate(flat)` — a value constant across a quad interpolates to itself — so dialects without
+a flat qualifier are fine. `VERTEX_ATTRIBUTES` and `VERTEX_STRIDE` in `render_contract` describe the
+layout, and `Mesh::fits_u16` says when 16-bit indices are safe.
+
+It costs about **four and a half times the bytes** of the instanced path (112 per vertex against 96
+per instance), which for a UI is a megabyte or two a frame — the same order as any immediate-mode
+UI's vertex buffers. That is why it is the fallback: a renderer that can instance should.
+
+`libgui_soft` renders both ways, sharing one fragment stage, and `mesh_parity.rs` asserts every
+golden scene comes out the same at every scale and theme — within the one 8-bit step the goldens
+already allow, since the expanded path interpolates `local` across the quad the way a GPU does
+instead of computing it directly. Padding a glyph the way a shape is padded — the mistake a
+hand-written expansion makes first — moves pixels by 201/255 there, not by one.
 
 ## Text input, focus, clipboard
 

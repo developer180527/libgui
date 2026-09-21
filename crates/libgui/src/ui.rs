@@ -1931,6 +1931,23 @@ impl Ui {
     /// Container with an explicit id: its rect is queryable via `rect_of`, and
     /// children's ids derive from it, so their state follows it around.
     pub fn container_id<R>(&mut self, id: Id, layout: Layout, frame: Frame, body: impl FnOnce(&mut Self) -> R) -> R {
+        self.open_container(id, layout, frame);
+        let r = body(self);
+        self.close_container();
+        r
+    }
+
+    /// Open a container without a closure, for callers that cannot hold one:
+    /// a C or scripting binding, or generated code. Rust code should prefer
+    /// [`Ui::container`] and [`Ui::container_id`], which cannot forget to
+    /// close.
+    ///
+    /// Every `open_container` must be matched by exactly one
+    /// [`Ui::close_container`] before [`Ui::end_frame`]. Forgetting one panics
+    /// there rather than silently reparenting the rest of the window, and a
+    /// binding should check [`Ui::open_depth`] to report the caller's mistake
+    /// as an error of its own instead.
+    pub fn open_container(&mut self, id: Id, layout: Layout, frame: Frame) {
         self.mark_seen(id);
         let mut n = Node::new(id, layout);
         n.clip = frame.clip;
@@ -1944,9 +1961,19 @@ impl Ui {
         }
         let i = self.attach(n);
         self.open(i);
-        let r = body(self);
+    }
+
+    /// Close the innermost [`Ui::open_container`]. Panics if none is open.
+    pub fn close_container(&mut self) {
+        assert!(self.open_depth() > 0, "libgui: close_container with no container open");
         self.close();
-        r
+    }
+
+    /// How many containers are open above the frame's root — zero when the
+    /// tree is balanced. A binding checks this before `end_frame` to blame the
+    /// caller for a missing close.
+    pub fn open_depth(&self) -> usize {
+        self.stack.len().saturating_sub(1)
     }
 
     /// Replay a subtree's pixels instead of producing them again, while

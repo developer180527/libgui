@@ -115,6 +115,30 @@ const _: () = assert!(std::mem::size_of::<Instance>() == INSTANCE_STRIDE);
 /// Vertices per instance (two triangles, generated in the vertex shader).
 pub const VERTICES_PER_INSTANCE: u32 = 6;
 
+/// Attributes of an expanded [`crate::mesh::Vertex`], in location order:
+/// `(location, name, byte offset, floats)`.
+///
+/// This is the *other* way to draw libgui: one quad per primitive, for a
+/// renderer with no per-instance attributes (GLES2, WebGL1) or too few of them
+/// (bgfx carries five `vec4`s; an instance needs six). See [`crate::mesh`],
+/// which produces these and is tested to draw the same pixels as the instance
+/// path.
+pub const VERTEX_ATTRIBUTES: [(u32, &str, usize, usize); 9] = [
+    (0, "pos", 0, 2),
+    (1, "local", 8, 2),
+    (2, "uv", 16, 2),
+    (3, "color", 24, 4),
+    (4, "border_color", 40, 4),
+    (5, "clip", 56, 4),
+    (6, "params", 72, 4),
+    (7, "half_size", 88, 2),
+    (8, "seg", 96, 4),
+];
+
+/// Byte size of one [`crate::mesh::Vertex`]; also the vertex buffer stride.
+pub const VERTEX_STRIDE: usize = 112;
+const _: () = assert!(std::mem::size_of::<crate::mesh::Vertex>() == VERTEX_STRIDE);
+
 pub const GLOBALS_GROUP: u32 = 0;
 pub const GLOBALS_BINDING: u32 = 0;
 /// Byte size of the uniform block ([`crate::Globals`]).

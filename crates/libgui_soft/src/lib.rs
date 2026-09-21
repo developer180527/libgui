@@ -158,6 +158,39 @@ impl SoftRenderer {
         }
     }
 
+    /// Render an **expanded** frame — [`libgui::mesh::Mesh`] triangles rather
+    /// than instances — into a new target, otherwise exactly as
+    /// [`SoftRenderer::render_to_image`] does.
+    ///
+    /// This is the reference for a renderer that cannot instance (bgfx, GLES2,
+    /// WebGL1). It shares the fragment stage with the instanced path, so the
+    /// two agreeing is a statement about the expansion; `mesh_parity.rs`
+    /// asserts they agree byte for byte on real frames.
+    pub fn render_mesh_to_image(
+        &mut self,
+        frame: &FrameOutput,
+        mesh: &libgui::mesh::Mesh,
+        width: u32,
+        height: u32,
+    ) -> Target {
+        let mut target = Target::new(width, height, frame.clear_color);
+        self.prepare(frame);
+        for batch in &mesh.batches {
+            let Some(tex) = self.texture(batch.texture) else { continue };
+            if tex.width == 0 || tex.height == 0 {
+                continue;
+            }
+            // Two triangles per quad, and the first index of each pair names
+            // its top-left vertex — the layout `Mesh::build` documents.
+            let range = batch.indices.start as usize..batch.indices.end as usize;
+            for tri in mesh.indices[range].chunks_exact(6) {
+                let base = tri[0] as usize;
+                draw_quad(&mut target, &self.globals, &mesh.vertices[base..base + 4], &tex);
+            }
+        }
+        target
+    }
+
     /// Prepare and render a whole frame into a new target of `width` x
     /// `height` physical pixels, cleared to the frame's clear colour.
     pub fn render_to_image(&mut self, frame: &FrameOutput, width: u32, height: u32) -> Target {
@@ -259,7 +292,18 @@ fn draw_instance(target: &mut Target, g: &Globals, inst: &Instance, tex: &TexRef
             if wx < clip[0] || wx > clip[2] {
                 continue; // discard
             }
-            let src = fragment(kind, inst, [wx, wy], center, half, ext, aa, tex);
+            let local = [wx - center[0], wy - center[1]];
+            let vary = Varyings {
+                world: [wx, wy],
+                local,
+                uv: quad_uv(inst.uv, local, ext),
+                color: inst.color,
+                border_color: inst.border_color,
+                params: inst.params,
+                half_size: half,
+                seg: inst.uv,
+            };
+            let src = fragment(kind, &vary, aa, tex);
             if src[3] <= 0.0 && src[0] <= 0.0 && src[1] <= 0.0 && src[2] <= 0.0 {
                 continue; // blending zero leaves the pixel as it is
             }
@@ -268,59 +312,127 @@ fn draw_instance(target: &mut Target, g: &Globals, inst: &Instance, tex: &TexRef
     }
 }
 
-/// `fs_main`, for one pixel. Returns premultiplied colour.
-#[allow(clippy::too_many_arguments)]
-fn fragment(
-    kind: PrimitiveKind,
-    inst: &Instance,
+/// What the vertex stage hands the fragment stage: `VOut` in `ui.wgsl`, and
+/// field for field the same thing [`libgui::mesh::Vertex`] carries. Both paths
+/// below fill one of these and call the same `fragment`, which is what makes
+/// "the expanded mesh draws the same pixels" a claim about the vertex stage
+/// rather than about two copies of a shader.
+struct Varyings {
     world: [f32; 2],
-    center: [f32; 2],
-    half: [f32; 2],
-    ext: [f32; 2],
-    aa: f32,
-    tex: &TexRef,
-) -> [f32; 4] {
-    let local = [world[0] - center[0], world[1] - center[1]];
-    let p = inst.params;
+    local: [f32; 2],
+    uv: [f32; 2],
+    color: [f32; 4],
+    border_color: [f32; 4],
+    params: [f32; 4],
+    half_size: [f32; 2],
+    seg: [f32; 4],
+}
+
+/// `fs_main`, for one pixel. Returns premultiplied colour.
+fn fragment(kind: PrimitiveKind, v: &Varyings, aa: f32, tex: &TexRef) -> [f32; 4] {
+    let (local, half, p) = (v.local, v.half_size, v.params);
     match kind {
         PrimitiveKind::Line => {
-            let [x0, y0, x1, y1] = inst.uv;
-            let d = sd_segment(world, [x0, y0], [x1, y1]) - p[0];
+            let [x0, y0, x1, y1] = v.seg;
+            let d = sd_segment(v.world, [x0, y0], [x1, y1]) - p[0];
             let m = clamp01(0.5 - d / aa);
-            scale4(premul(inst.color), m)
+            scale4(premul(v.color), m)
         }
         PrimitiveKind::Image => {
             let r = p[0].min(half[0].min(half[1]));
             let d = sd_round_rect(local, half, r);
             let m = clamp01(0.5 - d / aa);
-            let [u, v] = quad_uv(inst.uv, local, ext);
-            let s = tex.sample(u, v);
-            let c = inst.color;
+            let s = tex.sample(v.uv[0], v.uv[1]);
+            let c = v.color;
             // Premultiplied: the tint's alpha multiplies the colour too. The
             // texture's own alpha is ignored — a user texture composites as
             // opaque RGB (render contract).
             scale4(premul([s[0] * c[0], s[1] * c[1], s[2] * c[2], c[3]]), m)
         }
-        PrimitiveKind::Glyph => {
-            let [u, v] = quad_uv(inst.uv, local, ext);
-            scale4(premul(inst.color), tex.sample(u, v)[0])
-        }
+        PrimitiveKind::Glyph => scale4(premul(v.color), tex.sample(v.uv[0], v.uv[1])[0]),
         PrimitiveKind::Shape => {
             let r = p[0].min(half[0].min(half[1]));
             let soft = p[2] + aa;
             let d = sd_round_rect(local, half, r);
             let fill = 1.0 - smoothstep(-soft * 0.5, soft * 0.5, d);
-            let mut col = premul(inst.color);
+            let mut col = premul(v.color);
             let bw = p[1];
             if bw > 0.0 {
                 let inner = sd_round_rect(local, [half[0] - bw, half[1] - bw], (r - bw).max(0.0));
                 let b = smoothstep(-aa * 0.5, aa * 0.5, inner);
-                let bc = premul(inst.border_color);
+                let bc = premul(v.border_color);
                 for k in 0..4 {
                     col[k] = mix(col[k], bc[k], b);
                 }
             }
             scale4(col, fill)
+        }
+    }
+}
+
+/// Rasterise one expanded quad: the varyings are interpolated across it, the
+/// way a GPU interpolates them, and the same `fragment` runs.
+///
+/// The quad is axis-aligned and `w` is 1 everywhere, so the interpolation is
+/// plain bilinear — there is no perspective divide to get wrong, and the
+/// values at the pixel centres are the ones the instanced path computes
+/// directly.
+fn draw_quad(target: &mut Target, g: &Globals, verts: &[libgui::mesh::Vertex], tex: &TexRef) {
+    let Some(kind) = PrimitiveKind::from_code(verts[0].params[3]) else { return };
+    // Corners in `Mesh::build`'s order: top-left, top-right, bottom-left,
+    // bottom-right.
+    let (v0, v3) = (&verts[0], &verts[3]);
+    let (qx0, qy0) = (v0.pos[0], v0.pos[1]);
+    let (qx1, qy1) = (v3.pos[0], v3.pos[1]);
+    let (dx, dy) = (qx1 - qx0, qy1 - qy0);
+    if dx <= 0.0 || dy <= 0.0 {
+        return;
+    }
+
+    let (w, h) = (target.width as f32, target.height as f32);
+    let (sx, sy) = (w / g.screen_size[0], h / g.screen_size[1]);
+    let span = |a: f32, b: f32, n: u32| -> Range<u32> {
+        let lo = (a - 0.5).ceil().max(0.0);
+        let hi = (b - 0.5).ceil().min(n as f32);
+        if hi <= lo {
+            0..0
+        } else {
+            lo as u32..hi as u32
+        }
+    };
+    let xs = span(qx0 * sx, qx1 * sx, target.width);
+    let ys = span(qy0 * sy, qy1 * sy, target.height);
+
+    let clip = v0.clip;
+    let aa = 1.0 / g.scale;
+    for py in ys {
+        let wy = (py as f32 + 0.5) / sy;
+        if wy < clip[1] || wy > clip[3] {
+            continue;
+        }
+        let ty = (wy - qy0) / dy;
+        let row = (py * target.width) as usize * 4;
+        for px in xs.clone() {
+            let wx = (px as f32 + 0.5) / sx;
+            if wx < clip[0] || wx > clip[2] {
+                continue; // discard
+            }
+            let tx = (wx - qx0) / dx;
+            let vary = Varyings {
+                world: [wx, wy],
+                local: [mix(v0.local[0], v3.local[0], tx), mix(v0.local[1], v3.local[1], ty)],
+                uv: [mix(v0.uv[0], v3.uv[0], tx), mix(v0.uv[1], v3.uv[1], ty)],
+                color: v0.color,
+                border_color: v0.border_color,
+                params: v0.params,
+                half_size: v0.half_size,
+                seg: v0.seg,
+            };
+            let src = fragment(kind, &vary, aa, tex);
+            if src[3] <= 0.0 && src[0] <= 0.0 && src[1] <= 0.0 && src[2] <= 0.0 {
+                continue;
+            }
+            blend(&mut target.data[row + px as usize * 4..row + px as usize * 4 + 4], src);
         }
     }
 }

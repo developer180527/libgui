@@ -37,6 +37,7 @@ mod theme_watch;
 mod ui;
 mod text_edit;
 mod text_history;
+pub mod mesh;
 mod widgets;
 mod wrap;
 
