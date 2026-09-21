@@ -5,6 +5,7 @@ end to end.
 
 ```
 cargo run --release -p libgui_demo          # editor demo with a wgpu 3D viewport
+cargo run --release -p libgui_pad           # a plain-text editor: multi-line text and undo
 cargo test -p libgui                         # layout + backend-contract tests
 cargo run -p libgui_shaders -- shaders_out   # export HLSL/MSL/GLSL/SPIR-V/WGSL
 ```
@@ -38,6 +39,7 @@ an image or a glyph cannot be turned, only vector paths the app rotates itself. 
 | `crates/libgui_demo` | winit host + editor layout + an "engine" scene rendered offscreen and shown via `ui.viewport`. |
 | `crates/libgui_solaris` | A second demo: one dense, Houdini-shaped editor — menu bar, shelf, viewport, parameter panel, node network, scene-graph tree, details table and timeline, all at once. Its own theme, and a ~170-line host. |
 | `crates/libgui_cut` | A third demo: a non-linear video editor. A **timeline** — zoom, two-axis scroll, clips dragged between tracks, snapping — written as one custom surface on top of the library. |
+| `crates/libgui_pad` | A fourth demo: a plain-text editor. A document on a page, find and replace, and the two undo stacks — the field's and the app's — side by side. Its host is one window, about 200 lines. |
 
 ## Frame lifecycle
 
@@ -141,6 +143,9 @@ ui.text_area_with("script", &mut src, TextAreaOptions { rows: 20, line_numbers: 
   field, having nowhere to put a newline, treats the same action as "commit", so one binding serves
   both. Lines are hard here: `ui.paragraph` wraps, the editor does not, and a long line scrolls
   sideways instead.
+- `TextResponse` reports `caret` as `(line, column)` and `selection` as a char range, because a
+  status bar ("Ln 12, Col 4"), a line-scoped command and a transform over the selection all need
+  what only the field knows. `libgui_pad` is built on those two fields.
 
 ### Undo is two different things, and only one of them is libgui's
 
@@ -727,6 +732,33 @@ panel's top edge are real dock tabs rather than decoration — so they switch,
 reorder, move between panels and tear off like anything else. The host is one
 OS window per dock surface, sharing a single wgpu device.
 
+
+## A fourth demo: a text editor
+
+```bash
+cargo run --release -p libgui_pad
+```
+
+`libgui_pad` is a page, a ruler, a menu bar, a find-and-replace sidebar and a status bar around one
+`ui.text_area`. It is plain text and **nothing is saved** — no file is opened and none is written,
+because the interesting part is not an I/O layer libgui has no opinion about.
+
+The interesting part is that Pad has **its own undo**, and the field has one too. Pad snapshots the
+document before each command it runs (Sort lines, Trim, Replace all, Duplicate line…); the text area
+keeps the typing. Both answer to Cmd/Ctrl+Z, and the caret decides which one hears it — the rule
+[described above](#undo-is-two-different-things-and-only-one-of-them-is-libguis), running:
+
+- caret in the page → `consume_shortcut` refuses the chord here and the field takes back the typing;
+- focus in the sidebar → the field never sees it, Pad gets it, and the last *command* comes back.
+
+The status bar names which one the chord would reach, live, so the split is visible rather than
+described. `tests/editing.rs` presses the chord from both sides and fails if either stack answers
+for the other; an app that read the raw key instead of `consume_shortcut` fails it too.
+
+Everything else is ordinary app code: the sheet is a container with a white fill, the editor on it is
+`text_area` restyled through `ui.with_style` to ink-on-paper with no border and no focus ring, and
+the ruler is twenty lines of `Painter`. The commands read `TextResponse::caret` and
+`TextResponse::selection`, because where the caret is is the one thing only the field knows.
 
 ## Tables and data grids
 

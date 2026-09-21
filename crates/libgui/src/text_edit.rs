@@ -38,6 +38,15 @@ pub struct TextResponse {
     /// Enter was pressed (focus is released).
     pub submitted: bool,
     pub focused: bool,
+    /// Where the caret is, as `(line, column)` — both zero-based, both counted
+    /// in `char`s, not bytes. A single-line field is always on line 0.
+    ///
+    /// Only the field knows this, and a status bar ("Ln 12, Col 4"), a
+    /// line-scoped command, or a transform over the selection all need it.
+    pub caret: (usize, usize),
+    /// The selected range as `(start, end)` char indices, ordered, equal when
+    /// nothing is selected. Slice the same `String` you passed in with it.
+    pub selection: (usize, usize),
 }
 
 /// Pure editing operations on a `String` + caret/selection.
@@ -489,7 +498,7 @@ impl Ui {
             p.draw.pop_clip();
         });
 
-        TextResponse { response: resp, changed, submitted, focused }
+        TextResponse { response: resp, changed, submitted, focused, caret: (0, st.cursor), selection: (sa, sb) }
     }
 }
 
@@ -867,6 +876,6 @@ impl Ui {
             self.ime_rect = Some(Rect::new(x, y, 1.0, lh));
         }
         let _ = content_h;
-        TextResponse { response: resp, changed, submitted, focused }
+        TextResponse { response: resp, changed, submitted, focused, caret: (row, col), selection: (sel_a, sel_b) }
     }
 }

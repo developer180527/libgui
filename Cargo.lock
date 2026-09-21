@@ -845,6 +845,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "libgui_pad"
+version = "0.1.0"
+dependencies = [
+ "arboard",
+ "libgui",
+ "libgui_keymap",
+ "libgui_soft",
+ "libgui_wgpu",
+ "libgui_winit",
+ "png",
+ "pollster",
+ "wgpu",
+ "winit",
+]
+
+[[package]]
 name = "libgui_shaders"
 version = "0.1.0"
 dependencies = [

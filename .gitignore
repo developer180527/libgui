@@ -4,3 +4,5 @@ target/
 crates/libgui_solaris/editor.png
 crates/libgui_cut/editor.png
 crates/libgui_cut/editor-scrolled.png
+crates/libgui_pad/pad.png
+crates/libgui_pad/pad-light.png
