@@ -166,8 +166,14 @@ pub fn ui_bindings(platform: Platform) -> KeyBindings {
     act(&mut b, Chord::primary(C), UiAction::Copy);
     act(&mut b, Chord::primary(X), UiAction::Cut);
     act(&mut b, Chord::primary(V), UiAction::Paste);
-    act(&mut b, Chord::key(Enter), UiAction::Submit);
-    act(&mut b, Chord::key(NumpadEnter), UiAction::Submit);
+    // Enter breaks a line; a single-line field has nowhere to put one and
+    // commits instead, so one binding serves both.
+    act(&mut b, Chord::key(Enter), UiAction::InsertNewline);
+    act(&mut b, Chord::key(NumpadEnter), UiAction::InsertNewline);
+    act(&mut b, Chord::primary(Enter), UiAction::Submit);
+    // The field's own undo, not the app's: it only reaches a focused field.
+    act(&mut b, Chord::primary(Z), UiAction::Undo);
+    act(&mut b, Chord::primary(Z).shift(), UiAction::Redo);
     act(&mut b, Chord::key(Escape), UiAction::Cancel);
     act(&mut b, Chord::key(Tab), UiAction::FocusNext);
     act(&mut b, Chord::key(Tab).shift(), UiAction::FocusPrevious);
@@ -203,6 +209,8 @@ pub fn ui_bindings(platform: Platform) -> KeyBindings {
             mv(&mut b, Chord::key(End).ctrl(), DocEnd);
             del(&mut b, Chord::key(Backspace).ctrl(), WordLeft);
             del(&mut b, Chord::key(Delete).ctrl(), WordRight);
+            // Redo's second chord, which Windows has had since Word 2.0.
+            act(&mut b, Chord::primary(Y), UiAction::Redo);
             // The IBM CUA clipboard keys, still standard on both.
             act(&mut b, Chord::key(Insert).ctrl(), UiAction::Copy);
             act(&mut b, Chord::key(Delete).shift(), UiAction::Cut);

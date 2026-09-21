@@ -36,6 +36,7 @@ mod theme_file;
 mod theme_watch;
 mod ui;
 mod text_edit;
+mod text_history;
 mod widgets;
 mod wrap;
 
@@ -71,6 +72,6 @@ pub use theme::{
 pub use theme_file::ThemeError;
 #[cfg(feature = "theme-watch")]
 pub use theme_watch::ThemeWatcher;
-pub use text_edit::TextResponse;
+pub use text_edit::{TextAreaOptions, TextResponse};
 pub use ui::{CanvasState, CanvasView, Frame, FrameOutput, Layer, LeafOptions, ListOptions, Response, ScrollOptions, Ui};
 pub use widgets::{Branch, TreeResponse};

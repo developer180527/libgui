@@ -60,6 +60,8 @@ thread_local! {
     /// state every frame believes it is permanently mid-scroll, and never
     /// settles its text back onto the pixel grid.
     static COLUMNS: std::cell::RefCell<Option<TableState>> = const { std::cell::RefCell::new(None) };
+    /// The text area's document: app state, reset for every run.
+    static AREA: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
 }
 
 /// Mark `r` as the widget the scene's [`Pointer`] acts on.
@@ -78,6 +80,9 @@ impl Scene {
         let mut ui = Ui::new(theme, FONT).expect("font");
         TARGET.with(|t| t.set(Rect::default()));
         FIELD.with(|t| t.borrow_mut().clear());
+        AREA.with(|t| {
+            *t.borrow_mut() = "fn frame(ui: &mut Ui) {\n    ui.label(\"hello\");\n    // a line long enough to run past the right edge of the panel\n    for i in 0..10 { ui.button(&i.to_string()); }\n}".into()
+        });
         COLUMNS.with(|t| *t.borrow_mut() = None);
         // A whole second per frame, so every hover fade and ease has finished
         // by the time it is captured.
@@ -248,6 +253,20 @@ fn text(ui: &mut Ui) {
         }
         let m = ui.theme.palette.text_muted;
         ui.text_with("Muted text in a smaller size", 12.0, m);
+    });
+}
+
+/// A multi-line editor: the line-number gutter, several lines, and a long one
+/// running past the right edge to show it clips rather than wraps.
+fn text_area(ui: &mut Ui) {
+    panel(ui, |ui| {
+        ui.label("Script");
+        AREA.with(|t| {
+            let mut text = t.borrow_mut();
+            let opts = TextAreaOptions { rows: 7, line_numbers: true, ..Default::default() };
+            let r = ui.text_area_with("script", &mut text, opts);
+            target(r.response.rect);
+        });
     });
 }
 
@@ -426,6 +445,7 @@ pub const SCENES: &[Scene] = &[
     Scene { name: "button_pressed", size: (240.0, 90.0), pointer: Pointer::Press, build: button_target },
     Scene { name: "tooltip", size: (300.0, 110.0), pointer: Pointer::Hover, build: tooltip_target },
     Scene { name: "text_focused", size: (240.0, 60.0), pointer: Pointer::ClickAndType("Hello"), build: text_input_target },
+    Scene { name: "text_area", size: (360.0, 210.0), pointer: Pointer::ClickAndType(""), build: text_area },
     Scene { name: "menu_open", size: (260.0, 190.0), pointer: Pointer::ClickAndType(""), build: menu_target },
     Scene { name: "combo_open", size: (260.0, 160.0), pointer: Pointer::ClickAndType(""), build: combo_target },
     // 37px: not a multiple of anything, so a fractional offset would show.

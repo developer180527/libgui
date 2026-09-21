@@ -117,9 +117,12 @@ or export them to files for a C++ shader pipeline. Edit only `shaders/ui.wgsl`; 
 ## Text input, focus, clipboard
 
 ```rust
-let r = ui.text_input("search", &mut filter, "Search objects…");
+let r = ui.text_input("search", &mut filter, "Search objects…");   // one line
 if r.changed { /* refilter */ }
 if r.submitted { /* Enter pressed */ }
+
+ui.text_area("notes", &mut notes, 6);                              // many
+ui.text_area_with("script", &mut src, TextAreaOptions { rows: 20, line_numbers: true, ..Default::default() });
 ```
 
 - Caret + selection (mouse drag, or `Move { select: true }`), word and line movement and deletion,
@@ -131,6 +134,33 @@ if r.submitted { /* Enter pressed */ }
 - The host sends `Text` and `Paste` events and writes `PlatformOutput::copied_text` to the clipboard,
   so the core has no platform or clipboard dependency. `libgui_demo` is a winit + arboard reference.
 - `ui.ime_rect()` gives the caret rect for positioning an IME candidate window.
+- **`text_area`** is the same editor with more than one line: vertical and horizontal scrolling, a
+  caret that stays in view, selection across lines, Up/Down that keep the column you started in over
+  a short line, an optional line-number gutter, and only the visible lines built — five thousand
+  lines cost what a screenful does. Enter breaks a line and Cmd/Ctrl+Enter commits; a single-line
+  field, having nowhere to put a newline, treats the same action as "commit", so one binding serves
+  both. Lines are hard here: `ui.paragraph` wraps, the editor does not, and a long line scrolls
+  sideways instead.
+
+### Undo is two different things, and only one of them is libgui's
+
+**Your document's undo is yours.** libgui does not know what an extrude, a keyframe or a transaction
+is, and it never touches your model.
+
+**A focused field's undo is the field's.** With a caret in a text box, Cmd/Ctrl+Z has to take back the
+*typing* — that is what every OS text control does, and an app that sends the chord to its document
+while someone is mid-word destroys their work.
+
+They never meet, by the same rule the clipboard already follows: **while a field has focus the chord
+is the field's and `consume_shortcut` refuses it; the rest of the time your app gets it.** Your CAD's
+undo stack does not have to know that a text box exists, and a text box does not have to push every
+keystroke into your CAD's undo stack.
+
+The field's history coalesces a burst of typing into one step, keeps deletes as their own run, breaks
+on a caret move or a click, restores the caret along with the text, and is bounded (64 steps, 256 KB)
+because it is retained state on a widget id. If your app writes the string itself — its own undo, a
+reload, a value shared with another widget — the field notices on the next frame and drops a history
+that described a buffer which no longer exists.
 
 ## Widget identity
 
@@ -1349,9 +1379,10 @@ lag, fling, easing) stay as frame-trace tests like
 
 ## Roadmap (roughly in order)
 
-1. ~~Text input~~ ✅ ~~IME preedit~~ ✅ ~~word wrap~~ ✅ single-line editing, `ui.paragraph` for
-   wrapped text, `InputEvent::ImePreedit` for compositions; next: the multi-line *editor* (caret
-   across lines, selection across lines), double-click word select, undo.
+1. ~~Text input~~ ✅ ~~IME preedit~~ ✅ ~~word wrap~~ ✅ ~~multi-line editor~~ ✅ ~~undo~~ ✅
+   `ui.text_input`, `ui.text_area` (caret and selection across lines, virtualised), `ui.paragraph`
+   for wrapped text, `InputEvent::ImePreedit` for compositions, per-field undo that never touches
+   your document's; next: word wrap *inside* the editor, double-click word select.
 2. ~~Scroll areas~~ ✅ ~~virtualised lists, variable row heights, trees~~ ✅ `ui.virtual_list`, `ui.virtual_rows`, `ui.tree_row`; next: horizontal scroll, keyboard PageUp/Down, multi-select and drag-to-reparent.
 3. ~~Keyboard/shortcut routing~~ ✅ ~~menus, popups/context menus, tooltips, z-order~~ ✅ `Layer`, `popup`, `menu_button`, `context_menu`, `tooltip`; next: checkable/icon menu items, keyboard navigation within a menu, "safe triangle" submenu tracking.
 4. ~~Docking + tabs + splitters~~ ✅ Unity-style with OS-window tear-off; ~~layout save/load~~ ✅ `dock.layout()` / `dock.restore()`, versioned and repairing; next: tab close/context menu, maximize pane.

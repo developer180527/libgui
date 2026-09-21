@@ -544,6 +544,10 @@ pub struct Ui {
     /// under the mouse is noise.
     focus_visible: bool,
     pub(crate) text_states: FxMap<Id, TextState>,
+    /// Per-field undo. Separate from `text_states` because it is the one piece
+    /// of text state that is not `Copy`, and because it is pruned on the same
+    /// rule: a field that stops being built forgets what was typed into it.
+    pub(crate) text_history: FxMap<Id, crate::text_history::History>,
     pub(crate) copied: Option<String>,
     pub(crate) ime_rect: Option<Rect>,
     // Scrolling
@@ -710,6 +714,7 @@ impl Ui {
             focus_policy: crate::FocusPolicy::default(),
             focus_visible: false,
             text_states: FxMap::default(),
+            text_history: FxMap::default(),
             copied: None,
             ime_rect: None,
             scroll_states: FxMap::default(),
@@ -1438,6 +1443,7 @@ impl Ui {
         let seen = &self.seen;
         self.anims.retain(|(id, _), _| seen.contains(id));
         self.text_states.retain(|id, _| seen.contains(id));
+        self.text_history.retain(|id, _| seen.contains(id));
         self.scroll_states.retain(|id, _| seen.contains(id));
         if self.focused.is_some_and(|f| !seen.contains(&f)) {
             self.focused = None;

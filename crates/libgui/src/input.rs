@@ -240,8 +240,21 @@ pub enum UiAction {
     /// Ask the host for the clipboard (`PlatformOutput::paste_requested`);
     /// the text arrives as [`InputEvent::Paste`].
     Paste,
-    /// Commit a text field (Enter).
+    /// A newline in a text area. A single-line field has nowhere to put one,
+    /// so it treats this as [`UiAction::Submit`] — which is why Enter commits
+    /// a field and breaks a line, with one binding.
+    InsertNewline,
+    /// Commit a text field (Cmd/Ctrl+Enter in a text area).
     Submit,
+    /// Undo the last edit **in the focused field**.
+    ///
+    /// This is not your document's undo. It covers what was typed into a text
+    /// field before it was committed, the way every OS text control does, and
+    /// its history dies with the focus. While no field has focus the chord
+    /// never reaches libgui at all, so your app's undo is what runs — see
+    /// [`crate::Ui::consume_shortcut`].
+    Undo,
+    Redo,
     /// Back out: unfocus a field, close the innermost popup (Escape).
     Cancel,
     /// Move keyboard focus (Tab / Shift+Tab).
@@ -304,7 +317,10 @@ pub(crate) fn test_bindings() -> KeyBindings {
         .bind(cmd(Key::C), UiAction::Copy)
         .bind(cmd(Key::X), UiAction::Cut)
         .bind(cmd(Key::V), UiAction::Paste)
-        .bind(Shortcut::plain(Key::Enter), UiAction::Submit)
+        .bind(Shortcut::plain(Key::Enter), UiAction::InsertNewline)
+        .bind(Shortcut::plain(Key::Enter).logo(), UiAction::Submit)
+        .bind(cmd(Key::Z), UiAction::Undo)
+        .bind(Shortcut::plain(Key::Z).logo().shift(), UiAction::Redo)
         .bind(Shortcut::plain(Key::Escape), UiAction::Cancel)
         .bind(Shortcut::plain(Key::Tab), UiAction::FocusNext)
         .bind(Shortcut::plain(Key::Tab).shift(), UiAction::FocusPrevious);

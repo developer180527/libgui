@@ -248,6 +248,10 @@ pub struct Demo {
     /// Edited by the Dock Tuning panel; the host copies it into the dock.
     pub dock_cfg: DockConfig,
     pub reset_layout: bool,
+    /// A free-text note on the selected object, and whether it has changed
+    /// since it was last logged.
+    pub notes: String,
+    pub notes_dirty: bool,
     /// Set by the View menu; the host saves the dock, which it owns.
     pub save_layout: bool,
     /// Index into `THEMES`.
@@ -306,6 +310,8 @@ impl Default for Demo {
             viewport_px: (1, 1),
             dock_cfg: DockConfig::default(),
             reset_layout: false,
+            notes: "Tikal timelapse.\nRegrade the sky before the final pass.".into(),
+            notes_dirty: false,
             save_layout: false,
             theme_choice: 0,
             density_choice: 0,
@@ -708,6 +714,13 @@ impl Panels<'_> {
         if ui.text_input("name", &mut d.objects[sel], "Name").submitted {
             let name = d.objects[sel].clone();
             d.log(format!("renamed to {name}"));
+        }
+        // A multi-line field, with its own undo: Cmd/Ctrl+Z here takes back
+        // typing, and the app's own undo only gets the chord when no field
+        // has focus.
+        ui.section("Notes");
+        if ui.text_area("notes", &mut d.notes, 4).changed {
+            d.notes_dirty = true;
         }
         ui.space(4.0);
         ui.section("Transform");
