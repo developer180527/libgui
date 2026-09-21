@@ -18,7 +18,7 @@ cargo run -p libgui_shaders -- shaders_out   # export HLSL/MSL/GLSL/SPIR-V/WGSL
 | Portability | `Id` values verified under emulation on 32-bit **and big-endian** targets |
 | Not tested | Android and iOS run on device, physical iPad, mixed-DPI multi-monitor docking |
 | Rust | **1.90** for the GPU crates (`wgpu-hal` on Linux/Windows/Android), **1.87** for `libgui`, `libgui_nodes`, `libgui_soft` and `libgui_keymap` |
-| Licence | **not yet chosen** — see `LICENSING.md` |
+| Licence | **MIT OR Apache-2.0**, at your option |
 | Version | 0.1.0, pre-1.0: the API still changes between releases |
 
 Not yet: multi-line text, font fallback, IME composition display, accessibility, colour picker,
@@ -1381,4 +1381,28 @@ lag, fling, easing) stay as frame-trace tests like
   recursive layout passes would otherwise overflow the stack. Any real layout is under fifty.
 - Container ids are positional; give containers explicit keys once you add conditional UI.
 
-Font: Inter (SIL Open Font License, see `assets/Inter-OFL.txt`).
+## Licence
+
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
+  <http://www.apache.org/licenses/LICENSE-2.0>)
+- MIT licence ([LICENSE-MIT](LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
+
+at your option. That is the Rust ecosystem's usual pair: MIT is short and
+permissive, and Apache-2.0 adds an explicit patent grant, which is what a
+company's lawyers look for.
+
+### Contribution
+
+Unless you state otherwise, any contribution you intentionally submit for
+inclusion in the work, as defined in the Apache-2.0 licence, shall be dual
+licensed as above, without any additional terms or conditions.
+
+### The bundled font is not covered by either
+
+`assets/Inter.ttf` is Inter, under the **SIL Open Font License 1.1** — a
+separate licence with its own terms (see `assets/Inter-OFL.txt`). It ships
+because the tests and demos need a font whose glyphs never move; libgui itself
+takes any font you hand it, so an app that would rather not redistribute Inter
+simply does not.

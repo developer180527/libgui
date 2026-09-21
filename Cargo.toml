@@ -3,6 +3,8 @@ resolver = "2"
 members = ["crates/libgui", "crates/libgui_winit", "crates/libgui_shaders", "crates/libgui_wgpu", "crates/libgui_demo", "crates/libgui_bench", "crates/libgui_nodes", "crates/libgui_soft", "crates/libgui_keymap", "crates/libgui_solaris", "crates/libgui_cut"]
 
 [workspace.package]
+authors = ["Venu Gopal"]
+license = "MIT OR Apache-2.0"
 edition = "2021"
 # The floor is platform-dependent and comes from dependencies, not our code:
 # wgpu-hal pulls `ordered-float` (needs 1.90) through

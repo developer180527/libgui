@@ -2,6 +2,8 @@
 name = "libgui_solaris"
 version = "0.1.0"
 edition.workspace = true
+license.workspace = true
+authors.workspace = true
 rust-version.workspace = true
 description = "A second libgui demo: a dense, Houdini/Solaris-shaped editor, to show the library carrying a real tool's worth of UI at once."
 
