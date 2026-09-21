@@ -126,7 +126,12 @@ fn fs_main(v: VOut) -> @location(0) vec4<f32> {
         let r = min(v.params.x, min(v.half_size.x, v.half_size.y));
         let d = sd_round_rect(v.local, v.half_size, r);
         let m = clamp(0.5 - d / aa, 0.0, 1.0);
-        return vec4(sample_bilinear(v.uv).rgb, 1.0) * v.color * m;
+        // Premultiplied, like every other branch: the tint's alpha has to
+        // multiply the colour as well as the coverage, or a faded viewport
+        // (a dimmed scene behind a modal, a cross-fade between renderers)
+        // comes out at full brightness and blends brighter than white.
+        // The *texture's* own alpha is still ignored — it composites opaque.
+        return premul(vec4(sample_bilinear(v.uv).rgb * v.color.rgb, v.color.a)) * m;
     }
     if (kind == KIND_GLYPH) {
         return premul(v.color) * sample_bilinear(v.uv).r;

@@ -296,7 +296,10 @@ fn fragment(
             let [u, v] = quad_uv(inst.uv, local, ext);
             let s = tex.sample(u, v);
             let c = inst.color;
-            [s[0] * c[0] * m, s[1] * c[1] * m, s[2] * c[2] * m, c[3] * m]
+            // Premultiplied: the tint's alpha multiplies the colour too. The
+            // texture's own alpha is ignored — a user texture composites as
+            // opaque RGB (render contract).
+            scale4(premul([s[0] * c[0], s[1] * c[1], s[2] * c[2], c[3]]), m)
         }
         PrimitiveKind::Glyph => {
             let [u, v] = quad_uv(inst.uv, local, ext);

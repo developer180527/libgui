@@ -28,6 +28,9 @@
 //! - The image is sampled as **opaque sRGB**: `uv` selects a sub-rect, the
 //!   texture's own alpha is ignored, and no colour conversion is applied.
 //!   A linear or HDR target must be converted before it is handed over.
+//!   The *instance's* colour still applies, premultiplied, so a viewport can
+//!   be tinted or faded (dimmed behind a modal, cross-faded between two
+//!   renderers) without the texture carrying an alpha channel.
 //! - Whatever produced the texture must have completed before the UI pass
 //!   samples it. Recording both into one command buffer gives that ordering;
 //!   across queues or devices it is the host's to arrange.
