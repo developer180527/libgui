@@ -10,15 +10,42 @@ use std::hash::{Hash, Hasher};
 /// FxHash measured 1776 collisions over the 960k ids in `libgui_bench --bin
 /// collide`, where a 64-bit hash should produce none.
 ///
-/// Ids are **stable across Rust releases, targets and processes**: they use
-/// libgui's own [`StableHasher`] (not `std`'s `DefaultHasher`, whose algorithm
-/// may change), so they can be persisted (saved layouts) and cross FFI.
+/// Ids are **stable across targets and processes**: they use libgui's own
+/// [`StableHasher`] (not `std`'s `DefaultHasher`, whose algorithm may change),
+/// with integers always fed little-endian.
+///
+/// Across Rust releases the guarantee is narrower, and it is worth being
+/// exact about. The hasher is frozen, but [`Id::new`] takes any `impl Hash`,
+/// and how a `str`, a tuple or a slice feeds a hasher (a `0xff` terminator,
+/// length prefixes) is `std`'s implementation, not a promise. The pinned tests
+/// below would catch a change on a toolchain upgrade — so it is a tested
+/// property, not a guaranteed one. For widget ids that is enough: they live
+/// for one process. For an id that is **written down** — a
+/// [`crate::TabViewer::id`] in a saved layout, anything crossing FFI — use
+/// [`Id::from_name`], whose encoding is spelled out here and depends on
+/// nothing in `std`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Id(pub u64);
 
 impl Id {
     pub fn new(src: impl Hash) -> Id {
         Id(0).with(src)
+    }
+
+    /// An id from a name, with an encoding that is libgui's own: the name's
+    /// UTF-8 bytes, then a `0xff` byte, after the root id as a little-endian
+    /// `u64`. Nothing here goes through a `std` `Hash` impl, so no toolchain
+    /// can change it. Use it for ids that are persisted.
+    ///
+    /// It equals `Id::new(name)` on every toolchain so far — that is the
+    /// encoding `std` happens to use for a `str` — so switching to it moves no
+    /// id anyone has already saved.
+    pub fn from_name(name: &str) -> Id {
+        let mut h = StableHasher::new();
+        h.write(&0u64.to_le_bytes());
+        h.write(name.as_bytes());
+        h.write(&[0xff]);
+        Id(h.finish())
     }
 
     pub fn with(self, src: impl Hash) -> Id {
@@ -174,6 +201,20 @@ mod tests {
         assert_eq!(root.with("same").with(1u32).0, 0x8bd9_b472_4241_6adf);
         assert_eq!(root.with(("button", "OK")).0, 0x6ca8_bdde_cce3_cee8);
         assert_eq!(Id::new(("dock_tab", 7u64, 3u64)).0, 0x16b2_eb81_49de_894b);
+    }
+
+    /// `from_name` is the encoding persisted ids rely on, so it is pinned on
+    /// its own, independent of any `Hash` impl. And today it agrees with
+    /// `Id::new` for a `str`: if this second half ever fails, `std` has changed
+    /// how a `str` hashes, and every `Id::new(name)` in a saved file moved —
+    /// `from_name` did not.
+    #[test]
+    fn names_hash_without_std() {
+        assert_eq!(Id::from_name("root").0, 0xfb7e_ce09_3bf4_2275);
+        assert_eq!(Id::from_name("").0, Id::new("").0);
+        for name in ["root", "outliner", "scene-graph-tree", "ünïcødé", "a\u{0}b"] {
+            assert_eq!(Id::from_name(name), Id::new(name), "{name:?}");
+        }
     }
 
     /// SipHash-1-3 reference behaviour: chunking must not matter, and every

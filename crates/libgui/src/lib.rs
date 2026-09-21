@@ -25,6 +25,7 @@ pub mod render_contract;
 mod scroll;
 pub mod testing;
 pub mod table;
+mod color_hex;
 mod subtree_cache;
 mod text;
 mod text_arena;

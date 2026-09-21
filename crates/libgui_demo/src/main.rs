@@ -608,8 +608,12 @@ fn load_layout(dock: &mut DockState<Tab>) -> String {
 }
 
 fn save_layout(dock: &DockState<Tab>, demo: &mut Demo) {
-    let text = dock.layout(&Panels { d: demo, viewport_tex: VIEWPORT_TEX, scale: 1.0 }).to_toml();
     let path = layout_path();
+    // Never write over the last good layout with a failed serialisation.
+    let text = match dock.layout(&Panels { d: demo, viewport_tex: VIEWPORT_TEX, scale: 1.0 }).to_toml() {
+        Ok(text) => text,
+        Err(e) => return demo.log(format!("could not save layout: {e}")),
+    };
     match std::fs::write(&path, text) {
         Ok(()) => demo.log(format!("layout saved to {}", path.display())),
         Err(e) => demo.log(format!("could not save layout: {e}")),

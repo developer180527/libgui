@@ -55,6 +55,27 @@ impl Tab {
         }
     }
 
+    /// A fixed name per panel, never shown. Titles are for people and may be
+    /// reworded; this is what a saved layout would record, so it stays put.
+    fn key(self) -> &'static str {
+        match self {
+            Tab::SceneView => "scene-view",
+            Tab::AnimationEditor => "animation-editor",
+            Tab::GeometrySpreadsheet => "geometry-spreadsheet",
+            Tab::SceneGraphTree => "scene-graph-tree",
+            Tab::SceneGraphDetails => "scene-graph-details",
+            Tab::SceneGraphLayers => "scene-graph-layers",
+            Tab::LayoutAssetGallery => "layout-asset-gallery",
+            Tab::Parameters => "parameters",
+            Tab::ContextOptions => "context-options",
+            Tab::PerformanceMonitor => "performance-monitor",
+            Tab::RenderScheduler => "render-scheduler",
+            Tab::Network => "network",
+            Tab::MaterialPalette => "material-palette",
+            Tab::PresetBrowser => "preset-browser",
+        }
+    }
+
     /// The viewport and the node network place their own content to the pixel;
     /// everything else is happier in a scroll area.
     fn scrolls(self) -> bool {
@@ -77,8 +98,10 @@ impl TabViewer for Viewer<'_> {
 
     fn id(&self, tab: &Tab) -> u64 {
         // Stable per panel, so widget ids and retained state follow a tab when
-        // it is dragged to another leaf or torn into its own window.
-        *tab as u64
+        // it is dragged to another leaf or torn into its own window — and from
+        // a fixed name rather than the enum's position, so a saved layout would
+        // survive a panel being added in the middle.
+        Id::from_name(tab.key()).0
     }
 
     fn scroll(&self, tab: &Tab) -> bool {

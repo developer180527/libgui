@@ -134,7 +134,9 @@ impl Default for DockConfig {
 pub trait TabViewer {
     type Tab;
     fn title(&self, tab: &Self::Tab) -> String;
-    /// Stable identity (widget ids and retained state follow the tab).
+    /// Stable identity (widget ids and retained state follow the tab). Saved
+    /// layouts store it, so derive it from a fixed name with
+    /// [`crate::Id::from_name`] rather than from an enum's position.
     fn id(&self, tab: &Self::Tab) -> u64;
     fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab);
     /// Wrap the panel in a scroll area (false for viewports).

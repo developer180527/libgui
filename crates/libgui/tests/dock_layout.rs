@@ -117,7 +117,7 @@ fn a_layout_survives_a_round_trip_through_text() {
     let before = shape(&dock);
     let saved = dock.layout(&Viewer);
 
-    let text = saved.to_toml();
+    let text = saved.to_toml().expect("serialise");
     assert!(text.contains("version"), "the layout should say what wrote it:\n{text}");
     let parsed = DockLayout::from_toml(&text).expect("parse");
     assert_eq!(parsed, saved, "the layout changed on its way through TOML");
@@ -366,7 +366,7 @@ fn titles_are_a_hint_and_nothing_more() {
     let mut dock = DockState::new();
     build(&mut dock);
     let saved = dock.layout(&Viewer);
-    let text = saved.to_toml();
+    let text = saved.to_toml().expect("serialise");
     assert!(text.contains("outliner"), "the file names no panels:\n{text}");
 
     // A file whose titles are wrong, and one where they are missing entirely
@@ -385,7 +385,7 @@ fn titles_are_a_hint_and_nothing_more() {
         }
     }
     strip(without.surfaces[0].root.as_mut().unwrap());
-    let bare = without.to_toml();
+    let bare = without.to_toml().expect("serialise");
     assert!(!bare.contains("titles"), "titles were written even when empty:\n{bare}");
     for (what, file) in [("wrong titles", lying), ("no titles", bare)] {
         let parsed = DockLayout::from_toml(&file).unwrap_or_else(|e| panic!("{what}: {e}"));
@@ -393,5 +393,83 @@ fn titles_are_a_hint_and_nothing_more() {
         restored.restore(&parsed, |id| Tab::from_id(id, &Tab::V1)).expect("restore");
         assert_eq!(shape(&restored), shape(&dock), "{what} changed where the panels went");
         assert_eq!(restored.layout(&Viewer), saved, "{what}: the titles were not rewritten from the app");
+    }
+}
+
+/// Hashed tab ids use all 64 bits. TOML integers are signed 64-bit, so an id
+/// above `i64::MAX` written as a bare integer is out of spec — the `toml`
+/// crate happens to accept it, other readers need not, and a JavaScript JSON
+/// reader rounds anything above 2^53. So ids are written as strings.
+#[cfg(feature = "theme-toml")]
+#[test]
+fn every_id_is_written_in_a_form_any_reader_accepts() {
+    let saved = DockLayout {
+        version: DockLayout::VERSION,
+        surfaces: vec![SurfaceLayout {
+            floating: false,
+            size: Vec2::ZERO,
+            rect: Rect::default(),
+            // The two ends of the range, and one a hash would plausibly give.
+            root: Some(NodeLayout::Leaf { tabs: vec![0, u64::MAX, 0x9f3c_52d1_07aa_e6b4], active: 0, titles: vec![] }),
+        }],
+    };
+    let text = saved.to_toml().expect("serialise");
+
+    // No bare integer in the file is above i64::MAX: every token that parses
+    // as a number at all must also parse as a signed one.
+    for token in text.split(|c: char| !c.is_ascii_alphanumeric()) {
+        if let Ok(n) = token.parse::<u64>() {
+            assert!(i64::try_from(n).is_ok(), "{n} is out of range for a TOML integer:\n{text}");
+        }
+    }
+    assert!(text.contains("\"0xffffffffffffffff\""), "ids are written as hex strings:\n{text}");
+    assert_eq!(DockLayout::from_toml(&text).expect("parse"), saved, "and read back exactly");
+}
+
+/// Version-1 layouts wrote ids as integers, including the out-of-range ones,
+/// and people have those files on disk. They must keep loading.
+#[cfg(feature = "theme-toml")]
+#[test]
+fn a_version_one_layout_with_integer_ids_still_loads() {
+    let v1 = r#"
+version = 1
+
+[[surfaces]]
+floating = false
+size = { x = 0.0, y = 0.0 }
+rect = { x = 0.0, y = 0.0, w = 0.0, h = 0.0 }
+
+[surfaces.root.leaf]
+tabs = [7, 18446744073709551615]
+active = 1
+"#;
+    let parsed = DockLayout::from_toml(v1).expect("a version-1 file is still a layout");
+    assert_eq!(parsed.version, 1);
+    match &parsed.surfaces[0].root {
+        Some(NodeLayout::Leaf { tabs, active, .. }) => {
+            assert_eq!(tabs, &vec![7, u64::MAX], "integer ids read back as the same ids");
+            assert_eq!(*active, 1);
+        }
+        other => panic!("expected one leaf, got {other:?}"),
+    }
+}
+
+/// A file someone has edited by hand: an id that is not one is a parse
+/// error, not a tab with a made-up id.
+#[cfg(feature = "theme-toml")]
+#[test]
+fn an_id_that_is_not_one_is_refused() {
+    let with = |tabs: &str| {
+        format!(
+            "version = 2\n[[surfaces]]\nfloating = false\nsize = {{ x = 0.0, y = 0.0 }}\n\
+             rect = {{ x = 0.0, y = 0.0, w = 0.0, h = 0.0 }}\n[surfaces.root.leaf]\ntabs = {tabs}\nactive = 0\n"
+        )
+    };
+    assert!(DockLayout::from_toml(&with(r#"["0x2a", "42"]"#)).is_ok(), "hex and decimal strings are both ids");
+    for bad in [r#"["outliner"]"#, "[-1]", r#"["0x"]"#, r#"["0x1ffffffffffffffff"]"#] {
+        assert!(
+            matches!(DockLayout::from_toml(&with(bad)), Err(LayoutError::Parse(_))),
+            "{bad} should not parse as tab ids"
+        );
     }
 }

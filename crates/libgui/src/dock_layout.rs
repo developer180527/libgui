@@ -10,8 +10,9 @@
 //! The snapshot stores [`TabViewer::id`], not the tab itself: libgui never
 //! knows what a `Tab` is. Restoring asks the app for the tab behind each id,
 //! so **the id has to mean the same thing in the next version of your app**.
-//! A hash of a stable name (`"outliner"`) survives adding and reordering
-//! panels; an enum's discriminant (`tab as u64`) does not.
+//! A hash of a stable name survives adding and reordering panels — use
+//! [`crate::Id::from_name`]`("outliner").0`, whose encoding no toolchain can
+//! change; an enum's discriminant (`tab as u64`) does not.
 //!
 //! # What a restore promises
 //!
@@ -30,7 +31,7 @@
 //!
 //! ```ignore
 //! // Saving, e.g. when the window closes:
-//! let text = dock.layout(&viewer).to_toml();
+//! let text = dock.layout(&viewer).to_toml()?;
 //! std::fs::write(path, text)?;            // the app's filesystem, not libgui's
 //!
 //! // Loading, at startup:
@@ -97,7 +98,10 @@ layout_serde! {
 pub enum NodeLayout {
     /// A pane: a stack of tabs, one of them active.
     Leaf {
-        /// [`TabViewer::id`] per tab, in order.
+        /// [`TabViewer::id`] per tab, in order. Written as `"0x…"` strings:
+        /// a hashed id uses all 64 bits, and TOML integers stop at `i64::MAX`
+        /// while a JavaScript JSON reader stops at 2^53. Read as either.
+        #[cfg_attr(feature = "serde", serde(with = "tab_ids"))]
         tabs: Vec<u64>,
         active: usize,
         /// [`TabViewer::title`] per tab, for whoever opens the file: ids are
@@ -117,6 +121,65 @@ pub enum NodeLayout {
 }
 }
 
+/// Tab ids as `"0x…"` strings on the way out, and a string or an integer on
+/// the way in — version-1 layouts wrote plain integers, and they still load.
+#[cfg(feature = "serde")]
+mod tab_ids {
+    use serde::de::{self, SeqAccess, Visitor};
+    use serde::{Deserializer, Serializer};
+    use std::fmt;
+
+    pub fn serialize<S: Serializer>(ids: &[u64], s: S) -> Result<S::Ok, S::Error> {
+        s.collect_seq(ids.iter().map(|id| format!("{id:#018x}")))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u64>, D::Error> {
+        struct Ids;
+        impl<'de> Visitor<'de> for Ids {
+            type Value = Vec<u64>;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a list of tab ids")
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<u64>, A::Error> {
+                let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+                while let Some(Id(id)) = seq.next_element()? {
+                    out.push(id);
+                }
+                Ok(out)
+            }
+        }
+        d.deserialize_seq(Ids)
+    }
+
+    struct Id(u64);
+
+    impl<'de> serde::Deserialize<'de> for Id {
+        fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            struct One;
+            impl Visitor<'_> for One {
+                type Value = Id;
+                fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                    f.write_str("a tab id: \"0x…\" or a non-negative integer")
+                }
+                fn visit_u64<E: de::Error>(self, v: u64) -> Result<Id, E> {
+                    Ok(Id(v))
+                }
+                fn visit_i64<E: de::Error>(self, v: i64) -> Result<Id, E> {
+                    u64::try_from(v).map(Id).map_err(|_| E::custom("a tab id cannot be negative"))
+                }
+                fn visit_str<E: de::Error>(self, v: &str) -> Result<Id, E> {
+                    let parsed = match v.strip_prefix("0x").or_else(|| v.strip_prefix("0X")) {
+                        Some(hex) => u64::from_str_radix(hex, 16),
+                        None => v.parse(),
+                    };
+                    parsed.map(Id).map_err(|_| E::custom(format!("not a tab id: {v:?}")))
+                }
+            }
+            d.deserialize_any(One)
+        }
+    }
+}
+
 /// Why a layout could not be restored at all. Anything survivable is repaired
 /// instead and reported in [`Restored`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -126,6 +189,8 @@ pub enum LayoutError {
     Version { found: u32, supported: u32 },
     /// The text was not a layout (only with `theme-toml`).
     Parse(String),
+    /// The layout could not be written out (only with `theme-toml`).
+    Serialize(String),
 }
 
 impl std::fmt::Display for LayoutError {
@@ -135,6 +200,7 @@ impl std::fmt::Display for LayoutError {
                 write!(f, "dock layout version {found} is newer than this build understands ({supported})")
             }
             LayoutError::Parse(e) => write!(f, "not a dock layout: {e}"),
+            LayoutError::Serialize(e) => write!(f, "could not write the dock layout: {e}"),
         }
     }
 }
@@ -167,12 +233,20 @@ impl Restored {
 impl DockLayout {
     /// Bumped when the meaning of the format changes. An older layout is
     /// understood; a newer one is refused.
-    pub const VERSION: u32 = 1;
+    ///
+    /// 2: tab ids are written as `"0x…"` strings. Version 1 wrote integers,
+    /// which is out of spec for TOML above `i64::MAX` — about half of all
+    /// hashed ids. Both are read.
+    pub const VERSION: u32 = 2;
 
     /// Render as TOML. Pure data: writing it somewhere is the app's job.
+    ///
+    /// A `Result`, because the usual next step is writing it over the file
+    /// the last good layout is in: an error must stop that, where an empty
+    /// string would have silently replaced the user's workspace with nothing.
     #[cfg(feature = "theme-toml")]
-    pub fn to_toml(&self) -> String {
-        toml::to_string_pretty(self).unwrap_or_default()
+    pub fn to_toml(&self) -> Result<String, LayoutError> {
+        toml::to_string_pretty(self).map_err(|e| LayoutError::Serialize(e.to_string()))
     }
 
     /// Parse a layout written by [`DockLayout::to_toml`].

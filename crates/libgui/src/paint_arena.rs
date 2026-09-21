@@ -21,8 +21,10 @@
 //!   written at `Entry::offset`, and only [`PaintArena::write`] creates both
 //!   together, so they cannot disagree.
 //! - `call` *consumes* the closure (`FnOnce`), so an entry may run once. It is
-//!   marked done before anything else can reach it, and [`PaintArena::clear`]
-//!   and `Drop` only drop entries that never ran — no double free, and no leak
+//!   marked done before anything else can reach it — before it runs, and
+//!   before it is dropped, so a panic in either leaves nothing to repeat — and
+//!   [`PaintArena::clear`] and `Drop` only drop entries that never ran — no
+//!   double free, and no leak
 //!   for a widget whose paint was never reached (clipped away, or a container
 //!   that was built and then not painted).
 //! - Closures needing an alignment the buffer cannot give are boxed first and
@@ -140,8 +142,14 @@ impl PaintArena {
     /// buffer, so a steady frame allocates nothing.
     pub fn clear(&mut self) {
         let base = self.buf.as_mut_ptr() as *mut u8;
-        for e in &self.entries {
+        for e in &mut self.entries {
             if !e.done {
+                // Marked before the drop, as `run` marks before the call: if
+                // this `Drop` panics, the unwind drops the arena, whose `Drop`
+                // clears again — and must find this entry, and every one
+                // before it, already spent. Otherwise they are dropped twice,
+                // and a second panic during an unwind aborts the process.
+                e.done = true;
                 // SAFETY: never run, so still an initialised value of the type
                 // `drop` was monomorphised for.
                 unsafe { (e.drop)(base.add(e.offset as usize)) };
@@ -209,6 +217,41 @@ mod tests {
         assert_eq!(drops.get(), 3, "cleared twice, dropped twice");
         drop(a);
         assert_eq!(drops.get(), 3);
+    }
+
+    /// A capture whose `Drop` panics, part-way through `clear`. The entries
+    /// dropped before it must not be dropped again when the arena itself is
+    /// dropped during the unwind, and the ones after it must still be dropped
+    /// exactly once.
+    #[test]
+    fn a_drop_that_panics_during_clear_drops_nothing_twice() {
+        struct Panics;
+        impl Drop for Panics {
+            fn drop(&mut self) {
+                panic!("a capture whose Drop panics");
+            }
+        }
+
+        let drops = Rc::new(Cell::new(0));
+        let mut a = arena_with(2, &drops);
+        let p = Panics;
+        a.push(move |_: &mut Painter, _: Rect| {
+            let _ = &p;
+        });
+        for _ in 0..2 {
+            let b = Bomb(drops.clone());
+            a.push(move |_: &mut Painter, _: Rect| {
+                let _ = &b;
+            });
+        }
+
+        // `clear` unwinds out of the third entry; the arena is dropped by the
+        // unwind, and its `Drop` runs `clear` again over what is left.
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            a.clear();
+        }));
+        assert!(r.is_err(), "the capture's panic propagates");
+        assert_eq!(drops.get(), 4, "each of the four counted captures dropped exactly once");
     }
 
     #[test]

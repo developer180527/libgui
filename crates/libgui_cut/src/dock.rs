@@ -52,7 +52,7 @@ impl Tab {
             Tab::Info => "info",
             Tab::Timeline => "timeline",
         };
-        Id::new(name).0
+        Id::from_name(name).0
     }
 }
 

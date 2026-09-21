@@ -151,6 +151,8 @@ jobs:
       # backend, no TOML. Each of these catches a missing cfg.
       - run: cargo check -p libgui --no-default-features --locked
       - run: cargo check -p libgui --no-default-features --features fontdue --locked
+      # serde without TOML: a layout or palette in the app's own format.
+      - run: cargo check -p libgui --no-default-features --features serde --locked
       - run: cargo check -p libgui --no-default-features --features theme-toml --locked
       - run: cargo check -p libgui --no-default-features --features theme-toml,theme-watch --locked
       - run: cargo check -p libgui --all-features --locked

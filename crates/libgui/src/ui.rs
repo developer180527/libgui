@@ -433,6 +433,29 @@ pub struct FrameOutput<'a> {
     pub platform: PlatformOutput,
 }
 
+/// One UI: its retained state, its fonts and its frame in progress.
+///
+/// # Threads
+///
+/// `Ui` is **not `Send`**, and that is deliberate rather than an oversight.
+/// It holds the app's own values in boxed closures and trait objects — paint
+/// closures, drag-and-drop payloads (`Box<dyn Any>`), the font rasteriser —
+/// and none of them is required to be `Send`. Requiring it would forbid an
+/// app from capturing an `Rc` or a `RefCell` in a paint closure, which is the
+/// ordinary thing to do on a UI thread.
+///
+/// So a `Ui` lives on the thread that created it. An engine that simulates or
+/// renders elsewhere sends *data* to the UI thread — the state to show, a
+/// finished texture to display with `TextureId::User` — and the UI thread
+/// builds the frame and hands its `FrameOutput` to the renderer. Nothing in
+/// libgui needs the frame to be built where it is drawn.
+///
+/// ```compile_fail
+/// // Pinned: if `Ui` ever becomes `Send`, this stops failing and the section
+/// // above must be rewritten.
+/// fn is_send<T: Send>() {}
+/// is_send::<libgui::Ui>();
+/// ```
 pub struct Ui {
     pub theme: Theme,
     pub fonts: Fonts,

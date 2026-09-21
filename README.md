@@ -21,8 +21,9 @@ cargo run -p libgui_shaders -- shaders_out   # export HLSL/MSL/GLSL/SPIR-V/WGSL
 | Licence | **MIT OR Apache-2.0**, at your option |
 | Version | 0.1.0, pre-1.0: the API still changes between releases |
 
-Not yet: multi-line text, font fallback, IME composition display, accessibility, colour picker,
-layout persistence. See the roadmap.
+Not yet: multi-line text *editing* (wrapped read-only text and IME composition display are done),
+text undo, font fallback and complex shaping, accessibility, a colour picker, and rotated drawing —
+an image or a glyph cannot be turned, only vector paths the app rotates itself. See the roadmap.
 
 ## Crates
 
@@ -921,6 +922,11 @@ let out = ui.end_frame();          // draw data for your Backend + out.platform:
 - Call `backend.render(&mut pass, &out)` inside any pass you already own (e.g. after
   your post-processing), so the UI composites over the frame.
 - Run it alongside Dear ImGui during migration: both just record into the same pass.
+- **`Ui` is not `Send`.** It keeps your paint closures, drag payloads and font rasteriser, and
+  none of them has to be `Send` — so a closure can capture an `Rc`, as UI code usually wants to.
+  Build the UI on one thread; if your engine simulates or renders on others, send it data (the
+  state to show, a finished texture for `ui.viewport`) and send the `FrameOutput`'s draw data
+  back. The frame does not have to be built on the thread that draws it.
 
 ## Performance guards
 
@@ -1279,7 +1285,7 @@ tabs are in which pane and which is active, and the floating windows;
 
 ```rust
 // Saving, when the window closes:
-std::fs::write(path, dock.layout(&viewer).to_toml())?;   // the app's I/O, not libgui's
+std::fs::write(path, dock.layout(&viewer).to_toml()?)?;  // the app's I/O, not libgui's
 
 // Loading, at startup:
 let saved = DockLayout::from_toml(&std::fs::read_to_string(path)?)?;
@@ -1290,8 +1296,13 @@ for key in report.missing_from(Tab::ALL.iter().map(|t| t.key())) {
 ```
 
 - **Tabs are saved by `TabViewer::id`**, so that id must mean the same thing in
-  the next version of your app: hash a fixed name (`"outliner"`), never use
-  `self as u64`, which renumbers every panel after one inserted in the middle.
+  the next version of your app: hash a fixed name with
+  `Id::from_name("outliner").0`, never use `self as u64`, which renumbers every
+  panel after one inserted in the middle. `from_name` rather than `Id::new`:
+  its encoding is libgui's own, where `Id::new` hashes through `std`'s `Hash`
+  impls, which a toolchain upgrade is allowed to change. Ids are written as
+  `"0x…"` strings, since hashed ids use all 64 bits and TOML integers stop at
+  `i64::MAX`.
 - **A layout is advice, not a command.** The app that loads it is rarely the one
   that saved it: a tab this build no longer has is dropped, along with the pane
   and the window it would have left empty; a tab the layout never mentioned is
@@ -1345,8 +1356,10 @@ lag, fling, easing) stay as frame-trace tests like
 3. ~~Keyboard/shortcut routing~~ ✅ ~~menus, popups/context menus, tooltips, z-order~~ ✅ `Layer`, `popup`, `menu_button`, `context_menu`, `tooltip`; next: checkable/icon menu items, keyboard navigation within a menu, "safe triangle" submenu tracking.
 4. ~~Docking + tabs + splitters~~ ✅ Unity-style with OS-window tear-off; ~~layout save/load~~ ✅ `dock.layout()` / `dock.restore()`, versioned and repairing; next: tab close/context menu, maximize pane.
 5. ~~Paths~~ ✅ `p.line` / `polyline` / `bezier` / `wire`, a `Line` primitive at `CONTRACT_VERSION` 2;
-   next: stroked/filled arbitrary paths, dashes, arrowheads, and a real line/area plot (`plot` is
-   still a debug bar chart).
+   next: rotated images and glyphs (an angle in the `Image` kind's free `params` slot, so the
+   96-byte stride holds — spinners, rotary knobs, vertical axis labels), stroked/filled
+   arbitrary paths, dashes, arrowheads, and a real line/area plot (`plot` is still a debug bar
+   chart).
 6. ~~Horizontal and 2D scrolling~~ ✅ ~~general drag and drop~~ ✅ ~~tables/data grids with
    resizable and frozen columns~~ ✅ `ScrollOptions::both`, `drag_source` / `drop_zone` / `Payload`
    with a host seam for OS drags, `ui.table` with `TableState`; next: column reordering by drag,

@@ -60,7 +60,7 @@ impl Tab {
             Tab::Appearance => "appearance",
             Tab::DockTuning => "dock-tuning",
         };
-        libgui::Id::new(name).0
+        libgui::Id::from_name(name).0
     }
 
     pub fn from_key(key: u64) -> Option<Tab> {
