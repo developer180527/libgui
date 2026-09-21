@@ -107,7 +107,7 @@ impl Metrics {
                 font_size_small: 10.5,
                 font_size_heading: 13.5,
                 focus_ring_width: 2.0,
-            anim_speed: 20.0,
+                anim_speed: 20.0,
             },
             Density::Regular => Self {
                 radius: 6.0,
@@ -121,7 +121,7 @@ impl Metrics {
                 font_size_small: 11.0,
                 font_size_heading: 15.0,
                 focus_ring_width: 2.0,
-            anim_speed: 18.0,
+                anim_speed: 18.0,
             },
             Density::Touch => Self {
                 radius: 10.0,
@@ -135,7 +135,7 @@ impl Metrics {
                 font_size_small: 13.0,
                 font_size_heading: 19.0,
                 focus_ring_width: 2.0,
-            anim_speed: 16.0,
+                anim_speed: 16.0,
             },
         }
     }

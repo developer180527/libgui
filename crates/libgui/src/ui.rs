@@ -610,7 +610,11 @@ pub enum Layer {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct LeafOptions {
     pub interactive: bool,
-    /// Grow the hit area by this many px on every side.
+    /// Grow the hit area by this many px on every side — thin things like
+    /// splitters and column grips are easier to grab than they are to see.
+    ///
+    /// The widget grows, its clip does not: the hit area still stops at
+    /// whatever the ancestors clipped to.
     pub hit_pad: f32,
     /// Hit-test above normal widgets regardless of paint order.
     pub hit_top: bool,
@@ -2668,7 +2672,7 @@ fn paint(
     let rec = nodes[i].recording.then(|| {
         sink.recording += 1;
         p.draw.open_barrier();
-        (p.draw.instance_count(), sink.mark(), cache.open_draw())
+        (p.draw.instance_count(), sink.mark())
     });
     sink.rects.insert(id, rect);
     if sink.recording > 0 {
@@ -2684,7 +2688,10 @@ fn paint(
     }
     if nodes[i].interactive {
         let pad = nodes[i].hit_pad * t.zoom;
-        if let Some(r) = p.draw.clip().expand(pad).intersect(&win.expand(pad)) {
+        // The pad grows the widget, not the clip: `clip.expand(pad)` would let
+        // a padded widget at a clip's edge be hit outside it — a table's last
+        // column grip grabbed from the panel next door.
+        if let Some(r) = p.draw.clip().intersect(&win.expand(pad)) {
             if nodes[i].hit_top {
                 sink.top_hits.push((id, r));
             } else {
@@ -2768,7 +2775,13 @@ fn paint(
     if clip {
         p.draw.pop_clip();
     }
-    if let Some((first, marks, draw_marks)) = rec {
+    if let Some((first, marks)) = rec {
+        // Where this recording's copies start in the arenas — taken *here*,
+        // not when the subtree opened. A `cached` subtree nested inside this
+        // one closes first and appends its own copies in between, and a mark
+        // from the open would swallow them: the outer would replay the inner
+        // twice.
+        let draw_marks = cache.open_draw();
         // Everything the subtree produced is now a contiguous run in each of
         // the sinks, because paint is depth-first and it owned all of it.
         // Both walk instance indices in order, so one cursor pairs them —
@@ -2957,6 +2970,38 @@ mod tests {
         });
         let _ = ui.end_frame();
         out
+    }
+
+    /// `hit_pad` makes a thin widget easier to grab, but it must not make it
+    /// grabbable outside the clip its ancestors imposed: a table's last column
+    /// grip would be draggable from the panel next door.
+    #[test]
+    fn a_padded_hit_area_stops_at_the_clip() {
+        let mut ui = ui();
+        let id = Id::new("grip");
+        let frame = |ui: &mut Ui, at: Vec2| -> Response {
+            ui.push(InputEvent::PointerMoved { pos: at });
+            ui.begin_frame(FrameInfo { dt: 1.0, ..FrameInfo::default() });
+            let mut resp = None;
+            // A clipped panel 100 wide, with a padded widget at its right edge.
+            let panel = Layout::row().width(Size::Fixed(100.0)).height(Size::Fixed(40.0));
+            ui.container(panel, Frame { clip: true, ..Frame::none() }, |ui| {
+                ui.space(94.0);
+                resp = Some(ui.interact(id));
+                let opts = LeafOptions { interactive: true, hit_pad: 8.0, hit_top: false };
+                ui.add_leaf_at(id, Rect::new(94.0, 0.0, 6.0, 40.0), opts, |_, _| {});
+            });
+            let _ = ui.end_frame();
+            resp.unwrap()
+        };
+        frame(&mut ui, Vec2::new(97.0, 20.0));
+
+        // Just inside the panel, the pad does its job: the 6px grip is hit
+        // from 4px to its left.
+        assert!(frame(&mut ui, Vec2::new(90.0, 20.0)).hovered, "the pad did not widen the grip inside the clip");
+        // Just outside the panel, it must not.
+        assert!(!frame(&mut ui, Vec2::new(104.0, 20.0)).hovered, "the grip was hit outside its clip");
+        assert!(!frame(&mut ui, Vec2::new(106.0, 20.0)).hovered, "the grip was hit outside its clip");
     }
 
     #[test]

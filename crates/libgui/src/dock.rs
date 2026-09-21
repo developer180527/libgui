@@ -399,6 +399,9 @@ impl<T> DockState<T> {
         }
     }
 
+    /// A fresh id for a leaf or split. **Monotonic: never reused**, which is
+    /// what lets `DockState::restore` build a whole new tree while the old one
+    /// still holds its ids, and hand them out without a collision.
     fn next(&mut self) -> u64 {
         self.next_id += 1;
         self.next_id

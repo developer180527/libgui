@@ -321,7 +321,8 @@ impl Ui {
 
             // ---- sideways scrollbar -----------------------------------------
             if max_x > 0.5 {
-                hbar(ui, id.with("hbar"), frozen_w, viewport_w, scroll_w, state.scroll_x, s.grid);
+                let want = hbar(ui, id.with("hbar"), frozen_w, viewport_w, scroll_w, state.scroll_x, s.grid);
+                state.scroll_x = want.clamp(0.0, max_x);
             }
         });
         out
@@ -471,10 +472,40 @@ fn cells(
 }
 
 /// The table's own sideways scrollbar, under the scrolling columns only.
-fn hbar(ui: &mut Ui, id: Id, x: f32, viewport: f32, content: f32, offset: f32, color: Color) {
+/// Returns the offset it was dragged to.
+///
+/// It is 4 px tall, which is easy to see and hard to hit, so its hit area is
+/// padded: the first thing anyone does with a scrollbar is try to drag it.
+fn hbar(ui: &mut Ui, id: Id, x: f32, viewport: f32, content: f32, offset: f32, color: Color) -> f32 {
     let h = 4.0;
+    let r = ui.interact_drag(id);
+    let mut offset = offset;
+    let track_w = (r.rect.w - x).max(1.0);
+    let thumb_w = (track_w * viewport / content.max(1.0)).max(24.0).min(track_w);
+    let travel = (track_w - thumb_w).max(1.0);
+    let range = (content - viewport).max(0.0);
+    if r.pressed {
+        // Clicking the track jumps the thumb to the pointer.
+        let at = r.mouse_pos.x - r.rect.x - x;
+        let t = offset / range.max(1.0);
+        let thumb_x = travel * t.clamp(0.0, 1.0);
+        if at < thumb_x || at > thumb_x + thumb_w {
+            offset = ((at - thumb_w * 0.5) / travel).clamp(0.0, 1.0) * range;
+        }
+    }
+    if r.active && r.drag_delta.x != 0.0 {
+        offset += r.drag_delta.x * range / travel;
+    }
+    if r.hovered || r.active {
+        ui.cursor = crate::Cursor::ResizeHorizontal;
+    }
+    let hot = ui.animate_bool(id, 0, r.hovered || r.active);
+    let color = color.lerp(crate::Color::WHITE.with_alpha(color.a), hot * 0.35);
+    let offset_now = offset;
     let layout = Layout::leaf(Size::Grow(1.0), Size::Fixed(h));
-    ui.add_leaf(id, layout, Vec2::ZERO, false, move |p: &mut Painter, r: Rect| {
+    let opts = crate::LeafOptions { interactive: true, hit_pad: 5.0, hit_top: true };
+    ui.add_leaf_ex(id, layout, Vec2::ZERO, opts, move |p: &mut Painter, r: Rect| {
+        let offset = offset_now;
         let track = Rect::new(r.x + x, r.y, (r.w - x).max(0.0), h);
         if track.w <= 0.0 || content <= 0.0 {
             return;
@@ -485,4 +516,5 @@ fn hbar(ui: &mut Ui, id: Id, x: f32, viewport: f32, content: f32, offset: f32, c
         let thumb = Rect::new(track.x + travel * t.clamp(0.0, 1.0), track.y, thumb_w, h);
         p.rect(thumb, color, h * 0.5);
     });
+    offset
 }

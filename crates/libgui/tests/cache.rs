@@ -344,3 +344,94 @@ fn a_replay_is_cut_by_the_clip_it_lands_under_not_the_one_it_recorded() {
         assert_eq!(a.profile().cached_hits, 1, "it stopped replaying while sliding under a clip");
     }
 }
+
+/// A cached subtree inside another one: the barrier bookkeeping — which ids
+/// belong to which recording, and which instances — is what nesting stresses,
+/// and getting it wrong shows as a panel that stops drawing or stops reacting.
+///
+/// The outer panel holds a live label of its own, so it cannot simply replay
+/// wholesale and hide whether the inner one works.
+#[test]
+fn nested_caches_agree_with_an_uncached_build() {
+    let names: Vec<String> = (0..24).map(|i| format!("Object {i}")).collect();
+    let body = |ui: &mut Ui, names: &[String], selected: usize, inner_dep: usize, cache: bool| {
+        let outer = |ui: &mut Ui| {
+            ui.heading("Outliner");
+            let inner = |ui: &mut Ui| {
+                for (i, n) in names.iter().enumerate() {
+                    ui.with_key(i, |ui| {
+                        let _ = ui.selectable(n, i == selected);
+                    });
+                }
+            };
+            if cache {
+                ui.cached("rows", (names.len(), selected, inner_dep), inner);
+            } else {
+                ui.container(Layout::column().width(Size::Fit).height(Size::Fit), Frame::none(), inner);
+            }
+            ui.label("footer");
+        };
+        if cache {
+            ui.cached("panel", (names.len(), selected, inner_dep), outer);
+        } else {
+            ui.container(Layout::column().width(Size::Fit).height(Size::Fit), Frame::none(), outer);
+        }
+    };
+    let frame = |ui: &mut Ui, selected: usize, inner_dep: usize, live: u32, cache: bool| -> Vec<u8> {
+        ui.begin_frame(info());
+        ui.label(&format!("live {live}"));
+        body(ui, &names, selected, inner_dep, cache);
+        let out = ui.end_frame();
+        bytemuck::cast_slice(&out.draw.instances).to_vec()
+    };
+
+    let (mut cached, mut plain) = (ui(), ui());
+    let step = |cached: &mut Ui, plain: &mut Ui, sel: usize, dep: usize, live: u32| {
+        let a = frame(cached, sel, dep, live, true);
+        let b = frame(plain, sel, dep, live, false);
+        if a != b {
+            let (ai, bi): (&[[f32; 24]], &[[f32; 24]]) = (bytemuck::cast_slice(&a), bytemuck::cast_slice(&b));
+            println!("live {live}: cached {} instances, plain {}", ai.len(), bi.len());
+            for (i, (x, y)) in ai.iter().zip(bi).enumerate() {
+                if x != y {
+                    for (name, r) in [("rect", 0..4), ("uv", 4..8), ("color", 8..12), ("border", 12..16), ("clip", 16..20), ("params", 20..24)] {
+                        if x[r.clone()] != y[r.clone()] {
+                            println!("  [{i}] {name}: cached {:?} plain {:?}", &x[r.clone()], &y[r]);
+                        }
+                    }
+                    break;
+                }
+            }
+            panic!("nested cache differs at live {live}");
+        }
+    };
+
+    // Settle, then let both levels replay.
+    for f in 0..8 {
+        step(&mut cached, &mut plain, 3, 0, f);
+    }
+    assert!(cached.profile().cached_hits > 0, "nothing replayed at all");
+
+    // A dep only the inner subtree cares about.
+    for f in 8..16 {
+        step(&mut cached, &mut plain, 3, 1, f);
+    }
+    // A dep both share.
+    for f in 16..24 {
+        step(&mut cached, &mut plain, 9, 1, f);
+    }
+    // The pointer walks into the nested subtree and out again.
+    for ui in [&mut cached, &mut plain] {
+        ui.push(InputEvent::PointerMoved { pos: Vec2::new(60.0, 140.0) });
+    }
+    for f in 24..34 {
+        step(&mut cached, &mut plain, 9, 1, f);
+    }
+    for ui in [&mut cached, &mut plain] {
+        ui.push(InputEvent::PointerMoved { pos: Vec2::new(470.0, 380.0) });
+    }
+    for f in 34..60 {
+        step(&mut cached, &mut plain, 9, 1, f);
+    }
+    assert!(cached.profile().cached_hits > 0, "the nested caches never resumed replaying");
+}

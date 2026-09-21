@@ -175,7 +175,8 @@ pub(crate) struct Node {
     pub min: Vec2,
     pub rect: Rect,
     pub interactive: bool,
-    /// Extra hit-test margin around the rect (e.g. thin splitters).
+    /// Extra hit-test margin around the rect (e.g. thin splitters). Grows the
+    /// widget, never its clip.
     pub hit_pad: f32,
     /// Hit-test before normal widgets regardless of paint order.
     pub hit_top: bool,

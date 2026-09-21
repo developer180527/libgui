@@ -80,6 +80,21 @@ impl World {
         self.ui.rect_of(pane.with(("th", col))).unwrap_or_else(|| panic!("no header {col}"))
     }
 
+    /// Rect of the sideways scrollbar under the scrolling columns.
+    fn hbar(&self) -> Rect {
+        let table = Id::new("root").with(("table", "files"));
+        self.ui.rect_of(table.with("hbar")).expect("no scrollbar")
+    }
+
+    fn press(&mut self, at: Vec2) {
+        self.ui.push(InputEvent::PointerMoved { pos: at });
+        self.ui.push(InputEvent::PointerButton { button: PointerButton::Primary, pressed: true });
+    }
+
+    fn release(&mut self) {
+        self.ui.push(InputEvent::PointerButton { button: PointerButton::Primary, pressed: false });
+    }
+
     fn wheel(&mut self, d: Vec2) {
         self.ui.push(InputEvent::PointerMoved { pos: Vec2::new(200.0, 150.0) });
         self.ui.push(InputEvent::Wheel { delta: d, unit: WheelUnit::Pixel });
@@ -305,4 +320,55 @@ fn cells_line_up_with_their_header_in_every_column() {
         assert_eq!(w.cell(0, c).x, w.header(c).x, "column {c} is not under its header");
         assert_eq!(w.cell(0, c).w, w.header(c).w, "column {c} is not as wide as its header");
     }
+}
+
+/// The sideways scrollbar is the first thing anyone tries to drag, so it has
+/// to be draggable — and clicking its track has to jump to the pointer.
+#[test]
+fn the_sideways_scrollbar_drags() {
+    let mut w = World::new();
+    // Narrow the window until the columns overflow, so there is a bar at all.
+    w.state = TableState::new([
+        Column::new("Name").width(260.0),
+        Column::new("Kind").width(220.0),
+        Column::new("Size").width(220.0),
+        Column::new("Modified").width(240.0),
+    ]);
+    w.warm();
+    let bar = w.hbar();
+    assert!(bar.w > 0.0, "no scrollbar rect");
+    assert_eq!(w.state.scroll_x, 0.0);
+
+    // Drag the thumb to the right.
+    let at = Vec2::new(bar.x + 40.0, bar.center().y);
+    w.press(at);
+    w.frame();
+    w.ui.push(InputEvent::PointerMoved { pos: Vec2::new(at.x + 60.0, at.y) });
+    w.frame();
+    let dragged = w.state.scroll_x;
+    assert!(dragged > 0.0, "dragging the scrollbar did not scroll: {dragged}");
+    w.release();
+    w.frame();
+
+    // Clicking further along the track jumps rather than doing nothing.
+    let far = Vec2::new(bar.right() - 30.0, bar.center().y);
+    w.press(far);
+    w.frame();
+    w.release();
+    w.frame();
+    assert!(w.state.scroll_x > dragged, "clicking the track did not jump: {} vs {dragged}", w.state.scroll_x);
+
+    // And it stops at the end rather than running past it.
+    for _ in 0..4 {
+        w.press(Vec2::new(bar.right() - 2.0, bar.center().y));
+        w.frame();
+        w.release();
+        w.frame();
+    }
+    let max = w.state.scroll_x;
+    w.press(Vec2::new(bar.right() - 2.0, bar.center().y));
+    w.frame();
+    w.release();
+    w.frame();
+    assert_eq!(w.state.scroll_x, max, "the scrollbar ran past the end");
 }

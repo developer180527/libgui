@@ -356,7 +356,9 @@ impl Fonts {
         let s = self.text_scale();
         let run = self.run(font, px, text);
         let shaped = &run.glyphs;
-        let mut out = Vec::with_capacity(text.len() + 1);
+        // One caret per character, not per byte: `len()` is bytes, and an
+        // over-reservation is the kind of thing `perf_alloc` is watching.
+        let mut out = Vec::with_capacity(text.chars().count() + 1);
         let (mut j, mut pen) = (0usize, 0.0f32);
         for (byte, _) in text.char_indices() {
             while j < shaped.len() && (shaped[j].cluster as usize) < byte {

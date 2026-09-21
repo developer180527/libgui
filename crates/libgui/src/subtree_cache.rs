@@ -167,7 +167,8 @@ impl Cache {
         self.entries.get(&id).map(|e| e.rect)
     }
 
-    /// Whether `id` can be replayed, and the offset it would land at.
+    /// Whether `id` may be replayed at all. Where it lands is paint's to work
+    /// out: only paint knows this frame's rect.
     ///
     /// Size is never in question: a replayed node is `Fixed` at the size it
     /// recorded, so only its position can differ, and a difference there is

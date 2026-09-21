@@ -348,6 +348,11 @@ impl Key {
     }
 
     /// Inverse of [`Key::from_hid_usage`].
+    ///
+    /// A scan of the same table rather than a `match`: hosts call this when
+    /// they hand a key back to a device, which is rare, and a hand-written
+    /// match would be a second copy of the mapping to keep in step. The
+    /// round-trip test walks every usage through both directions.
     pub fn to_hid_usage(self) -> u16 {
         HID.iter().find(|&&(_, k)| k == self).map_or(0, |&(u, _)| u)
     }
