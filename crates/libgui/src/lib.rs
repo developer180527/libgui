@@ -23,6 +23,8 @@ mod painter;
 mod profile;
 pub mod render_contract;
 mod scroll;
+#[cfg(feature = "shape")]
+mod shape;
 pub mod testing;
 pub mod table;
 mod color_hex;
@@ -57,9 +59,11 @@ pub use painter::{Chevron, Painter};
 pub use profile::{enabled as profile_enabled, Profile};
 pub use scroll::{ScrollConfig, Smoothing};
 pub use focus::{FocusKind, FocusPolicy, KeyResponse};
-pub use font::{FontRasterizer, GlyphBitmap, LineMetrics, ShapedGlyph};
+pub use font::{FontRasterizer, FontStack, GlyphBitmap, LineMetrics, ShapedGlyph};
 #[cfg(feature = "fontdue")]
 pub use font::FontdueRasterizer;
+#[cfg(feature = "shape")]
+pub use shape::ShapeRasterizer;
 pub use text::{Atlas, FontError, FontId, Fonts};
 pub use table::{Column, Sort, TableOptions, TableResponse, TableState};
 pub use text_arena::{FrameText, PaintText};

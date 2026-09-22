@@ -680,6 +680,20 @@ impl Ui {
         Ok(Self::with_fonts(theme, fonts, font))
     }
 
+    /// Build a `Ui` whose default font is a [`FontStack`](crate::FontStack):
+    /// the first face, then the rest as fallbacks for what it cannot draw.
+    ///
+    /// This is the one-line form of the common case. A UI that shows names,
+    /// filenames or user text in any script wants it, because the alternative
+    /// is blank glyphs rather than a graceful loss of style. Which fonts go in
+    /// the list is yours to decide — libgui does not go looking for system
+    /// fonts.
+    #[cfg(feature = "fontdue")]
+    pub fn with_fallbacks(theme: Theme, fonts: &[&[u8]]) -> Result<Self, crate::FontError> {
+        let stack = crate::FontStack::from_fonts(fonts)?;
+        Ok(Self::with_rasterizer(theme, Box::new(stack)))
+    }
+
     /// Build a `Ui` whose default font is your own [`crate::FontRasterizer`].
     pub fn with_rasterizer(theme: Theme, rasterizer: Box<dyn crate::FontRasterizer>) -> Self {
         let mut fonts = Fonts::new();
@@ -943,15 +957,31 @@ impl Ui {
     /// Open it with [`Ui::open_popup`]; it closes on a click outside, on Escape,
     /// or when you call [`Ui::close_popups`] (what a menu item does).
     pub fn popup<R>(&mut self, id: Id, min_width: f32, body: impl FnOnce(&mut Self) -> R) -> Option<R> {
-        if !self.popup_open(id) {
+        if !self.open_popup_body(id, min_width) {
             return None;
+        }
+        let r = body(self);
+        self.close_popup_body();
+        Some(r)
+    }
+
+    /// Open a popup's panel without a closure, for a binding that cannot hold
+    /// one. Returns false when the popup is not open, in which case its body
+    /// must not be built and [`Ui::close_popup_body`] must NOT be called.
+    ///
+    /// This is the third place the same split was needed — containers, scroll
+    /// areas, popups — which is what a closure-based API costs a language
+    /// without closures.
+    pub fn open_popup_body(&mut self, id: Id, min_width: f32) -> bool {
+        if !self.popup_open(id) {
+            return false;
         }
         self.popup_sheet();
         if self.input.events.contains(&UiEvent::Action(UiAction::Cancel)) {
             // Innermost first: Escape backs out one level.
             if self.open_chain.last() == Some(&id) {
                 self.open_chain.pop();
-                return None;
+                return false;
             }
         }
         let anchor = self.open_anchors.get(&id).copied().unwrap_or_default();
@@ -991,10 +1021,13 @@ impl Ui {
 
         self.popup_stack.push(id);
         self.open(idx);
-        let r = body(self);
+        true
+    }
+
+    /// Close the panel opened by [`Ui::open_popup_body`].
+    pub fn close_popup_body(&mut self) {
         self.close();
         self.popup_stack.pop();
-        Some(r)
     }
 
     /// How long the pointer has rested on `id`, in seconds. 0 if it is not there.

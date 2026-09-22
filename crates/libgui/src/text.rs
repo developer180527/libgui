@@ -133,12 +133,15 @@ struct Run {
 
 pub struct Fonts {
     fonts: Vec<Box<dyn FontRasterizer>>,
-    /// (font, glyph id, px) -> atlas entry.
-    glyphs: FxMap<(u16, u32, u32), Glyph>,
+    /// (font, face, glyph id, px) -> atlas entry. The face is part of the key
+    /// because a glyph id only means something inside the face that issued it:
+    /// glyph 42 of a fallback CJK face is not glyph 42 of the UI font.
+    glyphs: FxMap<(u16, u16, u32, u32), Glyph>,
     /// Scratch for shaping a string the run cache has not seen yet.
     shaped: RefCell<Vec<ShapedGlyph>>,
-    /// The blank glyph and space advance per (font, px), for laying out tabs.
-    shaped_space: RefCell<crate::hash::FxMap<(u16, u32), (u32, f32)>>,
+    /// The blank glyph, its face and the space advance per (font, px), for
+    /// laying out tabs.
+    shaped_space: RefCell<SpaceCache>,
     /// (font, px) -> text -> shaped run, in physical px. Keyed *before*
     /// dividing by `scale`, so one entry stays correct across DPI changes.
     runs: RefCell<FxMap<(u16, u32), FxMap<String, Run>>>,
@@ -165,6 +168,9 @@ pub struct Fonts {
     /// Scratch for the break opportunities of the string being wrapped.
     breaks: RefCell<Vec<crate::wrap::Opportunity>>,
 }
+
+/// (font, px) -> (the blank glyph, the face that owns it, a space's advance).
+type SpaceCache = FxMap<(u16, u32), (u32, u16, f32)>;
 
 /// (font, px, width in whole px) -> text -> its lines.
 type WrapCache = FxMap<(u16, u32, u32), FxMap<String, Rc<[Line]>>>;
@@ -244,6 +250,11 @@ impl Fonts {
     /// Parse and register a font with the built-in fontdue backend. Fails
     /// rather than panicking, so a host loading a user-chosen font can fall
     /// back to a built-in one.
+    ///
+    /// This registers one *face*, which is what a widget's `FontId` names. To
+    /// give that face fallbacks for the scripts it cannot draw, build a
+    /// [`FontStack`](crate::FontStack) and register that instead: several
+    /// faces behind one id is what makes a mixed-script string come out whole.
     #[cfg(feature = "fontdue")]
     pub fn add_font(&mut self, bytes: &[u8]) -> Result<FontId, FontError> {
         let r = crate::font::FontdueRasterizer::from_bytes(bytes)?;
@@ -348,15 +359,16 @@ impl Fonts {
         // "draw nothing" glyph id that the rasteriser would have to know about.
         let mut space = self.shaped_space.borrow_mut();
         let key = (font.0, px as u32);
-        let (blank, width) = *space.entry(key).or_insert_with(|| {
+        let (blank, blank_face, width) = *space.entry(key).or_insert_with(|| {
             let mut out = Vec::new();
             self.fonts[font.0 as usize].shape(" ", px, &mut out);
-            out.first().map_or((0, px * 0.25), |g| (g.glyph, g.advance))
+            out.first().map_or((0, 0, px * 0.25), |g| (g.glyph, g.face, g.advance))
         });
         let bytes = text.as_bytes();
         for g in glyphs.iter_mut() {
             if bytes.get(g.cluster as usize) == Some(&b'\t') {
                 g.glyph = blank;
+                g.face = blank_face;
                 g.advance = width * TAB_WIDTH as f32;
                 g.offset = Vec2::ZERO;
             }
@@ -598,8 +610,8 @@ impl Fonts {
         ((asc - desc) * size / px).ceil()
     }
 
-    fn glyph(&mut self, font: FontId, id: u32, px: f32) -> Glyph {
-        let key = (font.0, id, px as u32);
+    fn glyph(&mut self, font: FontId, face: u16, id: u32, px: f32) -> Glyph {
+        let key = (font.0, face, id, px as u32);
         if let Some(g) = self.glyphs.get(&key) {
             return *g;
         }
@@ -615,7 +627,7 @@ impl Fonts {
             return g;
         }
         self.rasterized += 1;
-        let m = self.fonts[font.0 as usize].rasterize(id, px);
+        let m = self.fonts[font.0 as usize].rasterize(face, id, px);
         let bitmap = &m.coverage;
         let (w, h) = (m.width, m.height);
         let mut uv = [0.0; 4];
@@ -732,7 +744,7 @@ impl Fonts {
         // (which needs `&mut self`) costs no copy.
         let run = self.run(font, px, text);
         for sg in run.glyphs.iter() {
-            let g = self.glyph(font, sg.glyph, px);
+            let g = self.glyph(font, sg.face, sg.glyph, px);
             if g.w > 0.0 {
                 let gx = round(x0 + (x + sg.offset.x) * r) + g.left;
                 let gy = baseline + round(sg.offset.y * r) - (g.bottom + g.h);

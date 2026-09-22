@@ -56,6 +56,8 @@ const EXEMPT_FILES: &[&str] = &[
 const ALLOWED_DEPS: &[(&str, &str)] = &[
     ("bytemuck", "casting the instance buffer to bytes; no_std, no I/O"),
     ("fontdue", "optional, default: the built-in glyph rasteriser"),
+    ("rustybuzz", "optional, off: real shaping (feature `shape`); pure Rust, no_std, no I/O"),
+    ("self_cell", "optional, off: holds font bytes beside the rustybuzz face that borrows them"),
     ("serde", "optional: theme (de)serialisation, pure data"),
     ("toml", "optional: theme file format, pure data"),
 ];

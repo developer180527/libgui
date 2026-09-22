@@ -990,9 +990,21 @@ xcrun simctl launch booted com.libgui.demo
   rasterise one glyph. It keeps measurement, shaped-run caching, DPI/zoom fitting, carets (mapped
   through clusters), the atlas and pixel snapping. `FontdueRasterizer` (feature `fontdue`, default) is
   built in; register your own with `Fonts::add_rasterizer` / `Ui::with_rasterizer`.
+- **Shaping (`ShapeRasterizer`, feature `shape`):** rustybuzz — a port of HarfBuzz — for ligatures,
+  GPOS kerning, mark attachment, contextual and positional forms and Indic reordering, rasterised
+  by fontdue over the same bytes. Off by default: it is a large dependency, and a Latin-only UI
+  does not need it. Shaping a label costs ~10.5 µs against fontdue's ~0.26 µs, so the shaped-run
+  cache matters more with it on — a settled frame still shapes nothing.
+- **Font fallback (`FontStack`):** several faces tried in order, so a string mixing scripts draws
+  with whichever one has the glyphs. It splits text into maximal same-face runs and shapes each
+  with that face; a combining mark or joiner never leaves the run its base went to. Line metrics
+  come from the *first* face, so registering a CJK fallback does not change the height of a line of
+  Latin. Which faces go in the chain is the host's call — libgui bundles one font and does not read
+  the filesystem.
 - **Features:** `theme-toml` (default) parses/exports themes, pure data; `theme-watch` (opt-in) adds
   `ThemeWatcher`, the only filesystem access in the crate; `fontdue` (default) is the built-in font
-  backend, and without it the core has only `bytemuck` as a dependency.
+  backend; `shape` (opt-in) adds rustybuzz for real shaping; without `fontdue` and `shape` the core
+  has only `bytemuck` as a dependency.
 
 ## Hosts and input providers
 
@@ -1490,16 +1502,28 @@ lag, fling, easing) stay as frame-trace tests like
 ## Known scaffold limitations
 
 - Restoring a layout does not restore keyboard focus or which pane was focused.
-- Text fields are single-line and have no undo. Multi-line *editing* is not there yet: `paragraph`
-  wraps read-only text, and `ImePreedit` shows a composition.
-- No complex shaping and no font fallback. The bundled Inter has no CJK, Arabic or Indic glyphs, so
-  those scripts render as blanks until a `FontRasterizer` that does both is plugged in — the
-  wrapping already breaks them correctly, there is simply nothing to draw.
+- No word wrap *inside* the editor: `paragraph` wraps read-only text, but a long line in
+  `text_area` scrolls sideways. No double-click word select. Caret motion and Backspace move by
+  `char`, so they can split a grapheme cluster — an emoji with a modifier, or a letter written as a
+  base plus a combining mark.
+- `ImePreedit` shows a composition in `text_input`; `text_area` does not display one yet.
+- No bidi. `ShapeRasterizer` gives an RTL letter its correct joined form, but the run is laid out
+  left to right: reordering it is a property of the paragraph, not of the font, and every caret,
+  hit test and selection rectangle would have to understand it.
 - Glyph atlas grows to 4096² when full (one re-rasterisation, once); past that it resets, with a
   one-frame flicker. Multi-page + LRU is still the real answer.
 - Layouts nesting deeper than 256 are dropped and counted (`FrameCost::too_deep`), because the three
   recursive layout passes would otherwise overflow the stack. Any real layout is under fifty.
 - Container ids are positional; give containers explicit keys once you add conditional UI.
+- No standalone splitter: the dock has them, but two panes outside a dock cannot be dragged apart.
+- Only menu items have a disabled state. A button, checkbox, slider or field cannot be greyed out.
+- The theme names a single face, so no separate UI/mono/icon fonts. `FontStack` covers *fallback*
+  (a missing script), not *roles*.
+- Which fonts fill the chain is the host's problem: libgui bundles only Inter and will not go
+  looking for system fonts, because that is filesystem access and platform policy.
+- `FontStack` splits runs on a range check over the combining blocks and joiners, not a Unicode
+  general-category lookup, so an exotic mark outside those ranges can be separated from its base.
+- No colour picker, and `plot` is a debug bar chart rather than a real line or area chart.
 
 ## Licence
 

@@ -18,6 +18,10 @@ rust-version = "1.90"
 wgpu = "30"
 winit = "0.30"
 fontdue = "0.9"
+# Real shaping (ligatures, marks, contextual forms, Indic reordering).
+# Optional and off by default: see libgui's `shape` feature.
+rustybuzz = "0.20"
+self_cell = "1"
 bytemuck = { version = "1", features = ["derive"] }
 pollster = "1"
 naga = "30"

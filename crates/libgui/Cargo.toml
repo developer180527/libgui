@@ -11,6 +11,11 @@ rust-version = "1.87"
 default = ["theme-toml", "fontdue"]
 # The built-in font backend (see `FontRasterizer` to plug in your own).
 fontdue = ["dep:fontdue"]
+# Real text shaping through rustybuzz (a port of HarfBuzz): ligatures, mark
+# attachment, contextual and positional forms, Indic reordering. Off by
+# default because it is a large dependency and a UI in Latin script does not
+# need it; `fontdue` still rasterises the glyphs it picks.
+shape = ["fontdue", "dep:rustybuzz", "dep:self_cell"]
 # Serialise libgui's own data: themes, saved dock layouts. Pure data, no I/O.
 serde = ["dep:serde"]
 # Parse and export TOML themes and dock layouts (pure data, no I/O).
@@ -23,6 +28,8 @@ profile = []
 
 [dependencies]
 fontdue = { workspace = true, optional = true }
+rustybuzz = { workspace = true, optional = true }
+self_cell = { workspace = true, optional = true }
 bytemuck.workspace = true
 serde = { version = "1", features = ["derive"], optional = true }
 toml = { version = "1", optional = true }

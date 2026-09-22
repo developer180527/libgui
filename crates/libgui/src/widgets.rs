@@ -693,6 +693,13 @@ impl Ui {
     pub fn menu_button<R>(&mut self, label: &str, body: impl FnOnce(&mut Ui) -> R) -> Option<R> {
         let id = self.make_id(("menu_button", label));
         let menu_id = id.with("menu");
+        self.menu_button_face(label, id, menu_id);
+        self.popup(menu_id, 160.0, body)
+    }
+
+    /// The button part of a menu: the label, its hover, and the open/close
+    /// logic — everything except the panel it opens.
+    fn menu_button_face(&mut self, label: &str, id: Id, menu_id: Id) {
         let s = self.theme.menu;
         let size = self.theme.metrics.font_size;
         let m = self.text_size(size, label);
@@ -726,8 +733,20 @@ impl Ui {
             p.rect(r, s.item_fill_hover.with_alpha(s.item_fill_hover.a * hot), s.item_radius);
             p.text_centered(r, size, s.text, label);
         });
+    }
 
-        self.popup(menu_id, 160.0, body)
+    /// [`Ui::menu_button`] without a closure: draws the button and opens the
+    /// menu's panel, returning whether it is open. Build the items only when
+    /// it returns true, and then call [`Ui::close_menu`].
+    pub fn open_menu(&mut self, label: &str) -> bool {
+        let id = self.make_id(("menu_button", label));
+        let menu_id = id.with("menu");
+        self.menu_button_face(label, id, menu_id);
+        self.open_popup_body(menu_id, 160.0)
+    }
+
+    pub fn close_menu(&mut self) {
+        self.close_popup_body();
     }
 
     /// One row of a menu. Returns a [`Response`]; check `clicked`.
