@@ -63,8 +63,8 @@ pub use font::{FontRasterizer, FontStack, GlyphBitmap, LineMetrics, ShapedGlyph}
 #[cfg(feature = "fontdue")]
 pub use font::FontdueRasterizer;
 #[cfg(feature = "shape")]
-pub use shape::ShapeRasterizer;
-pub use text::{Atlas, FontError, FontId, Fonts};
+pub use shape::{ShapeRasterizer, TextDirection};
+pub use text::{Atlas, FontError, FontId, Fonts, DEFAULT_TAB_WIDTH};
 pub use table::{Column, Sort, TableOptions, TableResponse, TableState};
 pub use text_arena::{FrameText, PaintText};
 pub use theme::{

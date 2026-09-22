@@ -23,6 +23,21 @@
 //! shapes nothing at all. A first frame with two hundred fresh labels pays
 //! about 2 ms for them.
 //!
+//! # Locale
+//!
+//! Shaping depends on more than the characters. A font's `locl` feature
+//! substitutes different letterforms per language over the *same* codepoints:
+//! Turkish wants the dotless i treated as its own letter, and Serbian Cyrillic
+//! italics differ from Russian ones. Only the app knows which it is, so
+//! [`ShapeRasterizer::with_language`] takes it and nothing here guesses it.
+//!
+//! Script and direction *are* derived from the text when they are not given,
+//! which is a content-level inference rather than a locale one — it reads only
+//! the characters in the string, never the process environment. Override
+//! either with [`ShapeRasterizer::with_script`] and
+//! [`ShapeRasterizer::with_direction`] when you know better than the text
+//! does.
+//!
 //! # Right-to-left
 //!
 //! Letters are **shaped** correctly in RTL scripts — an Arabic letter gets its
@@ -36,6 +51,13 @@
 use crate::font::{FontRasterizer, GlyphBitmap, LineMetrics, ShapedGlyph};
 use crate::Vec2;
 use std::cell::RefCell;
+
+/// Which way a run of text runs. See [`ShapeRasterizer::with_direction`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextDirection {
+    LeftToRight,
+    RightToLeft,
+}
 
 self_cell::self_cell!(
     /// rustybuzz borrows the font bytes for the life of the face, so the two
@@ -61,6 +83,12 @@ pub struct ShapeRasterizer {
     /// Font design units per em, for turning rustybuzz's integer positions
     /// into pixels.
     upem: f32,
+    /// What the app knows about the text that the text itself does not say.
+    /// `None` leaves it to `guess_segment_properties`, which reads only the
+    /// characters.
+    language: Option<rustybuzz::Language>,
+    script: Option<rustybuzz::Script>,
+    direction: Option<rustybuzz::Direction>,
 }
 
 impl ShapeRasterizer {
@@ -73,7 +101,72 @@ impl ShapeRasterizer {
             rustybuzz::Face::from_slice(owned, 0).ok_or_else(|| crate::FontError("rustybuzz cannot read this font".into()))
         })?;
         let upem = face.borrow_dependent().units_per_em() as f32;
-        Ok(Self { face, raster, buffer: RefCell::new(Some(rustybuzz::UnicodeBuffer::new())), upem })
+        Ok(Self {
+            face,
+            raster,
+            buffer: RefCell::new(Some(rustybuzz::UnicodeBuffer::new())),
+            upem,
+            language: None,
+            script: None,
+            direction: None,
+        })
+    }
+
+    /// The language this text is in, as a BCP-47 tag: `"tr"`, `"sr"`,
+    /// `"zh-Hant"`.
+    ///
+    /// Nothing else can supply this. A font's `locl` feature picks different
+    /// letterforms for the same codepoints depending on the language — the
+    /// dotted and dotless i in Turkish, Serbian Cyrillic italics against
+    /// Russian ones — and no amount of looking at the characters reveals which
+    /// language they are. Left unset, the font's default forms are used, which
+    /// is right for most text and quietly wrong for those.
+    ///
+    /// libgui does not read the process locale to fill this in. Reading the
+    /// environment is the host's job, and a UI that has to render one document
+    /// in Turkish and another in English cannot be served by a process-wide
+    /// answer anyway.
+    pub fn with_language(mut self, tag: &str) -> Result<Self, crate::FontError> {
+        let lang = tag
+            .parse::<rustybuzz::Language>()
+            .map_err(|e| crate::FontError(format!("language `{tag}`: {e}")))?;
+        self.language = Some(lang);
+        Ok(self)
+    }
+
+    /// The script, as an ISO 15924 tag: `"Latn"`, `"Arab"`, `"Deva"`.
+    ///
+    /// Derived from the text when unset, which is usually right. Worth setting
+    /// for a run whose characters do not say — digits and punctuation alone
+    /// belong to no script — or where the app knows the surrounding context
+    /// that a single run has lost.
+    pub fn with_script(mut self, tag: &str) -> Result<Self, crate::FontError> {
+        let bytes: [u8; 4] = tag
+            .as_bytes()
+            .try_into()
+            .map_err(|_| crate::FontError(format!("script `{tag}`: an ISO 15924 tag is four characters")))?;
+        let script = rustybuzz::Script::from_iso15924_tag(rustybuzz::ttf_parser::Tag::from_bytes(&bytes))
+            .ok_or_else(|| crate::FontError(format!("script `{tag}`: not an ISO 15924 tag")))?;
+        self.script = Some(script);
+        Ok(self)
+    }
+
+    /// The language tag in force, if one was set.
+    pub fn language(&self) -> Option<&str> {
+        self.language.as_ref().map(|l| l.as_str())
+    }
+
+    /// Which way the text runs. Derived from the script when unset.
+    ///
+    /// Note what this does and does not do: it decides how the *shaper* treats
+    /// the run, so an RTL run gets its joined forms either way. It does not
+    /// lay the run out right to left — see the note on right-to-left above.
+    pub fn with_direction(mut self, dir: TextDirection) -> Self {
+        self.direction = Some(match dir {
+            TextDirection::LeftToRight => rustybuzz::Direction::LeftToRight,
+            TextDirection::RightToLeft => rustybuzz::Direction::RightToLeft,
+        });
+        self
     }
 }
 
@@ -94,9 +187,21 @@ impl FontRasterizer for ShapeRasterizer {
         let mut buf = slot.take().unwrap_or_default();
         buf.clear();
         buf.push_str(text);
-        // Script, language and direction from the text itself. A caller that
-        // knows better — a UI that knows its own locale — would pass them in;
-        // libgui does not know the locale and will not guess one.
+        // Whatever the app told us, first: `clear` resets all three, so they
+        // are set per call rather than once at construction.
+        if let Some(l) = &self.language {
+            buf.set_language(l.clone());
+        }
+        if let Some(s) = self.script {
+            buf.set_script(s);
+        }
+        if let Some(d) = self.direction {
+            buf.set_direction(d);
+        }
+        // Then fill the rest from the characters. This only sets what is still
+        // unset, and reads nothing outside the string — no process locale, no
+        // environment. Language it leaves alone entirely, which is why
+        // `with_language` exists.
         buf.guess_segment_properties();
         let rtl = buf.direction() == rustybuzz::Direction::RightToLeft;
 

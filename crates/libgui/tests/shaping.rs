@@ -153,3 +153,89 @@ fn a_shaping_face_works_inside_a_fallback_chain() {
     // The kerning survived the trip through the chain.
     assert!(g[0].advance < g[1].advance);
 }
+
+/// **Locale is the app's, and only the app has it.** A font's `locl` feature
+/// substitutes different letterforms for the same codepoints depending on the
+/// language, and no amount of looking at the characters reveals which language
+/// they are. The shaper takes the tag rather than guessing one.
+///
+/// What this pins is that the tag is validated and kept — and no more than
+/// that. Inter has no `locl` rules, so the substitution itself is not
+/// observable here: **deleting the `set_language` call in the shaper does not
+/// fail this test**, and no assertion over this font could make it. Verified
+/// by trying it. The direction and script tests below do not have that
+/// problem, because both change a glyph id.
+///
+/// Said plainly rather than papered over: a test that asserted "the glyphs
+/// come out the same either way" would pass just as happily with the language
+/// thrown away, and would read like coverage while being none. Closing this
+/// needs a font with `locl` rules in the test assets.
+#[test]
+fn a_language_tag_is_validated_and_kept() {
+    let turkish = ShapeRasterizer::from_bytes(FONT).expect("shaper").with_language("tr").expect("tr");
+    assert_eq!(turkish.language(), Some("tr"));
+    // Normalised to lower case, the way a tag is compared.
+    let mixed = ShapeRasterizer::from_bytes(FONT).unwrap().with_language("zh-Hant").unwrap();
+    assert_eq!(mixed.language(), Some("zh-hant"));
+    // Unset unless the app sets it: nothing here reads a process locale.
+    assert_eq!(ShapeRasterizer::from_bytes(FONT).unwrap().language(), None);
+    // A tag that is not one is refused rather than silently ignored.
+    assert!(ShapeRasterizer::from_bytes(FONT).unwrap().with_language("").is_err());
+}
+
+/// **Direction reaches the shaper**, provably: an RTL run mirrors its brackets,
+/// so `(` is shaped as `)`. That is a different glyph id, not a different
+/// position, so no amount of reordering downstream could produce it — it can
+/// only come from the shaper having been told the direction.
+#[test]
+fn a_forced_direction_mirrors_brackets() {
+    let ltr = ShapeRasterizer::from_bytes(FONT).expect("shaper");
+    let rtl = ShapeRasterizer::from_bytes(FONT)
+        .expect("shaper")
+        .with_direction(TextDirection::RightToLeft);
+
+    let open_ltr = shaped(&ltr, "(")[0].glyph;
+    let open_rtl = shaped(&rtl, "(")[0].glyph;
+    assert_ne!(open_ltr, open_rtl, "an RTL run did not mirror its bracket: the direction never arrived");
+    // And it is the *closing* bracket it became, not some third thing.
+    assert_eq!(open_rtl, shaped(&ltr, ")")[0].glyph);
+
+    // Clusters still ascend: the run is put back into logical order.
+    let clusters: Vec<u32> = shaped(&rtl, "(a)").iter().map(|g| g.cluster).collect();
+    assert_eq!(clusters, vec![0, 1, 2], "a forced-RTL run did not come back in logical order");
+}
+
+/// **Script reaches the shaper too.** Arabic implies a right-to-left run, so
+/// forcing the script mirrors brackets the same way — observable proof the tag
+/// was applied rather than dropped.
+#[test]
+fn a_forced_script_changes_how_a_run_is_shaped() {
+    let latn = ShapeRasterizer::from_bytes(FONT).expect("shaper").with_script("Latn").expect("Latn");
+    let arab = ShapeRasterizer::from_bytes(FONT).expect("shaper").with_script("Arab").expect("Arab");
+    assert_ne!(
+        shaped(&latn, "(")[0].glyph,
+        shaped(&arab, "(")[0].glyph,
+        "forcing the script had no effect: the tag never reached the shaper"
+    );
+
+    for bad in ["Lat", "Latin", "", "Latnx"] {
+        assert!(ShapeRasterizer::from_bytes(FONT).unwrap().with_script(bad).is_err(), "script tag {bad:?} was accepted");
+    }
+}
+
+/// The locale survives the buffer being reused. rustybuzz's `clear` resets
+/// script, language and direction, so they have to be applied on every call —
+/// a shaper that set them once in its constructor would work for exactly one
+/// string and then quietly stop.
+#[test]
+fn the_locale_survives_the_reused_buffer() {
+    let rtl = ShapeRasterizer::from_bytes(FONT)
+        .expect("shaper")
+        .with_direction(TextDirection::RightToLeft);
+    let mirrored = shaped(&rtl, "(")[0].glyph;
+    for i in 0..4 {
+        assert_eq!(shaped(&rtl, "(")[0].glyph, mirrored, "the direction was lost on call {}", i + 1);
+        // Shape something else in between, so the buffer really is recycled.
+        let _ = shaped(&rtl, "Hello");
+    }
+}

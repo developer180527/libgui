@@ -1493,6 +1493,12 @@ lag, fling, easing) stay as frame-trace tests like
    ~~arrow-key navigation *within* a collection~~ ✅ `Ui::open_collection` gives a list or tree
    one focus stop and a keyboard cursor, moved by `UiAction::Navigate`. Next: a table's 2-D cell
    cursor, arrows inside an open menu, and type-ahead.
+12. **Policy the app owns**: an audit moved tab width, the undo-grouping pause and the atlas limit
+   out of fixed constants (`Fonts::set_tab_width`, `Ui::undo_run_pause`, `Fonts::set_atlas_limit`)
+   and gave the shaper a locale (`ShapeRasterizer::with_language` / `with_script` /
+   `with_direction`); `tests/policy.rs` guards them. Next: the caret blink rate, which is still
+   0.5 s in the repaint hint, and a boundary test that catches the next private constant before an
+   audit has to.
 10. **Accessibility** via AccessKit: emit a node per interactive widget from the same tree — now
    unblocked, since it needs a focus order to describe.
 11. ~~**Perf**: a "sleep when idle" mode instead of redrawing continuously~~ ✅
@@ -1519,6 +1525,10 @@ lag, fling, easing) stay as frame-trace tests like
 - Layouts nesting deeper than 256 are dropped and counted (`FrameCost::too_deep`), because the three
   recursive layout passes would otherwise overflow the stack. Any real layout is under fifty.
 - Container ids are positional; give containers explicit keys once you add conditional UI.
+- A field's undo notices the app rewriting the document by the length and a hash of up to 64 bytes
+  on each side of the edit, checked when a step is applied. A rewrite that preserves both would go
+  unnoticed — the alternative is comparing the whole document, which is what storing edits rather
+  than snapshots exists to avoid.
 - Only menu items have a disabled state. A button, checkbox, slider or field cannot be greyed out.
 - Keyboard navigation inside a collection covers a one-dimensional cursor (`Ui::open_collection`),
   which is what a list and a tree need. A table's 2-D cell cursor, the arrows inside an open menu,
@@ -1527,7 +1537,10 @@ lag, fling, easing) stay as frame-trace tests like
 - The theme names a single face, so no separate UI/mono/icon fonts. `FontStack` covers *fallback*
   (a missing script), not *roles*.
 - Which fonts fill the chain is the host's problem: libgui bundles only Inter and will not go
-  looking for system fonts, because that is filesystem access and platform policy.
+  looking for system fonts, because that is filesystem access and platform policy. Same for the
+  language tag `ShapeRasterizer::with_language` takes — nothing here reads a process locale.
+- Tab width is per-`Ui` (`Fonts::set_tab_width`), not per-document: it is baked into a cached
+  shaped run, so a per-field width would have to be part of every cache key.
 - `FontStack` splits runs on a range check over the combining blocks and joiners, not a Unicode
   general-category lookup, so an exotic mark outside those ranges can be separated from its base.
 - No colour picker, and `plot` is a debug bar chart rather than a real line or area chart.

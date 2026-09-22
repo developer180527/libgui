@@ -36,9 +36,10 @@ impl std::error::Error for FontError {}
 
 /// Single-channel coverage atlas. `version` bumps whenever pixels change so the
 /// renderer knows when to re-upload.
-/// How many spaces wide a tab is laid out. Fixed rather than a true tab stop;
-/// see `Fonts::lay_out_tabs`.
-pub const TAB_WIDTH: usize = 4;
+/// The default for [`Fonts::set_tab_width`]. Four is the common figure, and it
+/// is a default rather than a rule: tab width is an app's preference, and
+/// often a per-language one (Go is eight, plenty of web repositories are two).
+pub const DEFAULT_TAB_WIDTH: usize = 4;
 
 pub struct Atlas {
     pub size: u32,
@@ -61,10 +62,20 @@ impl Atlas {
         Self { size, max_size: 4096, data: vec![0; (size * size) as usize], version: 1, repacks: 0, cursor: (1, 1), row_h: 0 }
     }
 
-    /// Could a `w` x `h` glyph ever fit, even in a freshly reset atlas?
+    /// Could a `w` x `h` glyph ever fit, even in a freshly reset atlas *at
+    /// this size*?
     fn fits(&self, w: u32, h: u32) -> bool {
         let pad = 1;
         1 + w + pad <= self.size && 1 + h + pad <= self.size
+    }
+
+    /// Could it fit if the atlas were allowed to grow all the way to its
+    /// limit? Distinct from [`Atlas::fits`], which asks about the size it is
+    /// at now: a glyph can be too big for today's atlas and well inside what
+    /// the cap permits.
+    fn could_fit(&self, w: u32, h: u32) -> bool {
+        let pad = 1;
+        1 + w + pad <= self.max_size && 1 + h + pad <= self.max_size
     }
 
     /// Shelf packer. Returns None when full (or when the glyph is too large,
@@ -167,6 +178,9 @@ pub struct Fonts {
     wraps: RefCell<WrapCache>,
     /// Scratch for the break opportunities of the string being wrapped.
     breaks: RefCell<Vec<crate::wrap::Opportunity>>,
+    /// How many spaces wide a tab lays out. Baked into a shaped run, so
+    /// changing it drops the caches that hold one.
+    tab_width: usize,
 }
 
 /// (font, px) -> (the blank glyph, the face that owns it, a space's advance).
@@ -244,6 +258,7 @@ impl Fonts {
             text_draws: 0,
             wraps: RefCell::new(FxMap::default()),
             breaks: RefCell::new(Vec::new()),
+            tab_width: DEFAULT_TAB_WIDTH,
         }
     }
 
@@ -268,8 +283,61 @@ impl Fonts {
         FontId(self.fonts.len() as u16 - 1)
     }
 
+    /// How many spaces wide a tab lays out. Default [`DEFAULT_TAB_WIDTH`].
+    pub fn tab_width(&self) -> usize {
+        self.tab_width
+    }
+
+    /// Set how many spaces wide a tab lays out.
+    ///
+    /// Not a true tab *stop* aligned to a multiple — see the note on
+    /// `lay_out_tabs` — which is what indentation in a text field wants either
+    /// way. Clamped to at least 1: a zero-width tab would stack the characters
+    /// after it on top of each other.
+    ///
+    /// This is per-`Ui`, not per-document: the width is baked into a cached
+    /// shaped run, and a per-field width would have to be part of every cache
+    /// key and threaded through every measurement. An editor that needs a
+    /// different width per language wants one `Ui` per window, which it
+    /// probably has anyway, or a re-set between documents.
+    ///
+    /// Changing it drops the shaped-run and wrap caches, because both hold
+    /// advances computed with the old width. Do it when the preference
+    /// changes, not per frame.
+    pub fn set_tab_width(&mut self, spaces: usize) {
+        let spaces = spaces.max(1);
+        if spaces == self.tab_width {
+            return;
+        }
+        self.tab_width = spaces;
+        self.runs.borrow_mut().clear();
+        self.wraps.borrow_mut().clear();
+    }
+
     pub fn atlas(&self) -> &Atlas {
         &self.atlas
+    }
+
+    /// How large the glyph atlas may grow before it starts evicting instead,
+    /// in texels per side. The default is 4096 — 16 MB at one channel.
+    ///
+    /// Raise it for a UI that genuinely needs more live glyphs than that: CJK
+    /// through a [`FontStack`](crate::FontStack) at several sizes, or a canvas
+    /// zooming through many. Past the cap the atlas resets rather than grows,
+    /// which costs a re-rasterisation of the working set *every frame* it
+    /// stays too big, and shows as a one-frame flicker.
+    ///
+    /// Lower it for a device where 16 MB of texture is not free. Lowering it
+    /// below the atlas's current size does not shrink what is already
+    /// allocated; it stops the next growth.
+    ///
+    /// Rounded up to a power of two, because the atlas grows by doubling and
+    /// a cap between two powers would be indistinguishable from the lower one.
+    /// Clamped to at least the starting size, since a cap under it could never
+    /// be honoured.
+    pub fn set_atlas_limit(&mut self, max: u32) {
+        let floor = self.atlas.size.min(2048);
+        self.atlas.max_size = max.max(floor).next_power_of_two();
     }
 
     pub(crate) fn set_scale(&mut self, scale: f32) {
@@ -350,7 +418,7 @@ impl Fonts {
     ///
     /// A font maps `\t` to whatever it likes — Inter draws a `.notdef` box —
     /// so text carrying tabs has to be laid out here rather than left to the
-    /// shaper. The advance is [`TAB_WIDTH`] spaces, not a true tab *stop*
+    /// shaper. The advance is [`Fonts::tab_width`] spaces, not a true tab *stop*
     /// aligned to a multiple: indentation, which is what tabs in a text field
     /// are for, comes out right either way, and a stop would have to know
     /// where the line began.
@@ -369,7 +437,7 @@ impl Fonts {
             if bytes.get(g.cluster as usize) == Some(&b'\t') {
                 g.glyph = blank;
                 g.face = blank_face;
-                g.advance = width * TAB_WIDTH as f32;
+                g.advance = width * self.tab_width as f32;
                 g.offset = Vec2::ZERO;
             }
         }
@@ -638,6 +706,15 @@ impl Fonts {
         let mut placed = (w, h);
         if w > 0 && h > 0 {
             let pos = if !self.atlas.fits(w, h) {
+                // Too big for the atlas as it stands. Growing is what would
+                // hold it, and growing is exactly what the limit permits, so
+                // ask for it — `fits` is a question about today's size, not
+                // about what the cap allows. Without this, raising the limit
+                // did nothing for the glyph that motivated raising it: the
+                // glyph was cached as unplaceable and never reconsidered.
+                if self.atlas.size < self.atlas.max_size && self.atlas.could_fit(w, h) {
+                    self.repack_pending = true;
+                }
                 None
             } else {
                 match self.atlas.alloc(w, h) {
@@ -866,9 +943,9 @@ mod tab_tests {
         let space = f.measure(id, 14.0, " ").x;
         let tab = f.measure(id, 14.0, "\t").x;
         assert!(
-            (tab - space * TAB_WIDTH as f32).abs() <= 1.0,
+            (tab - space * DEFAULT_TAB_WIDTH as f32).abs() <= 1.0,
             "a tab measured {tab}, four spaces measure {}",
-            space * TAB_WIDTH as f32
+            space * DEFAULT_TAB_WIDTH as f32
         );
 
         // The glyph is the space's, which every font draws as nothing.

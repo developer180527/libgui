@@ -453,3 +453,148 @@ fn the_view_scrolls_and_stops_at_both_ends() {
     let line = w.text.lines().nth(start + 12).expect("that line");
     assert!(line.contains('X'), "the caret and the view disagree about which line is which");
 }
+
+/// **Undo across non-ASCII text.** Offsets in the field are bytes; the history
+/// read them as character counts. `é` is two bytes, so a step recorded after
+/// it pointed past where it meant, the staleness check failed, and undo
+/// silently did nothing *and* threw the history away.
+///
+/// The ASCII tests above could never catch this: where every character is one
+/// byte, the two readings agree.
+#[test]
+fn undo_works_with_an_accent_before_the_edit() {
+    for subject in ["café au lait", "naïve", "“quoted”", "emoji 🙂 here", "日本語のテキスト"] {
+        let mut w = World::new(subject);
+        w.warm();
+        w.click(Vec2::new(400.0, 20.0));
+        w.key(Key::End, &[]);
+        w.type_text("!");
+        assert_eq!(w.text, format!("{subject}!"), "typing failed for {subject:?}");
+
+        let r = w.key(Key::Z, &[Key::ControlLeft]);
+        assert_eq!(w.text, subject, "undo did nothing for {subject:?}");
+        assert_eq!(w.app_undo, 0, "the field released a chord it could serve");
+        let _ = r;
+
+        // And redo puts it back, at the right offset.
+        w.key(Key::Z, &[Key::ControlLeft, Key::ShiftLeft]);
+        assert_eq!(w.text, format!("{subject}!"), "redo landed wrong for {subject:?}");
+    }
+}
+
+/// Deleting across non-ASCII too: the step's range is bytes at both ends.
+#[test]
+fn undo_restores_a_deletion_that_spans_multibyte_characters() {
+    let mut w = World::new("héllo wörld");
+    w.warm();
+    w.click(Vec2::new(400.0, 20.0));
+    w.key(Key::End, &[]);
+    for _ in 0..5 {
+        w.key(Key::Backspace, &[]);
+    }
+    assert_eq!(w.text, "héllo ");
+    w.key(Key::Z, &[Key::ControlLeft]);
+    assert_eq!(w.text, "héllo wörld", "undoing a multibyte deletion did not restore it");
+}
+
+/// **Undoing a deletion must not splice into a document the app replaced.**
+///
+/// A step used to be checked by confirming the text it *inserted* was still
+/// where it said. A deletion inserts nothing, and every string starts with the
+/// empty string, so the check passed against any buffer at all: the field
+/// spliced the removed text into whatever the app had put there. Deleting
+/// `gamma`, then having the app write `zzz`, then undoing, produced
+/// `zzzgamma`.
+#[test]
+fn undoing_a_deletion_notices_that_the_app_rewrote_the_document() {
+    let mut w = World::new("alpha beta gamma");
+    w.warm();
+    w.click(Vec2::new(400.0, 20.0));
+    w.key(Key::End, &[]);
+    for _ in 0..5 {
+        w.key(Key::Backspace, &[]);
+    }
+    assert_eq!(w.text, "alpha beta ");
+
+    // The app rewrites the document behind the field's back: a command, a
+    // reload, a file opened.
+    w.text = "zzz".into();
+    w.frame();
+
+    w.key(Key::Z, &[Key::ControlLeft]);
+    assert_eq!(w.text, "zzz", "undo spliced into a document it no longer described");
+    // And having nothing left to serve, the field hands the chord to the app.
+    assert!(w.app_undo > 0, "the field kept claiming a chord it could not serve");
+}
+
+/// A rewrite to something *longer* is caught only by the fingerprint: the
+/// offset is still inside the new document, and a deletion's empty `inserted`
+/// is a prefix of anything, so neither the bounds check nor `starts_with` has
+/// anything to object to.
+#[test]
+fn a_longer_rewrite_is_caught_too() {
+    let mut w = World::new("alpha beta gamma");
+    w.warm();
+    w.click(Vec2::new(400.0, 20.0));
+    w.key(Key::End, &[]);
+    for _ in 0..5 {
+        w.key(Key::Backspace, &[]);
+    }
+    assert_eq!(w.text, "alpha beta ");
+
+    w.text = "a much longer document than the field ever saw".into();
+    let after = w.text.clone();
+    w.frame();
+
+    w.key(Key::Z, &[Key::ControlLeft]);
+    assert_eq!(w.text, after, "undo spliced into a longer document it no longer described");
+    assert!(w.app_undo > 0, "the field kept the chord");
+}
+
+/// The same check has to survive a rewrite that keeps the length, which a
+/// length comparison alone would miss.
+#[test]
+fn a_same_length_rewrite_is_caught_too() {
+    let mut w = World::new("alpha beta gamma");
+    w.warm();
+    w.click(Vec2::new(400.0, 20.0));
+    w.key(Key::End, &[]);
+    for _ in 0..5 {
+        w.key(Key::Backspace, &[]);
+    }
+    assert_eq!(w.text, "alpha beta ");
+
+    // Same length, different text.
+    w.text = "ALPHA BETA ".into();
+    assert_eq!(w.text.len(), 11);
+    w.frame();
+
+    w.key(Key::Z, &[Key::ControlLeft]);
+    assert_eq!(w.text, "ALPHA BETA ", "a same-length rewrite slipped past the check");
+    assert!(w.app_undo > 0, "the field kept the chord");
+}
+
+/// The check must not fire on the field's *own* edits, or undo would break
+/// wherever the document happened to look unfamiliar. A long run of typing,
+/// deleting and re-typing unwinds completely.
+#[test]
+fn an_undisturbed_field_unwinds_its_whole_history() {
+    let mut w = World::new("");
+    w.warm();
+    w.click(Vec2::new(60.0, 20.0));
+    for word in ["one ", "two ", "three "] {
+        w.type_text(word);
+        // Break the run, so each word is its own step.
+        w.key(Key::ArrowLeft, &[]);
+        w.key(Key::End, &[]);
+    }
+    assert_eq!(w.text, "one two three ");
+
+    let mut guard = 0;
+    while !w.text.is_empty() && guard < 20 {
+        w.key(Key::Z, &[Key::ControlLeft]);
+        guard += 1;
+    }
+    assert_eq!(w.text, "", "the field could not unwind its own edits: {:?}", w.text);
+    assert_eq!(w.app_undo, 0, "the field released a chord while it still had work");
+}

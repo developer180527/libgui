@@ -572,6 +572,14 @@ pub struct Ui {
     /// widget — a double click is two clicks on the *same* widget, so a click
     /// anywhere else ends any sequence in progress.
     last_click: Option<(Id, f64, Vec2)>,
+    /// This frame's double-click decision, once something has asked for it.
+    ///
+    /// Resolving it *consumes* `last_click`, so asking twice used to answer
+    /// differently: the second call saw a click on the same widget zero
+    /// seconds ago and said yes. A widget may legitimately be interacted with
+    /// more than once in a frame — an app asking for the response again — so
+    /// the answer is memoised rather than recomputed.
+    double_click: Option<(Id, bool)>,
     /// Bytes of document the text widgets read this frame; see
     /// [`crate::testing::FrameCost::text_scanned`].
     pub(crate) text_scanned: usize,
@@ -610,6 +618,14 @@ pub struct Ui {
     /// both expose it as a system setting, and an app that reads it should
     /// write it here. The default is the value both platforms ship.
     pub double_click_time: f32,
+    /// How long a pause in typing closes the current undo step, in seconds.
+    ///
+    /// A stretch of uninterrupted typing should be one thing to take back, not
+    /// one step per keystroke; where the stretch *ends* is taste, and taste is
+    /// the app's. Two seconds is the usual figure and the default. Set it to
+    /// `0.0` for a step per edit, or `f64::INFINITY` to coalesce until
+    /// something else breaks the run (a newline, a command, a click).
+    pub undo_run_pause: f64,
     /// Focus arrived by keyboard, so it is worth drawing a ring. A click moves
     /// focus without one, the way every desktop behaves — a ring that appears
     /// under the mouse is noise.
@@ -801,6 +817,7 @@ impl Ui {
             consumed_keys: Vec::new(),
             released_actions: Vec::new(),
             last_click: None,
+            double_click: None,
             text_scanned: 0,
             typing: false,
             open_chain: Vec::new(),
@@ -817,6 +834,7 @@ impl Ui {
             pending_tab: None,
             focus_policy: crate::FocusPolicy::default(),
             double_click_time: 0.5,
+            undo_run_pause: crate::text_history::DEFAULT_RUN_PAUSE,
             focus_visible: false,
             text_states: FxMap::default(),
             text_history: FxMap::default(),
@@ -1459,6 +1477,7 @@ impl Ui {
         if self.pressed && self.hovered != self.last_click.map(|(id, _, _)| id) {
             self.last_click = None;
         }
+        self.double_click = None;
         self.text_scanned = 0;
         // Focus is resolved during a frame, so this is last frame's answer —
         // the same one-frame-late rule the rest of the input model uses.
@@ -1895,6 +1914,11 @@ impl Ui {
     /// rapid run of clicks alternates single, double, single, double instead
     /// of firing a double every frame.
     fn is_double_click(&mut self, id: Id) -> bool {
+        if let Some((who, answer)) = self.double_click {
+            if who == id {
+                return answer;
+            }
+        }
         let at = self.input.mouse_pos;
         let now = self.time;
         let double = match self.last_click {
@@ -1907,6 +1931,7 @@ impl Ui {
             None => false,
         };
         self.last_click = if double { None } else { Some((id, now, at)) };
+        self.double_click = Some((id, double));
         double
     }
 

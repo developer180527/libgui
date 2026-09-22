@@ -357,13 +357,16 @@ fn sanitize(s: &str, multiline: bool) -> String {
 /// Apply one edit and record it. The caret before the edit is what undo puts
 /// back, and an action that changed nothing (backspace at the start) records
 /// nothing — there is no step to take back.
-fn edited(e: &mut Edit, hist: &mut History, kind: Edited, now: f64, body: impl FnOnce(&mut Edit)) -> bool {
+fn edited(e: &mut Edit, hist: &mut History, kind: Edited, now: f64, pause: f64, body: impl FnOnce(&mut Edit)) -> bool {
     let (cursor, anchor) = (e.cursor, e.anchor);
     e.change = None;
     body(e);
     match e.change.take() {
         Some(change) => {
-            hist.record(kind, change, cursor, anchor, now);
+            // The text as the edit has just left it: a step fingerprints the
+            // document around itself so it can tell, later, whether the app
+            // replaced what it describes.
+            hist.record(kind, change, (cursor, anchor), now, pause, e.text);
             true
         }
         None => false,
@@ -391,6 +394,7 @@ fn apply_events(ui: &mut Ui, id: Id, text: &mut String, st: &mut TextState, mult
     // applied instead, which costs the length of the edit rather than the
     // length of the document. See `text_history`.
     let now = ui.time;
+    let pause = ui.undo_run_pause;
     // Vertical motion needs to measure text, and only the font can: the x a
     // caret is at on one line decides where it lands on the next.
     let size = ui.theme.metrics.font_size;
@@ -401,24 +405,24 @@ fn apply_events(ui: &mut Ui, id: Id, text: &mut String, st: &mut TextState, mult
             Event::Text(s) => {
                 let s = sanitize(&s, multiline);
                 if !s.is_empty() {
-                    out.changed |= edited(&mut e, &mut hist, Edited::Typing, now, |e| e.insert(&s));
+                    out.changed |= edited(&mut e, &mut hist, Edited::Typing, now, pause, |e| e.insert(&s));
                 }
             }
             Event::Paste(s) => {
                 let s = sanitize(&s, multiline);
                 if !s.is_empty() {
                     // A paste is one step whatever it lands next to.
-                    out.changed |= edited(&mut e, &mut hist, Edited::Discrete, now, |e| e.insert(&s));
+                    out.changed |= edited(&mut e, &mut hist, Edited::Discrete, now, pause, |e| e.insert(&s));
                 }
             }
             Event::Action(UiAction::Copy) if e.has_selection() => ui.copied = Some(e.selected_text()),
             Event::Action(UiAction::Cut) if e.has_selection() => {
                 ui.copied = Some(e.selected_text());
-                out.changed |= edited(&mut e, &mut hist, Edited::Discrete, now, |e| e.insert(""));
+                out.changed |= edited(&mut e, &mut hist, Edited::Discrete, now, pause, |e| e.insert(""));
             }
             Event::Action(UiAction::InsertNewline) => {
                 if multiline {
-                    out.changed |= edited(&mut e, &mut hist, Edited::Typing, now, |e| e.insert("\n"));
+                    out.changed |= edited(&mut e, &mut hist, Edited::Typing, now, pause, |e| e.insert("\n"));
                 } else {
                     // Nowhere to put a line break: Enter commits instead.
                     out.submitted = true;
@@ -456,7 +460,7 @@ fn apply_events(ui: &mut Ui, id: Id, text: &mut String, st: &mut TextState, mult
             }
             Event::Action(a @ UiAction::Delete(_)) => {
                 let cols = LineColumns { fonts: &ui.fonts, font: ui.font, size };
-                out.changed |= edited(&mut e, &mut hist, Edited::Deleting, now, |e| {
+                out.changed |= edited(&mut e, &mut hist, Edited::Deleting, now, pause, |e| {
                     e.action(a, &mut None, &cols);
                 });
             }

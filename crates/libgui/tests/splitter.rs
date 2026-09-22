@@ -224,3 +224,48 @@ fn a_double_click_is_reported_for_the_app_to_act_on() {
     assert!(w.resp.as_ref().unwrap().double_clicked, "no double click reached the app");
     assert_eq!(w.width, 200.0, "the splitter reset the width by itself");
 }
+
+/// **A bad number from the host must not take the app down.** A range worked
+/// out from a size that is not known yet — `(w * 0.1, w * 0.9)` before `w` has
+/// been measured — arrives as NaN, and `f32::clamp` panics on a NaN bound
+/// exactly as it does on a reversed one. Guarding only the reversed case left
+/// the crash this widget's own commit message claimed to prevent.
+#[test]
+fn a_range_that_is_not_a_range_does_not_panic() {
+    let n = f32::NAN;
+    for (lo, hi) in [(n, n), (n, 600.0), (80.0, n), (f32::INFINITY, n), (80.0, f32::INFINITY)] {
+        let mut w = World::new(200.0, SplitterOptions::vertical_rule(lo, hi));
+        w.drag(Vec2::new(60.0, 0.0));
+        assert!(w.width.is_finite(), "({lo}, {hi}) left the width at {}", w.width);
+    }
+}
+
+/// The range going bad mid-drag is the realistic version: the first frame had
+/// a width, a later one does not. The drag is ignored while it lasts, and the
+/// pane keeps the width it had rather than jumping.
+#[test]
+fn a_range_that_goes_bad_mid_drag_holds_the_pane_still() {
+    let mut w = World::new(200.0, SplitterOptions::vertical_rule(80.0, 600.0));
+    w.drag(Vec2::new(40.0, 0.0));
+    assert_eq!(w.width, 240.0);
+
+    w.opts = SplitterOptions::vertical_rule(f32::NAN, f32::NAN);
+    w.drag(Vec2::new(100.0, 0.0));
+    assert_eq!(w.width, 240.0, "a NaN range moved the pane");
+
+    // And it works again the moment the range is usable.
+    w.opts = SplitterOptions::vertical_rule(80.0, 600.0);
+    w.drag(Vec2::new(30.0, 0.0));
+    assert_eq!(w.width, 270.0, "the splitter did not recover");
+}
+
+/// A value that is already NaN — from an app's own arithmetic, or a restored
+/// layout — is recovered to the near end rather than carried forward, which
+/// would freeze the pane for good.
+#[test]
+fn a_width_that_is_not_finite_is_recovered() {
+    let mut w = World::new(f32::NAN, SplitterOptions::vertical_rule(120.0, 600.0));
+    w.drag(Vec2::new(10.0, 0.0));
+    assert!(w.width.is_finite(), "a NaN width stayed NaN");
+    assert!((120.0..=600.0).contains(&w.width), "recovered outside the range: {}", w.width);
+}

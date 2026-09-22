@@ -45,10 +45,11 @@
 
 /// Steps kept per field.
 const MAX_STEPS: usize = 64;
-/// A pause this long closes the run in progress, so an uninterrupted stretch
-/// of typing is not one undo step. Every editor does this; two seconds is the
-/// usual figure.
-const RUN_PAUSE: f64 = 2.0;
+/// The default for [`crate::Ui::undo_run_pause`]: a pause this long closes the
+/// run in progress, so an uninterrupted stretch of typing is not one undo
+/// step. Every editor does this; two seconds is the usual figure, and it is a
+/// default rather than a rule because it is taste, not mechanism.
+pub const DEFAULT_RUN_PAUSE: f64 = 2.0;
 /// And a ceiling on the *edited* text they hold. Reached by editing a lot, not
 /// by editing a large file.
 const MAX_BYTES: usize = 256 * 1024;
@@ -64,7 +65,10 @@ enum Run {
 }
 
 /// One undoable edit: `removed` was at `at`, and `inserted` replaced it.
-/// Indices are in chars, like the rest of the field.
+/// **Offsets are bytes**, like the rest of the field since it stopped counting
+/// characters. They used to be chars here and bytes there, which meant undo
+/// silently addressed the wrong place the moment anything before the caret was
+/// not ASCII — an accent, a curly quote, an emoji.
 #[derive(Clone, Debug, PartialEq)]
 struct Step {
     at: usize,
@@ -73,11 +77,72 @@ struct Step {
     /// Where the caret was before the edit, to put it back.
     cursor: usize,
     anchor: usize,
+    /// The document as this step leaves it: what `undo` expects to find.
+    after: Fingerprint,
+    /// The document as undoing it leaves it: what `redo` expects to find.
+    before: Fingerprint,
+}
+
+/// Enough of the document to notice that the app rewrote it.
+///
+/// Checking only that `inserted` is still at `at` is no check at all for a
+/// deletion, which inserted nothing: every string starts with the empty
+/// string, so the test always passed, the field went on claiming it could undo
+/// and spliced the removed text into whatever the app had put there instead.
+///
+/// So a step also remembers the document's length and a hash of the bytes
+/// immediately around the edit. Both are O(1) to take and to check — the whole
+/// point of storing edits rather than snapshots was not to touch the document's
+/// length on every keystroke, and this keeps that.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Fingerprint {
+    /// Total length of the document, in bytes.
+    len: usize,
+    /// Hash of up to [`CONTEXT`] bytes on each side of the edit. The context
+    /// is the same before and after the edit — the edit is what sits between
+    /// the two — so one hash serves both fingerprints.
+    around: u64,
+}
+
+/// Bytes hashed on each side of an edit. Enough that a rewrite which happens
+/// to preserve the length is still caught, small enough to be free.
+const CONTEXT: usize = 64;
+
+/// Hash the bytes just before `at` and just after `at + len`.
+fn around(text: &str, at: usize, len: usize) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let b = text.as_bytes();
+    // Clamped rather than asserted: `at` comes from a step that may describe a
+    // document the app has since replaced, so it can point anywhere.
+    let start = at.min(b.len());
+    let end = (at + len).min(b.len());
+    let mut h = crate::hash::FxHasher::default();
+    b[start.saturating_sub(CONTEXT)..start].hash(&mut h);
+    b[end..(end + CONTEXT).min(b.len())].hash(&mut h);
+    h.finish()
+}
+
+/// The document as it stands, around the range `at..at + len`.
+fn fingerprint(text: &str, at: usize, len: usize) -> Fingerprint {
+    Fingerprint { len: text.len(), around: around(text, at, len) }
 }
 
 impl Step {
     fn weight(&self) -> usize {
         self.removed.len() + self.inserted.len()
+    }
+
+    /// Take both fingerprints from `text`, the document as this step leaves
+    /// it. The context on each side of the edit is the same either way — it is
+    /// only the piece between them that differs — so the two fingerprints
+    /// share a hash and differ by the lengths of what was swapped.
+    fn stamp(&mut self, text: &str) {
+        let around = around(text, self.at, self.inserted.len());
+        self.after = Fingerprint { len: text.len(), around };
+        self.before = Fingerprint {
+            len: text.len() + self.removed.len() - self.inserted.len().min(text.len()),
+            around,
+        };
     }
 }
 
@@ -85,7 +150,7 @@ impl Step {
 /// reports it.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Change {
-    /// Char index where the replacement starts.
+    /// Byte offset where the replacement starts.
     pub at: usize,
     pub removed: String,
     pub inserted: String,
@@ -112,31 +177,32 @@ pub(crate) enum Edited {
     Discrete,
 }
 
-/// Replace `at..at + n` chars of `text` with `with`.
+/// Replace `at..at + n` **bytes** of `text` with `with`.
 fn splice(text: &mut String, at: usize, n: usize, with: &str) {
-    let start = byte_at(text, at);
-    let end = byte_at(text, at + n);
-    text.replace_range(start..end, with);
+    text.replace_range(at..at + n, with);
 }
 
-fn byte_at(s: &str, char_idx: usize) -> usize {
-    s.char_indices().nth(char_idx).map(|(b, _)| b).unwrap_or(s.len())
-}
-
-/// Is `needle` exactly at char index `at` in `text`?
+/// Is `needle` exactly at byte offset `at` in `text`?
+///
+/// Compared as bytes rather than by slicing, so an offset into a document the
+/// app has replaced — past the end, or mid-character — answers false instead
+/// of panicking.
 fn sits_at(text: &str, at: usize, needle: &str) -> bool {
-    let start = byte_at(text, at);
-    text[start..].starts_with(needle)
+    let b = text.as_bytes();
+    at <= b.len() && b[at..].starts_with(needle.as_bytes())
 }
 
 impl History {
-    /// Record an edit that has just been applied. `cursor`/`anchor` are where
-    /// the caret was *before* it.
-    pub fn record(&mut self, kind: Edited, change: Change, cursor: usize, anchor: usize, now: f64) {
+    /// Record an edit that has just been applied.
+    /// `caret` is where the cursor and anchor were *before* the edit, which is
+    /// what undo puts back. `text` is the document as the edit has just left
+    /// it: a step fingerprints itself against it.
+    pub fn record(&mut self, kind: Edited, change: Change, caret: (usize, usize), now: f64, pause: f64, text: &str) {
+        let (cursor, anchor) = caret;
         // A new edit invalidates anything that was undone: the future only
         // exists as long as nothing was written over it.
         self.future.clear();
-        if now - self.last_edit > RUN_PAUSE {
+        if now - self.last_edit > pause {
             self.run = Run::None;
         }
         self.last_edit = now;
@@ -156,18 +222,25 @@ impl History {
         if joins {
             if let Some(last) = self.past.last_mut() {
                 if merge(last, &change) {
+                    // The merged step covers a different range, so its
+                    // fingerprints are taken again rather than inherited.
+                    last.stamp(text);
                     self.trim();
                     return;
                 }
             }
         }
-        self.past.push(Step {
+        let mut step = Step {
             at: change.at,
             removed: change.removed,
             inserted: change.inserted,
             cursor,
             anchor,
-        });
+            after: Fingerprint::default(),
+            before: Fingerprint::default(),
+        };
+        step.stamp(text);
+        self.past.push(step);
         self.trim();
     }
 
@@ -192,11 +265,11 @@ impl History {
     /// what the step describes, in which case the history is dropped.
     pub fn undo(&mut self, text: &mut String, cursor: usize, anchor: usize) -> Option<(usize, usize)> {
         let step = self.past.pop()?;
-        if !sits_at(text, step.at, &step.inserted) {
+        if !sits_at(text, step.at, &step.inserted) || fingerprint(text, step.at, step.inserted.len()) != step.after {
             self.clear(); // the app rewrote the buffer under us
             return None;
         }
-        splice(text, step.at, step.inserted.chars().count(), &step.removed);
+        splice(text, step.at, step.inserted.len(), &step.removed);
         let caret = (step.cursor, step.anchor);
         self.future.push(Step { cursor, anchor, ..step });
         self.run = Run::None;
@@ -205,13 +278,13 @@ impl History {
 
     pub fn redo(&mut self, text: &mut String, cursor: usize, anchor: usize) -> Option<(usize, usize)> {
         let step = self.future.pop()?;
-        if !sits_at(text, step.at, &step.removed) {
+        if !sits_at(text, step.at, &step.removed) || fingerprint(text, step.at, step.removed.len()) != step.before {
             self.clear();
             return None;
         }
-        splice(text, step.at, step.removed.chars().count(), &step.inserted);
+        splice(text, step.at, step.removed.len(), &step.inserted);
         // Redo leaves the caret after what it put back.
-        let caret = step.at + step.inserted.chars().count();
+        let caret = step.at + step.inserted.len();
         self.past.push(Step { cursor, anchor, ..step });
         self.run = Run::None;
         Some((caret, caret))
@@ -245,7 +318,7 @@ impl History {
 /// extends the insertion; backspace grows the removal leftwards; forward
 /// delete grows it rightwards.
 fn merge(last: &mut Step, change: &Change) -> bool {
-    let inserted_len = last.inserted.chars().count();
+    let inserted_len = last.inserted.len();
     // Typing on: the new text starts where the last insertion ended.
     if change.removed.is_empty() && change.at == last.at + inserted_len {
         last.inserted.push_str(&change.inserted);
@@ -253,7 +326,7 @@ fn merge(last: &mut Step, change: &Change) -> bool {
     }
     if change.inserted.is_empty() {
         // Backspace: removes the chars just before this step's range.
-        if change.at + change.removed.chars().count() == last.at + inserted_len && inserted_len == 0 {
+        if change.at + change.removed.len() == last.at + inserted_len && inserted_len == 0 {
             let mut removed = change.removed.clone();
             removed.push_str(&last.removed);
             last.removed = removed;
@@ -273,20 +346,22 @@ fn merge(last: &mut Step, change: &Change) -> bool {
 mod tests {
     use super::*;
 
-    /// Apply `inserted` at `at` and hand the history the change, the way the
-    /// field does.
+    /// Apply `with` over `at..at + n` and hand the history the change, the
+    /// way the field does. **Offsets are bytes**, as they are in the field.
     fn edit(h: &mut History, text: &mut String, kind: Edited, at: usize, n: usize, with: &str) {
-        let start = byte_at(text, at);
-        let end = byte_at(text, at + n);
-        let removed = text[start..end].to_string();
+        let removed = text[at..at + n].to_string();
         let cursor = at + n;
         splice(text, at, n, with);
-        h.record(kind, Change { at, removed, inserted: with.to_string() }, cursor, cursor, 0.0);
+        h.record(kind, Change { at, removed, inserted: with.to_string() }, (cursor, cursor), 0.0, DEFAULT_RUN_PAUSE, text);
     }
 
+    /// Type `s` one character at a time, advancing by each one's *byte*
+    /// length, so the helper is right for text that is not all ASCII.
     fn type_text(h: &mut History, text: &mut String, at: usize, s: &str) {
-        for (i, c) in s.chars().enumerate() {
-            edit(h, text, Edited::Typing, at + i, 0, &c.to_string());
+        let mut at = at;
+        for c in s.chars() {
+            edit(h, text, Edited::Typing, at, 0, &c.to_string());
+            at += c.len_utf8();
         }
     }
 
@@ -417,14 +492,18 @@ mod tests {
     fn a_pause_closes_the_run() {
         let mut h = History::default();
         let mut text = String::new();
-        h.record(Edited::Typing, Change { at: 0, removed: String::new(), inserted: "one".into() }, 0, 0, 0.0);
-        text.push_str("one");
-        h.record(Edited::Typing, Change { at: 3, removed: String::new(), inserted: "two".into() }, 3, 3, 1.0);
-        text.push_str("two");
+        // The edit is applied first: a step fingerprints the document as the
+        // edit leaves it, so `record` is handed the text afterwards.
+        let at = |h: &mut History, text: &mut String, s: &str, now: f64| {
+            let at = text.len();
+            text.push_str(s);
+            h.record(Edited::Typing, Change { at, removed: String::new(), inserted: s.into() }, (at, at), now, DEFAULT_RUN_PAUSE, text);
+        };
+        at(&mut h, &mut text, "one", 0.0);
+        at(&mut h, &mut text, "two", 1.0);
         assert_eq!(h.depth().0, 1, "typing a second later should join the run");
 
-        h.record(Edited::Typing, Change { at: 6, removed: String::new(), inserted: "!".into() }, 6, 6, 10.0);
-        text.push('!');
+        at(&mut h, &mut text, "!", 10.0);
         assert_eq!(h.depth().0, 2, "typing after a long pause joined the previous run");
         h.undo(&mut text, 7, 7);
         assert_eq!(text, "onetwo");
@@ -442,3 +521,4 @@ mod tests {
         assert!(!h.can_undo() && h.can_redo());
     }
 }
+

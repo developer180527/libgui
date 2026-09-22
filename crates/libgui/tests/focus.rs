@@ -286,3 +286,57 @@ fn a_double_click_is_two_clicks_on_one_widget() {
     assert_eq!(click(&mut ui), (true, false), "a click elsewhere did not end the pair");
     let _ = (down, up);
 }
+
+/// **Asking a widget for its response twice must not invent a double click.**
+///
+/// The decision used to be made inside `interact`, and making it *consumed*
+/// the record of the previous click. So a second `interact` on the same id in
+/// one frame — which an app is entitled to do, and which any widget built from
+/// two interaction calls does — saw a click on that widget zero seconds ago,
+/// at the same position, and reported a double. A single click opened a file,
+/// renamed a node, or expanded a tree twice.
+#[test]
+fn asking_twice_in_one_frame_does_not_make_a_double_click() {
+    use libgui::*;
+    const FONT: &[u8] = include_bytes!("../../../assets/Inter.ttf");
+    let mut ui = Ui::new(Theme::dark(), FONT).expect("font");
+
+    /// One frame that interacts with the same widget `times` times, returning
+    /// every answer it gave.
+    fn frame(ui: &mut Ui, times: usize, events: Vec<InputEvent>) -> Vec<bool> {
+        for e in events {
+            ui.push(e);
+        }
+        ui.begin_frame(FrameInfo { screen_size: Vec2::new(200.0, 100.0), scale: 1.0, dt: 0.016 });
+        let mut out = Vec::new();
+        let col = Layout::column().width(Size::Grow(1.0)).height(Size::Grow(1.0));
+        ui.container_id(Id::new("root"), col, Frame::none(), |ui| {
+            let id = ui.make_id("target");
+            ui.add_leaf(id, Layout::leaf(Size::Fixed(120.0), Size::Fixed(40.0)), Vec2::ZERO, true, |_, _| {});
+            for _ in 0..times {
+                out.push(ui.interact(id).double_clicked);
+            }
+        });
+        let _ = ui.end_frame();
+        out
+    }
+    let down = || InputEvent::PointerButton { button: PointerButton::Primary, pressed: true };
+    let up = || InputEvent::PointerButton { button: PointerButton::Primary, pressed: false };
+
+    frame(&mut ui, 3, vec![InputEvent::PointerMoved { pos: Vec2::new(40.0, 20.0) }]);
+    frame(&mut ui, 3, vec![down()]);
+    let answers = frame(&mut ui, 3, vec![up()]);
+    assert_eq!(answers, vec![false, false, false], "a single click was reported as a double: {answers:?}");
+
+    // The real double still works, and is reported consistently to every
+    // caller in the frame rather than only the first.
+    frame(&mut ui, 3, vec![down()]);
+    let answers = frame(&mut ui, 3, vec![up()]);
+    assert_eq!(answers, vec![true, true, true], "the second click was not a double for every caller: {answers:?}");
+
+    // And a third click still starts a new pair, which the memo must not
+    // freeze in place.
+    frame(&mut ui, 3, vec![down()]);
+    let answers = frame(&mut ui, 3, vec![up()]);
+    assert_eq!(answers, vec![false, false, false], "the third click reported a double: {answers:?}");
+}

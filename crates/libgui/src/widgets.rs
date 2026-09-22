@@ -1010,7 +1010,23 @@ impl Ui {
         // the same.
         self.keep_id(id);
         let resp = self.interact_drag(id);
-        if resp.active {
+        let (lo, hi) = opts.range;
+        // A range worked out from a size that is not known yet — `(w * 0.1, w
+        // * 0.9)` on the first frame — arrives as NaN, and `f32::clamp` panics
+        // on a NaN bound as readily as on a reversed one. A host's bad number
+        // must not take the app down, so the drag is simply ignored until the
+        // range is a range again. Everything else about the widget still
+        // works: it draws, it reports, the cursor still changes.
+        let usable = lo.is_finite() && hi.is_finite();
+        // A value that is not finite is repaired straight away, not on the
+        // next drag: a NaN width breaks the layout it feeds, so the handle
+        // lands nowhere and there is no drag left to recover on. NaN is never
+        // a width someone meant, unlike a finite value outside the range,
+        // which is left alone until a drag brings it in.
+        if usable && !value.is_finite() {
+            *value = lo.min(hi);
+        }
+        if resp.active && usable {
             let d = match opts.axis {
                 // A vertical rule is dragged horizontally: the axis names the
                 // rule's own direction, the way a person describes the line
@@ -1019,10 +1035,10 @@ impl Ui {
                 Axis::X => resp.drag_delta.y,
             };
             let d = if opts.invert { -d } else { d };
-            let (lo, hi) = opts.range;
             // `min` before `max`: an inverted range would otherwise clamp to
             // the wrong end and the pane would jump across the window.
-            *value = (*value + d).clamp(lo.min(hi), lo.max(hi));
+            let (lo, hi) = (lo.min(hi), lo.max(hi));
+            *value = (*value + d).clamp(lo, hi);
         }
         if resp.hovered || resp.active {
             self.cursor = match opts.axis {
