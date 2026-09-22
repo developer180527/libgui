@@ -158,6 +158,41 @@ jobs:
       - run: cargo check -p libgui --all-features --locked
       - run: cargo test -p libgui --all-features --locked
 
+  c-abi:
+    name: c abi · header compiles and links
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p libgui_c --locked
+      - run: cargo build -p libgui_c --release --locked
+      # The half the Rust tests cannot do: compile the committed header as C,
+      # link the real static library, and check every struct is the size both
+      # sides think it is. A mirror that gained a field on one side only fails
+      # here rather than reading the wrong bytes in someone's application.
+      - name: C smoke test (unix)
+        if: runner.os != 'Windows'
+        run: |
+          cc -std=c11 -Wall -Wextra -Icrates/libgui_c/include \
+             crates/libgui_c/tests/smoke.c \
+             target/release/liblibgui_c.a \
+             $([ "$RUNNER_OS" = "macOS" ] && echo "-framework CoreFoundation" || echo "-lm -lpthread -ldl") \
+             -o smoke
+          ./smoke assets/Inter.ttf
+      - name: C smoke test (windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          cl /nologo /I crates\libgui_c\include crates\libgui_c\tests\smoke.c ^
+             target\release\libgui_c.lib ^
+             ws2_32.lib userenv.lib advapi32.lib ntdll.lib bcrypt.lib /Fe:smoke.exe
+          smoke.exe assets\Inter.ttf
+
   cross-build:
     name: builds for · ${{ matrix.target }}
     runs-on: ${{ matrix.os }}

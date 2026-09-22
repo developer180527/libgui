@@ -1491,7 +1491,7 @@ lag, fling, easing) stay as frame-trace tests like
    tables through rustybuzz — ligatures, GPOS kerning, mark attachment, contextual forms, Indic
    reordering; ~~font fallback~~ ✅ `FontStack` chains faces so a mixed-script string draws whole.
    Next: bidi (RTL is shaped but laid out left to right), multi-page atlas with LRU eviction.
-8. ~~Theme hot-reload~~ ✅ TOML themes, per-widget styles, density presets; next: multiple fonts (UI/mono/icons) in the theme, per-widget disabled states.
+8. ~~Theme hot-reload~~ ✅ TOML themes, per-widget styles, density presets; ~~disabled states~~ ✅ `Ui::enabled` fades a whole scope in the draw list, so custom drawing greys out too; next: multiple fonts (UI/mono/icons) in the theme.
 9. ~~Keyboard focus and navigation~~ ✅ `FocusKind` / `FocusPolicy`, activation through
    `UiAction`, a centrally drawn focus ring, per-platform policy in `libgui_keymap`;
    ~~arrow-key navigation *within* a collection~~ ✅ `Ui::open_collection` gives a list or tree
@@ -1536,7 +1536,6 @@ lag, fling, easing) stay as frame-trace tests like
   on each side of the edit, checked when a step is applied. A rewrite that preserves both would go
   unnoticed — the alternative is comparing the whole document, which is what storing edits rather
   than snapshots exists to avoid.
-- Only menu items have a disabled state. A button, checkbox, slider or field cannot be greyed out.
 - Keyboard navigation inside a collection covers a one-dimensional cursor (`Ui::open_collection`),
   which is what a list and a tree need. A table's 2-D cell cursor, the arrows inside an open menu,
   and type-ahead ("jump to the row starting with d") are not there. A collection does not follow

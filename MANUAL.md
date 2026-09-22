@@ -29,7 +29,8 @@ the design rationale; this covers the wiring.
 11. [Persistence](#11-persistence)
 12. [Testing your UI](#12-testing-your-ui)
 13. [Features](#13-features)
-14. [Limitations](#14-limitations)
+14. [Calling from C or C++](#14-calling-from-c-or-c)
+15. [Limitations](#15-limitations)
 
 ---
 
@@ -392,24 +393,74 @@ if ui.button("Save").clicked { save(); }
 A `*_keyed` variant exists wherever labels repeat (list rows, tree nodes) —
 use it, or two rows with the same text will share state.
 
-### 5.3 Layers
+### 5.3 Disabled widgets
+
+A command-enablement model — a ribbon that greys out what does not apply to the
+selection, a panel dead until something is picked — wraps a group rather than
+passing a flag to every widget:
+
+```rust
+ui.enabled(has_selection, |ui| {
+    if ui.button("Join").clicked { join(); }
+    if ui.button("Subtract").clicked { subtract(); }
+});
+```
+
+Inside, widgets are inert — no hover, no click, no keyboard focus — and
+everything painted is multiplied by `theme.metrics.disabled_alpha`. That last
+part happens in the draw list rather than in each widget, so **your own
+`add_leaf` drawing greys out too**, without knowing it can.
+
+Disabling nests one way: `ui.enabled(true, …)` inside a disabled scope does not
+re-enable. `ui.is_enabled()` reads the current state; `open_enabled` /
+`close_enabled` are the closure-free pair.
+
+### 5.4 Multi-select
+
+libgui does not hold your selection — a CAD browser selects bodies, a file list
+selects paths. What it keeps is the **anchor** a Shift-click extends from,
+which every app would otherwise reimplement:
+
+```rust
+let nav = ui.open_collection("model", bodies.len());
+for (i, body) in bodies.iter().enumerate() {
+    let r = ui.selectable_keyed(i, body, picked.contains(&i));
+    if r.clicked {
+        match ui.select(nav.id, i, keymap.select_kind(&r.modifiers)) {
+            Selection::Only(i)   => { picked.clear(); picked.insert(i); }
+            Selection::Toggle(i) => { if !picked.remove(&i) { picked.insert(i); } }
+            Selection::Range(r)  => { picked.clear(); picked.extend(r); }
+        }
+    }
+}
+ui.close_collection();
+```
+
+`Keymap::select_kind` maps modifiers per platform — Command toggles on macOS,
+Control elsewhere, Shift takes a range and wins when both are held. A plain
+click and a toggle move the anchor; a range does **not**, so dragging a
+Shift-click up and down grows and shrinks one range instead of ratcheting.
+
+Keyboard range-extend (Shift+Arrow) is not implemented.
+
+### 5.5 Layers
 
 Popups, menus and tooltips draw above everything and are laid out in their own
 pass. `ui.popup`, `ui.layer`, `ui.overlay`, `ui.tooltip`, `ui.context_menu`.
 `ui.any_popup_open()` tells you whether to suppress your own shortcuts.
 
-### 5.4 Canvases
+### 5.6 Canvases
 
 `ui.canvas` gives a pan/zoom transform for a node graph, a timeline, a
 schematic. Widgets inside work in canvas coordinates at any zoom —
 `Response::drag_delta` and `mouse_pos` are already converted.
 
-### 5.5 Drag and drop
+### 5.7 Drag and drop
 
 `DragSource`, `DropZone` and `Payload` handle in-app drags. Files dragged from
 the OS arrive through the host (`libgui_winit::FileDrop` shows the shape).
 
-### 5.6 Custom drawing
+### 5.8 Custom drawing
 
 ```rust
 ui.add_leaf(id, Layout::leaf(Size::Grow(1.0), Size::Fixed(40.0)), Vec2::ZERO, true,
@@ -693,7 +744,81 @@ With no features at all, the core builds with `bytemuck` as its only dependency.
 
 ---
 
-## 14. Limitations
+## 14. Calling from C or C++
+
+`libgui_c` is a separate crate producing a `staticlib` and a `cdylib`, with a
+header at `crates/libgui_c/include/libgui.h`.
+
+It is separate for two reasons. `crate-type` is fixed in the manifest and
+cannot be switched on by a feature, so declaring `staticlib` on `libgui` would
+build one for every Rust-only user forever. And the two make **different
+promises**: libgui's Rust API is pre-1.0 and changes freely, while a C ABI is a
+promise about bytes that a C++ host links against. Different promises need
+different version numbers, and a crate has one.
+
+```c
+#include "libgui.h"
+
+if (libgui_abi_version() != LIBGUI_ABI_VERSION) { /* rebuild one of them */ }
+
+LibguiUi* ui = libgui_ui_new(font_bytes, font_len);
+
+libgui_begin_frame(ui, w, h, scale, dt);
+libgui_open_container(ui, libgui_id_from_name("panel"), layout, frame);
+libgui_heading(ui, "Model");
+libgui_checkbox(ui, "Visible", &visible);
+
+uint8_t was = libgui_open_enabled(ui, has_selection);
+if (libgui_button(ui, "Join").clicked) { join(); }
+libgui_close_enabled(ui, was);
+
+libgui_close_container(ui);
+libgui_end_frame(ui);
+```
+
+**The rules at the boundary:**
+
+- **Nothing panics across it.** Every entry point catches. A `Ui` that panicked
+  is *poisoned*: further calls do nothing and `libgui_ui_poisoned` says so.
+  Tear it down and build a fresh one.
+- **No allocation crosses it.** Strings are `const char*` you own, NUL
+  terminated, UTF-8. Nothing returned needs freeing.
+- **Null is tolerated everywhere.** A null handle, label or out-parameter makes
+  the call do nothing useful and records why in `libgui_last_error`. It does
+  not crash.
+- **Check the ABI version once at start-up.**
+
+### 14.1 How it stays in step with the library
+
+The widget surface is declared **once**, in `src/table.rs`, and the macro emits
+the `extern "C"` functions, the header declarations and a symbol manifest from
+that one input. **Adding a widget is one line**; it cannot be added to one
+output and not the others.
+
+`cargo test -p libgui_c` regenerates the header and fails if the committed one
+is stale (`LIBGUI_WRITE_HEADER=1` updates it).
+
+The hand-written part of the header — the types, the callback vtables, the
+containers — is guarded differently, by `tests/smoke.c`: a C program compiled
+against the committed header and linked to the real static library, which
+`static_assert`s every struct against `libgui_sizeof_*`. Mirrors are where ABI
+bugs hide, and that test prints things like:
+
+```
+FAIL: LibguiResponse is 88 bytes here and 96 in the library
+```
+
+### 14.2 What crosses, and what does not yet
+
+Widgets, containers, scroll areas, the disabled scope, stable ids, custom
+painting (`LibguiPaintFn` — a `paint` callback, a `drop_user` to release what
+it captured, and a `void* user`) and `libgui_interact`.
+
+**Not yet:** docking. `TabViewer` is a Rust trait and needs the same vtable
+treatment as painting — four function pointers and a `void* user`. Nor text
+fields, tables, trees, menus beyond the basics, or drag and drop.
+
+## 15. Limitations
 
 The honest list, as of now.
 
@@ -710,11 +835,13 @@ The honest list, as of now.
 - No colour picker. `plot` is a debug bar chart, not a real line/area chart.
 - No modal/dialog primitive (build one on `ui.popup` / `Layer`).
 - No date picker, no toast/notification.
-- **Disabled state exists only on menu items.** A button, checkbox, slider or
-  field cannot be greyed out.
 - Tables have no 2-D cell cursor; menus have no arrow-key navigation; no
   type-ahead in lists.
-- Trees have no multi-select and no drag-to-reparent.
+- Trees have no drag-to-reparent. Multi-select works (§5.4) but only by
+  pointer: Shift+Arrow does not extend a selection.
+- The C API (§14) covers widgets, containers and custom painting. Docking does
+  not cross it yet: `TabViewer` is a Rust trait and needs a function-pointer
+  vtable like the paint callback has.
 
 ### Text
 

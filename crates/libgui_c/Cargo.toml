@@ -1,0 +1,21 @@
+[package]
+name = "libgui_c"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+# No GPU crate here, so this matches libgui's own floor rather than the
+# workspace's.
+rust-version = "1.87"
+description = "C ABI for libgui, for hosts that are not written in Rust."
+
+[lib]
+# `staticlib` for linking into a C or C++ binary, `cdylib` for loading one at
+# runtime, `lib` so the Rust tests in this crate can drive the same functions
+# the C side sees. This is the reason the C API is its own crate: crate-type is
+# fixed in the manifest and cannot be turned on by a feature, so putting these
+# on `libgui` would build all three for every Rust-only user, forever.
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[dependencies]
+libgui = { path = "../libgui" }

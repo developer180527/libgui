@@ -756,6 +756,42 @@ mod tests {
 /// A macOS app that ships its own preference, or a kiosk that wants Tab to do
 /// nothing at all, builds a [`libgui::FocusPolicy`] by hand instead. Nothing
 /// downstream of this function knows what platform it is on.
+/// Which selection gesture a click with these modifiers means.
+///
+/// The convention is a platform's, not a library's: macOS toggles with Command
+/// and every other desktop with Control, and both take a range with Shift.
+/// Shift wins when both are held, which is what Finder and Explorer both do.
+///
+/// ```no_run
+/// # use libgui::*;
+/// # use libgui_keymap::{select_kind, Platform};
+/// # fn f(ui: &mut Ui, nav_id: Id, i: usize, r: &Response) {
+/// if r.clicked {
+///     let what = ui.select(nav_id, i, select_kind(Platform::current(), &r.modifiers));
+/// }
+/// # }
+/// ```
+pub fn select_kind(platform: Platform, mods: &Modifiers) -> libgui::SelectKind {
+    let toggle = match platform {
+        Platform::Mac => mods.logo,
+        _ => mods.ctrl,
+    };
+    if mods.shift {
+        libgui::SelectKind::Range
+    } else if toggle {
+        libgui::SelectKind::Toggle
+    } else {
+        libgui::SelectKind::Replace
+    }
+}
+
+impl<A: Copy + PartialEq> Keymap<A> {
+    /// [`select_kind`] for the platform this keymap was built for.
+    pub fn select_kind(&self, mods: &Modifiers) -> libgui::SelectKind {
+        select_kind(self.platform, mods)
+    }
+}
+
 pub fn focus_policy(platform: Platform) -> libgui::FocusPolicy {
     match platform {
         Platform::Mac => libgui::FocusPolicy {

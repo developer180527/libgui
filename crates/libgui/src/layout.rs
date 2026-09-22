@@ -201,6 +201,13 @@ pub(crate) struct Node {
     /// A canvas: children are laid out, hit-tested and reported in *canvas*
     /// coordinates, and this maps those to the window.
     pub xform: Option<crate::Transform>,
+    /// Opacity everything this node paints is multiplied by: 1.0 normally,
+    /// [`Metrics::disabled_alpha`](crate::Metrics::disabled_alpha) inside a
+    /// disabled scope.
+    ///
+    /// Every node in a disabled subtree carries the same value and `paint`
+    /// *sets* rather than multiplies, so nesting does not fade twice.
+    pub alpha: f32,
 }
 
 impl Node {
@@ -225,6 +232,7 @@ impl Node {
             absolute: None,
             z: crate::Layer::Window,
             xform: None,
+            alpha: 1.0,
         }
     }
 }

@@ -78,5 +78,5 @@ pub use theme_file::ThemeError;
 #[cfg(feature = "theme-watch")]
 pub use theme_watch::ThemeWatcher;
 pub use text_edit::{TextAreaOptions, TextResponse};
-pub use ui::{CanvasState, CanvasView, Frame, FrameOutput, Layer, LeafOptions, ListOptions, NavOptions, NavResponse, Response, ScrollOptions, Ui};
+pub use ui::{CanvasState, CanvasView, Frame, FrameOutput, Layer, LeafOptions, ListOptions, NavOptions, NavResponse, Response, ScrollOptions, SelectKind, Selection, Ui};
 pub use widgets::{Branch, SplitterOptions, TreeResponse};

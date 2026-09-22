@@ -57,6 +57,10 @@ pub struct Response {
     pub middle_pressed: bool,
     pub scroll: Vec2,
     pub mouse_pos: Vec2,
+    /// Modifiers held this frame. On the frame something was clicked, these
+    /// are the modifiers of that click — which is what a list row needs to
+    /// tell a plain click from a Ctrl-click or a Shift-click.
+    pub modifiers: crate::Modifiers,
     /// Two-finger pinch over this widget: zoom ratio minus 1 (0 = none).
     pub pinch: f32,
     /// Two-finger pan over this widget.
@@ -462,6 +466,37 @@ pub struct FrameOutput<'a> {
 /// fn is_send<T: Send>() {}
 /// is_send::<libgui::Ui>();
 /// ```
+/// What a click should do to a selection. Which modifier produces which of
+/// these is a platform convention and therefore not libgui's to decide —
+/// `libgui_keymap::Keymap::select_kind` maps them, or an app can.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectKind {
+    /// A plain click: this one and nothing else.
+    Replace,
+    /// Ctrl/Cmd-click: add or remove this one, leave the rest.
+    Toggle,
+    /// Shift-click: everything from the anchor to here.
+    Range,
+}
+
+/// What to do to the app's selection, from [`Ui::select`].
+///
+/// libgui does not hold the selection. A CAD model browser selects *bodies*, a
+/// file list selects *paths*, a timeline selects *clips*: the set is the app's,
+/// in the app's own terms. What libgui keeps is the **anchor** — where the
+/// last plain click landed — because that is the piece every application would
+/// otherwise reimplement, and the piece that is easy to get wrong when the
+/// list changes under it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Selection {
+    /// Clear the selection and select this index alone.
+    Only(usize),
+    /// Flip this index; leave everything else.
+    Toggle(usize),
+    /// Clear the selection and select this inclusive range, low end first.
+    Range(std::ops::RangeInclusive<usize>),
+}
+
 /// How a collection's keyboard cursor behaves. See [`Ui::open_collection`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NavOptions {
@@ -626,6 +661,8 @@ pub struct Ui {
     /// `0.0` for a step per edit, or `f64::INFINITY` to coalesce until
     /// something else breaks the run (a newline, a command, a click).
     pub undo_run_pause: f64,
+    /// False inside a disabled scope. Read it with [`Ui::is_enabled`].
+    enabled: bool,
     /// Focus arrived by keyboard, so it is worth drawing a ring. A click moves
     /// focus without one, the way every desktop behaves — a ring that appears
     /// under the mouse is noise.
@@ -656,6 +693,8 @@ pub struct Ui {
     /// not its own focus stop: the collection is the stop, and the arrows move
     /// within it.
     nav_open: Vec<Id>,
+    /// Collection id -> where a range-select extends from. See `Ui::select`.
+    select_anchors: FxMap<Id, usize>,
     /// Collection id -> the container node that shows its focus ring.
     ///
     /// A collection is a focus stop without being a node: it has no rect of
@@ -844,6 +883,7 @@ impl Ui {
             focus_policy: crate::FocusPolicy::default(),
             double_click_time: 0.5,
             undo_run_pause: crate::text_history::DEFAULT_RUN_PAUSE,
+            enabled: true,
             focus_visible: false,
             text_states: FxMap::default(),
             text_history: FxMap::default(),
@@ -856,6 +896,7 @@ impl Ui {
             nav_states: FxMap::default(),
             nav_open: Vec::new(),
             nav_ring: FxMap::default(),
+            select_anchors: FxMap::default(),
             scroll_hits: Vec::new(),
             scroll_target: None,
             dnd: crate::dnd::Dnd::Idle,
@@ -1647,6 +1688,7 @@ impl Ui {
         self.in_scroll.retain(|id, _| seen.contains(id));
         self.nav_states.retain(|id, _| seen.contains(id));
         self.nav_ring.retain(|id, _| seen.contains(id));
+        self.select_anchors.retain(|id, _| seen.contains(id));
         if self.focused.is_some_and(|f| !seen.contains(&f)) {
             self.focused = None;
         }
@@ -1789,6 +1831,14 @@ impl Ui {
     /// than a fact — see [`crate::focus`]. A widget that is not visited still
     /// works with the mouse; it simply never has focus.
     pub fn focusable(&mut self, id: Id, kind: crate::FocusKind) -> crate::KeyResponse {
+        // Not a focus stop, and not somewhere focus may stay: a scope that
+        // switches off while a widget inside it has focus must hand it back.
+        if !self.enabled {
+            if self.focused == Some(id) {
+                self.focused = None;
+            }
+            return crate::KeyResponse::default();
+        }
         // A row built inside an open collection is not a focus stop of its
         // own: the collection is the stop and the arrows move within it, which
         // is what `FocusKind::Collection` has always promised. Without this,
@@ -1891,6 +1941,12 @@ impl Ui {
 
     fn interact_sense(&mut self, id: Id, drag: bool) -> Response {
         let rect = self.rects.get(&id).copied().unwrap_or_default();
+        // A disabled widget reports nothing at all: not hovered, not clicked,
+        // no drag. Resolved here rather than in each widget, so a widget added
+        // later cannot forget to check.
+        if !self.enabled {
+            return Response { id, rect, ..Response::default() };
+        }
         let hovered = self.hovered == Some(id) && (self.active.is_none() || self.active == Some(id));
         if hovered && self.pressed {
             self.active = Some(id);
@@ -1926,6 +1982,7 @@ impl Ui {
             middle_pressed: over_now && self.input.buttons_pressed[PointerButton::Middle.index()],
             scroll: if hovered { self.input.scroll } else { Vec2::ZERO },
             mouse_pos: t.inv_point(self.input.mouse_pos),
+            modifiers: self.input.modifiers,
             pinch: if over { self.gesture.zoom - 1.0 } else { 0.0 },
             pan2: if over { self.gesture.pan } else { Vec2::ZERO },
         }
@@ -2100,8 +2157,14 @@ impl Ui {
         self.animate(id, slot, if on { 1.0 } else { 0.0 })
     }
 
-    fn attach(&mut self, node: Node) -> usize {
+    fn attach(&mut self, mut node: Node) -> usize {
         debug_assert!(!self.stack.is_empty(), "libgui: widget built outside begin_frame/end_frame");
+        // Stamped on every node built in a disabled scope. `paint` *sets* this
+        // rather than multiplying, so a whole subtree carrying the same value
+        // fades once, however deeply it nests.
+        if !self.enabled {
+            node.alpha = self.theme.metrics.disabled_alpha;
+        }
         let idx = self.nodes.len();
         self.nodes.push(node);
         if self.stack.len() <= crate::layout::MAX_DEPTH {
@@ -2681,6 +2744,67 @@ impl Ui {
         r
     }
 
+    /// Turn a click on `index` into a change to the app's selection, keeping
+    /// the anchor a range-select needs.
+    ///
+    /// Multi-select is three rules everyone writes the same way and nobody
+    /// enjoys writing: a plain click replaces, Ctrl/Cmd toggles, Shift takes
+    /// everything from the last plain click to here. The third needs an
+    /// anchor that survives across frames, moves when a plain click or a
+    /// toggle lands, and does *not* move while a range is being dragged out —
+    /// which is the part that is fiddly, so it lives here.
+    ///
+    /// The selection itself stays yours: libgui never learns what a row *is*.
+    ///
+    /// ```no_run
+    /// # use libgui::*;
+    /// # use std::collections::BTreeSet;
+    /// # fn f(ui: &mut Ui, bodies: &[String], picked: &mut BTreeSet<usize>, kind: SelectKind) {
+    /// let nav = ui.open_collection("model", bodies.len());
+    /// for (i, body) in bodies.iter().enumerate() {
+    ///     if ui.selectable_keyed(i, body, picked.contains(&i)).clicked {
+    ///         match ui.select(nav.id, i, kind) {
+    ///             Selection::Only(i) => { picked.clear(); picked.insert(i); }
+    ///             Selection::Toggle(i) => { if !picked.remove(&i) { picked.insert(i); } }
+    ///             Selection::Range(r) => { picked.clear(); picked.extend(r); }
+    ///         }
+    ///     }
+    /// }
+    /// ui.close_collection();
+    /// # }
+    /// ```
+    ///
+    /// `collection` is the id from [`NavResponse`], so the anchor is swept
+    /// with the rest of that collection's state. A list without a collection
+    /// can pass any stable [`Id`] of its own.
+    pub fn select(&mut self, collection: Id, index: usize, kind: SelectKind) -> Selection {
+        match kind {
+            SelectKind::Replace => {
+                self.select_anchors.insert(collection, index);
+                Selection::Only(index)
+            }
+            // A toggle moves the anchor too: the next Shift-click extends from
+            // what was last touched, which is what every file manager does.
+            SelectKind::Toggle => {
+                self.select_anchors.insert(collection, index);
+                Selection::Toggle(index)
+            }
+            // The anchor deliberately does *not* move: dragging a Shift-click
+            // up and down a list has to grow and shrink one range rather than
+            // ratchet a new one from wherever it last was.
+            SelectKind::Range => {
+                let from = self.select_anchors.get(&collection).copied().unwrap_or(index);
+                let (lo, hi) = if from <= index { (from, index) } else { (index, from) };
+                Selection::Range(lo..=hi)
+            }
+        }
+    }
+
+    /// Where a range-select would extend from, if anything has been clicked.
+    pub fn select_anchor(&self, collection: Id) -> Option<usize> {
+        self.select_anchors.get(&collection).copied()
+    }
+
     /// Put the cursor on `index`, so clicking a row leaves the keyboard where
     /// the pointer left off rather than back where it was.
     ///
@@ -2734,6 +2858,59 @@ impl Ui {
     /// ui.close_collection();
     /// # }
     /// ```
+    /// Build widgets that cannot be used and say so by looking it.
+    ///
+    /// A command-enablement model — a ribbon that greys out what does not
+    /// apply to the selection, a panel whose fields are dead until something
+    /// is picked — wants to wrap a group rather than pass a flag to every
+    /// widget in it, so this is a scope:
+    ///
+    /// ```no_run
+    /// # use libgui::*;
+    /// # fn f(ui: &mut Ui, has_selection: bool) {
+    /// ui.enabled(has_selection, |ui| {
+    ///     if ui.button("Join").clicked { /* … */ }
+    ///     if ui.button("Subtract").clicked { /* … */ }
+    /// });
+    /// # }
+    /// ```
+    ///
+    /// Inside, every widget is inert — no hover, no click, no keyboard focus —
+    /// and everything painted is multiplied by
+    /// [`Metrics::disabled_alpha`](crate::Metrics::disabled_alpha). That last
+    /// part happens in the draw list rather than in each widget, so an app's
+    /// own [`Ui::add_leaf`] drawing greys out with the rest without knowing
+    /// that it can.
+    ///
+    /// **Disabling nests one way only.** `ui.enabled(true, …)` inside a
+    /// disabled scope does not re-enable: a group switched off has switched
+    /// off everything in it, and a child claiming otherwise is a bug rather
+    /// than an intent.
+    pub fn enabled<R>(&mut self, enabled: bool, body: impl FnOnce(&mut Self) -> R) -> R {
+        let was = self.open_enabled(enabled);
+        let r = body(self);
+        self.close_enabled(was);
+        r
+    }
+
+    /// [`Ui::enabled`] without a closure, for a binding that cannot hold one.
+    /// Returns what to hand back to [`Ui::close_enabled`].
+    pub fn open_enabled(&mut self, enabled: bool) -> bool {
+        let was = self.enabled;
+        self.enabled &= enabled;
+        was
+    }
+
+    pub fn close_enabled(&mut self, was: bool) {
+        self.enabled = was;
+    }
+
+    /// Whether widgets built now can be used. False inside
+    /// [`Ui::enabled`]`(false, …)`.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
     pub fn scroll_to(&mut self, id: Id) {
         // The area this call sits inside, if any, and otherwise the one the
         // widget was last built in — which is what a caller outside the area
@@ -3230,6 +3407,11 @@ fn paint(
     if let Some(snap) = snap_text {
         p.draw.push_snap_text(snap);
     }
+    // Set rather than multiply: every node in a disabled subtree carries the
+    // same alpha, so nesting a disabled group inside another does not fade it
+    // twice. Restored below, after this node's children.
+    let saved_alpha = p.draw.alpha;
+    p.draw.alpha = nodes[i].alpha;
     if let Some(f) = nodes[i].paint.take() {
         paints.run(f, p, rect);
     }
@@ -3291,6 +3473,7 @@ fn paint(
     if clip {
         p.draw.pop_clip();
     }
+    p.draw.alpha = saved_alpha;
     if let Some((first, marks)) = rec {
         // Where this recording's copies start in the arenas — taken *here*,
         // not when the subtree opened. A `cached` subtree nested inside this

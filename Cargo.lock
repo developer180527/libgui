@@ -802,6 +802,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "libgui_c"
+version = "0.1.0"
+dependencies = [
+ "libgui",
+]
+
+[[package]]
 name = "libgui_cut"
 version = "0.1.0"
 dependencies = [

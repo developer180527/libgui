@@ -39,7 +39,6 @@ pub struct Batch {
     pub range: Range<u32>,
 }
 
-#[derive(Default)]
 pub struct DrawList {
     pub instances: Vec<Instance>,
     pub batches: Vec<Batch>,
@@ -48,6 +47,9 @@ pub struct DrawList {
     /// goes through here is mapped, so nothing can draw untransformed by
     /// accident.
     xforms: Vec<Transform>,
+    /// Opacity every instance's colour is multiplied by, set by `paint` from
+    /// the node it is drawing. See `Node::alpha`.
+    pub(crate) alpha: f32,
     /// Text pixel-snapping, innermost last. Off inside a scroll area that is
     /// moving, so its text tracks the sub-pixel offset instead of shearing
     /// against the row boxes it sits in.
@@ -66,8 +68,29 @@ pub struct DrawList {
     culled_log: Vec<(u32, TextureId, Instance, Rect)>,
 }
 
+impl Default for DrawList {
+    /// Hand-written rather than derived because `alpha` is the one field whose
+    /// zero value is wrong: a derived `Default` would start fully transparent
+    /// and the whole UI would draw nothing.
+    fn default() -> Self {
+        Self {
+            instances: Vec::new(),
+            batches: Vec::new(),
+            clips: Vec::new(),
+            xforms: Vec::new(),
+            alpha: 1.0,
+            snap_text: Vec::new(),
+            inner_clips: Vec::new(),
+            inner_log: Vec::new(),
+            culled_log: Vec::new(),
+            barrier: 0,
+        }
+    }
+}
+
 impl DrawList {
     pub(crate) fn clear(&mut self, screen: Rect) {
+        self.alpha = 1.0;
         self.instances.clear();
         self.batches.clear();
         self.clips.clear();
@@ -195,6 +218,14 @@ impl DrawList {
     }
 
     fn push(&mut self, texture: TextureId, bounds: Rect, mut inst: Instance) {
+        // One place for the whole library's opacity, so a disabled scope fades
+        // an app's own `add_leaf` painting exactly as it fades a button. The
+        // colours here are straight, not premultiplied — the shader does that
+        // — so scaling alpha alone is the whole of it.
+        if self.alpha < 1.0 {
+            inst.color[3] *= self.alpha;
+            inst.border_color[3] *= self.alpha;
+        }
         let clip = self.clip();
         if clip.intersect(&bounds).is_none() {
             // Culling is a property of where the content *is*, so a recording

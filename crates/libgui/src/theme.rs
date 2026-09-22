@@ -87,6 +87,10 @@ pub struct Metrics {
     pub font_size_heading: f32,
     /// Exponential approach rate for hover/press animations (1/s).
     pub anim_speed: f32,
+    /// Opacity of a widget inside a disabled scope. Everything it paints is
+    /// multiplied by this, including an app's own `add_leaf` drawing, so a
+    /// custom widget greys out with the rest without knowing it can.
+    pub disabled_alpha: f32,
     /// Thickness of the keyboard focus ring.
     pub focus_ring_width: f32,
 }
@@ -108,6 +112,7 @@ impl Metrics {
                 font_size_heading: 13.5,
                 focus_ring_width: 2.0,
                 anim_speed: 20.0,
+                disabled_alpha: 0.38,
             },
             Density::Regular => Self {
                 radius: 6.0,
@@ -122,6 +127,7 @@ impl Metrics {
                 font_size_heading: 15.0,
                 focus_ring_width: 2.0,
                 anim_speed: 18.0,
+                disabled_alpha: 0.38,
             },
             Density::Touch => Self {
                 radius: 10.0,
@@ -136,6 +142,7 @@ impl Metrics {
                 font_size_heading: 19.0,
                 focus_ring_width: 2.0,
                 anim_speed: 16.0,
+                disabled_alpha: 0.38,
             },
         }
     }
