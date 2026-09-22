@@ -639,6 +639,15 @@ pub struct Ui {
     pub(crate) ime_rect: Option<Rect>,
     // Scrolling
     scroll_states: FxMap<Id, ScrollState>,
+    /// Scroll areas currently open, innermost last.
+    scroll_stack: Vec<Id>,
+    /// Focusable widget -> the innermost scroll area it was built in. Kept
+    /// across frames, because focus moves at the *end* of a frame, when every
+    /// scroll area has already closed and the stack says nothing.
+    in_scroll: FxMap<Id, Id>,
+    /// "Bring this widget into view": (scroll area, widget). Served at the top
+    /// of the area's next frame, where its state and both rects are to hand.
+    scroll_requests: Vec<(Id, Id)>,
     // Keyboard navigation inside a collection
     /// Where the keyboard cursor sits in each collection, by the collection's
     /// own id. Swept with the rest when the collection stops being built.
@@ -841,6 +850,9 @@ impl Ui {
             copied: None,
             ime_rect: None,
             scroll_states: FxMap::default(),
+            scroll_stack: Vec::new(),
+            in_scroll: FxMap::default(),
+            scroll_requests: Vec::new(),
             nav_states: FxMap::default(),
             nav_open: Vec::new(),
             nav_ring: FxMap::default(),
@@ -1613,7 +1625,13 @@ impl Ui {
                     (None, false) => 0,
                     (None, true) => n - 1,
                 };
-                self.focused = Some(order[next]);
+                let to = order[next];
+                self.focused = Some(to);
+                // Focus that cannot be seen is not focus. Tabbing into a form
+                // taller than its viewport used to leave the ring drawn
+                // somewhere off screen, which makes any such form unusable
+                // from the keyboard.
+                self.scroll_to(to);
             }
         }
 
@@ -1626,6 +1644,7 @@ impl Ui {
         self.text_states.retain(|id, _| seen.contains(id));
         self.text_history.retain(|id, _| seen.contains(id));
         self.scroll_states.retain(|id, _| seen.contains(id));
+        self.in_scroll.retain(|id, _| seen.contains(id));
         self.nav_states.retain(|id, _| seen.contains(id));
         self.nav_ring.retain(|id, _| seen.contains(id));
         if self.focused.is_some_and(|f| !seen.contains(&f)) {
@@ -1788,6 +1807,12 @@ impl Ui {
             return crate::KeyResponse::default();
         }
         self.focus_order.push(id);
+        // Which area would have to move to show this widget. Recorded here
+        // rather than looked up later: by the time focus moves, at the end of
+        // the frame, every scroll area has closed.
+        if let Some(&area) = self.scroll_stack.last() {
+            self.in_scroll.insert(id, area);
+        }
         let focused = self.focused == Some(id);
         if !focused {
             return crate::KeyResponse::default();
@@ -2099,6 +2124,11 @@ impl Ui {
     /// inside it took its own children off the top before this point.
     fn close(&mut self) {
         let (i, mark) = self.stack.pop().expect("libgui: unbalanced containers");
+        // A scroll area leaves the stack whichever way it was closed: the
+        // closure form and the open/close pair both land here.
+        if self.nodes[i].scroll.is_some() {
+            self.scroll_stack.pop();
+        }
         let start = self.kids.len() as u32;
         self.kids.extend_from_slice(&self.open_kids[mark as usize..]);
         self.open_kids.truncate(mark as usize);
@@ -2680,6 +2710,41 @@ impl Ui {
         }
     }
 
+    /// Scroll whatever area contains `id` until that widget is visible.
+    ///
+    /// Served at the top of that area's next frame, so it composes with this
+    /// frame's wheel and drag rather than fighting them, and it eases like any
+    /// other scroll. Nothing happens if the widget is already visible, if it
+    /// is not inside a scroll area, or if it has not been laid out yet.
+    ///
+    /// Focus already does this for itself — see [`Ui::focusable`]. Call it by
+    /// hand for a *cursor* the library does not own: the current row of an
+    /// [`Ui::open_collection`], a search hit, a node the app selected in code.
+    ///
+    /// ```no_run
+    /// # use libgui::*;
+    /// # fn f(ui: &mut Ui, rows: &[String]) {
+    /// let nav = ui.open_collection("hierarchy", rows.len());
+    /// for (i, row) in rows.iter().enumerate() {
+    ///     let r = ui.selectable_keyed(i, row, nav.cursor == i);
+    ///     if nav.moved && nav.cursor == i {
+    ///         ui.scroll_to(r.id); // keep the keyboard cursor on screen
+    ///     }
+    /// }
+    /// ui.close_collection();
+    /// # }
+    /// ```
+    pub fn scroll_to(&mut self, id: Id) {
+        // The area this call sits inside, if any, and otherwise the one the
+        // widget was last built in — which is what a caller outside the area
+        // means, and what a focus change has to rely on.
+        let area = self.scroll_stack.last().copied().or_else(|| self.in_scroll.get(&id).copied());
+        if let Some(area) = area {
+            self.scroll_requests.retain(|&(a, _)| a != area);
+            self.scroll_requests.push((area, id));
+        }
+    }
+
     pub fn open_scroll_area(&mut self, key: &str) {
         let gap = self.theme.metrics.space;
         let opts = ScrollOptions { gap, ..ScrollOptions::new(Size::Grow(1.0)) };
@@ -2698,6 +2763,14 @@ impl Ui {
         self.mark_seen(bar_y);
         self.mark_seen(bar_x);
         let mut st = self.scroll_states.get(&id).copied().unwrap_or_default();
+        // A pending "bring this into view", served before this frame's input
+        // so a wheel notch in the same frame still wins.
+        if let Some(i) = self.scroll_requests.iter().position(|&(a, _)| a == id) {
+            let (_, want) = self.scroll_requests.remove(i);
+            if let (Some(w), Some(v)) = (self.rects.get(&want).copied(), self.rects.get(&id).copied()) {
+                bring_into_view(&mut st, w, v, opts);
+            }
+        }
         let at_end = st.y.target >= st.y.max() - 1.0;
 
         let inside = self.scroll_target == Some(id);
@@ -2780,6 +2853,7 @@ impl Ui {
             .height(opts.height)
             .gap(opts.gap)
             .padding(opts.padding);
+        self.scroll_stack.push(id);
         let mut n = Node::new(id, layout);
         n.clip = true;
         n.scroll = Some(Scroll {
@@ -3284,6 +3358,45 @@ fn paint(
 
 /// Drag or click a scrollbar track. Direct manipulation: the thumb tracks the
 /// pointer exactly, whatever smoothing the config asks of the wheel.
+/// Move `st` so that `want` (a widget's rect from the last layout) falls
+/// inside `view` (the scroll area's own rect).
+///
+/// Both rects are in window coordinates, so the widget's position already has
+/// the current offset in it: the distance it overshoots an edge by *is* the
+/// amount to scroll, which is why this needs no content coordinates.
+///
+/// Nothing happens when the widget is already visible. A widget taller than
+/// the viewport is aligned to its leading edge rather than centred, so a tall
+/// row scrolled to shows its beginning.
+fn bring_into_view(st: &mut ScrollState, want: Rect, view: Rect, opts: ScrollOptions) {
+    /// A little air, so a row scrolled to does not sit flush against the edge
+    /// and look clipped.
+    const MARGIN: f32 = 4.0;
+
+    fn axis(a: &mut ScrollAxis, lo: f32, size: f32, view_lo: f32, view_size: f32) {
+        // Measured from where the target already is, not from where the offset
+        // has eased to, so two requests in quick succession compose instead of
+        // fighting each other.
+        let pending = a.target - a.offset;
+        let (lo, hi) = (lo - view_lo - MARGIN, lo + size - view_lo + MARGIN);
+        let delta = if hi - lo >= view_size || lo < 0.0 {
+            // Before the leading edge, or too big to fit: align its start.
+            lo
+        } else if hi > view_size {
+            hi - view_size
+        } else {
+            return; // already visible
+        };
+        a.target = (a.offset + pending + delta).clamp(0.0, a.max());
+    }
+    if opts.scroll_y {
+        axis(&mut st.y, want.y, want.h, view.y, view.h);
+    }
+    if opts.scroll_x {
+        axis(&mut st.x, want.x, want.w, view.x, view.w);
+    }
+}
+
 fn drag_bar(st: &mut ScrollAxis, bar: &Response, axis: Axis) {
     let max = st.max();
     let (track_len, track_start, pointer) = match axis {

@@ -1500,7 +1500,10 @@ lag, fling, easing) stay as frame-trace tests like
    0.5 s in the repaint hint, and a boundary test that catches the next private constant before an
    audit has to.
 10. **Accessibility** via AccessKit: emit a node per interactive widget from the same tree — now
-   unblocked, since it needs a focus order to describe.
+   unblocked, since it needs a focus order to describe, and since focus now scrolls itself into
+   view (`Ui::scroll_to`), without which a screen reader would announce a control nobody can see.
+   This is the gate on shipping to consumers: the European Accessibility Act has applied since
+   June 2025, and enterprise procurement asks for a VPAT.
 11. ~~**Perf**: a "sleep when idle" mode instead of redrawing continuously~~ ✅
    `repaint_after` for hosts that draw only the UI, `Ui::needs_frame` +
    `Backend::render_batches` for hosts that redraw anyway, `ui.cached` for a
@@ -1532,8 +1535,8 @@ lag, fling, easing) stay as frame-trace tests like
 - Only menu items have a disabled state. A button, checkbox, slider or field cannot be greyed out.
 - Keyboard navigation inside a collection covers a one-dimensional cursor (`Ui::open_collection`),
   which is what a list and a tree need. A table's 2-D cell cursor, the arrows inside an open menu,
-  and type-ahead ("jump to the row starting with d") are not there. Nor is scrolling the cursor
-  into view: a collection inside a scroll area does not follow its own cursor yet.
+  and type-ahead ("jump to the row starting with d") are not there. A collection does not follow
+  its own cursor either — call `Ui::scroll_to` on the cursor row; focus does it for itself.
 - The theme names a single face, so no separate UI/mono/icon fonts. `FontStack` covers *fallback*
   (a missing script), not *roles*.
 - Which fonts fill the chain is the host's problem: libgui bundles only Inter and will not go
