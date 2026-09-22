@@ -10,6 +10,10 @@ cargo test -p libgui                         # layout + backend-contract tests
 cargo run -p libgui_shaders -- shaders_out   # export HLSL/MSL/GLSL/SPIR-V/WGSL
 ```
 
+See [`MANUAL.md`](MANUAL.md) for how an application drives the library:
+the frame loop, the host contract, multiple windows, and what every public API
+expects of you.
+
 ## Status
 
 | | |
