@@ -979,6 +979,119 @@ impl Ui {
         });
         resp
     }
+
+    /// A draggable divider that resizes a pane, outside the dock.
+    ///
+    /// The dock has its own splitters, but a UI that is not docked — three
+    /// fixed panels around a viewport, a sidebar, an inspector — has no way to
+    /// let the user move the boundary. This is that: a thin handle that moves
+    /// one number, in logical px, which the caller then feeds back into a
+    /// [`Size::Fixed`] on whatever it sizes.
+    ///
+    /// ```no_run
+    /// # use libgui::*;
+    /// # fn f(ui: &mut Ui, inspector_w: &mut f32) {
+    /// // An inspector docked to the RIGHT: its handle is on its leading edge,
+    /// // so dragging left must make it *wider*. That is what `inverted` is.
+    /// let opts = SplitterOptions::vertical_rule(180.0, 520.0).inverted();
+    /// if ui.splitter("inspector", inspector_w, opts).double_clicked {
+    ///     *inspector_w = 280.0;
+    /// }
+    /// # }
+    /// ```
+    ///
+    /// Returns the [`Response`], so a double click resets the pane to whatever
+    /// the app thinks its default is. libgui does not pick that default: a
+    /// widget that silently restored a number it invented would be policy.
+    pub fn splitter(&mut self, key: &str, value: &mut f32, opts: SplitterOptions) -> Response {
+        let id = self.make_id(("splitter", key));
+        // The handle is laid out *after* the pane it sizes, so it must survive
+        // a frame in which the pane's own id changes; the dock's splitter does
+        // the same.
+        self.keep_id(id);
+        let resp = self.interact_drag(id);
+        if resp.active {
+            let d = match opts.axis {
+                // A vertical rule is dragged horizontally: the axis names the
+                // rule's own direction, the way a person describes the line
+                // they see, not the direction it travels.
+                Axis::Y => resp.drag_delta.x,
+                Axis::X => resp.drag_delta.y,
+            };
+            let d = if opts.invert { -d } else { d };
+            let (lo, hi) = opts.range;
+            // `min` before `max`: an inverted range would otherwise clamp to
+            // the wrong end and the pane would jump across the window.
+            *value = (*value + d).clamp(lo.min(hi), lo.max(hi));
+        }
+        if resp.hovered || resp.active {
+            self.cursor = match opts.axis {
+                Axis::Y => Cursor::ResizeHorizontal,
+                Axis::X => Cursor::ResizeVertical,
+            };
+        }
+        let hot = self.animate_bool(id, 0, resp.hovered || resp.active);
+        let style = self.theme.splitter;
+        let axis = opts.axis;
+        let layout = match axis {
+            Axis::Y => Layout::leaf(Size::Fixed(style.size), Size::Grow(1.0)),
+            Axis::X => Layout::leaf(Size::Grow(1.0), Size::Fixed(style.size)),
+        };
+        // The visible rule is thin and the grab area is not: a 4 px line is
+        // hard to hit and a person aiming at it misses low as often as high.
+        let leaf = crate::LeafOptions { interactive: true, hit_pad: opts.hit_pad, hit_top: true };
+        self.add_leaf_ex(id, layout, Vec2::ZERO, leaf, move |p, r| {
+            if hot > 0.01 {
+                let line = match axis {
+                    Axis::Y => Rect::new(r.center().x - 1.0, r.y, 2.0, r.h),
+                    Axis::X => Rect::new(r.x, r.center().y - 1.0, r.w, 2.0),
+                };
+                p.rect(line, style.line_hover.with_alpha(style.line_hover.a * hot), 1.0);
+            }
+        });
+        resp
+    }
+}
+
+/// How a [`Ui::splitter`] behaves. See that method.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SplitterOptions {
+    /// The direction of the *rule itself*: [`Axis::Y`] is a vertical line
+    /// between two side-by-side panes, dragged horizontally.
+    pub axis: Axis,
+    /// Smallest and largest the value may become, logical px.
+    pub range: (f32, f32),
+    /// The value grows as the pointer moves *against* the drag direction, for
+    /// a pane whose handle is on its leading edge: an inspector docked right,
+    /// or a console docked to the bottom. Without it, dragging the inspector's
+    /// left edge to the left makes it narrower, which is backwards.
+    pub invert: bool,
+    /// Extra grab area on each side of the visible rule, logical px.
+    pub hit_pad: f32,
+}
+
+impl SplitterOptions {
+    /// A vertical rule between two side-by-side panes, dragged horizontally.
+    pub fn vertical_rule(min: f32, max: f32) -> Self {
+        Self { axis: Axis::Y, range: (min, max), invert: false, hit_pad: 3.0 }
+    }
+
+    /// A horizontal rule between two stacked panes, dragged vertically.
+    pub fn horizontal_rule(min: f32, max: f32) -> Self {
+        Self { axis: Axis::X, range: (min, max), invert: false, hit_pad: 3.0 }
+    }
+
+    /// For a pane whose handle is on its leading edge: docked right, or
+    /// docked to the bottom. See [`SplitterOptions::invert`].
+    pub fn inverted(mut self) -> Self {
+        self.invert = true;
+        self
+    }
+
+    pub fn hit_pad(mut self, pad: f32) -> Self {
+        self.hit_pad = pad;
+        self
+    }
 }
 
 #[cfg(test)]

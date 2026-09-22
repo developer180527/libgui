@@ -33,7 +33,7 @@
 //! HID) can skip this crate: build a [`KeyBindings`] by hand, or push
 //! [`libgui::InputEvent::Action`]s directly.
 
-use libgui::{Key, KeyBindings, Modifiers, Motion, Shortcut, Ui, UiAction};
+use libgui::{Key, KeyBindings, Modifiers, Motion, Nav, Shortcut, Ui, UiAction};
 
 /// Whose conventions to follow.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -177,6 +177,22 @@ pub fn ui_bindings(platform: Platform) -> KeyBindings {
     act(&mut b, Chord::key(Escape), UiAction::Cancel);
     act(&mut b, Chord::key(Tab), UiAction::FocusNext);
     act(&mut b, Chord::key(Tab).shift(), UiAction::FocusPrevious);
+
+    // The arrows drive a list, tree or table cursor as well as a caret. The
+    // same chord is deliberately bound twice: only one of a text field and a
+    // collection can have focus, so each takes the action it understands and
+    // the other is dropped. See `KeyBindings::bind`.
+    let nav = |b: &mut KeyBindings, c: Chord, n: Nav| {
+        b.bind(p(c), UiAction::Navigate(n));
+    };
+    nav(&mut b, Chord::key(ArrowDown), Nav::Next);
+    nav(&mut b, Chord::key(ArrowUp), Nav::Previous);
+    nav(&mut b, Chord::key(ArrowRight), Nav::Expand);
+    nav(&mut b, Chord::key(ArrowLeft), Nav::Collapse);
+    nav(&mut b, Chord::key(Home), Nav::First);
+    nav(&mut b, Chord::key(End), Nav::Last);
+    nav(&mut b, Chord::key(PageDown), Nav::PageNext);
+    nav(&mut b, Chord::key(PageUp), Nav::PagePrevious);
 
     match platform {
         Platform::Mac => {
@@ -523,16 +539,56 @@ mod tests {
         assert_eq!(Chord::key(Key::A).ctrl().resolve(Platform::Mac), Shortcut::plain(Key::A).ctrl());
     }
 
-    /// A chord bound twice in one platform's table would silently lose one
-    /// of its actions.
+    /// Which consumer would take an action: a focused text field, or a
+    /// focused collection. One chord may serve both — Down moves a caret and
+    /// moves a list cursor — because only one of them can have focus.
+    fn consumer(a: UiAction) -> &'static str {
+        match a {
+            UiAction::Navigate(_) => "collection",
+            _ => "widget",
+        }
+    }
+
+    /// A chord bound twice **for the same consumer** would silently lose one
+    /// of its actions: the focused widget takes the first and never sees the
+    /// second. Binding one chord to a caret motion *and* a navigation is the
+    /// deliberate case and is allowed.
     #[test]
-    fn no_platform_binds_a_chord_twice() {
+    fn no_platform_binds_a_chord_twice_for_one_consumer() {
         for p in ALL {
             let b = ui_bindings(p);
-            let chords: Vec<Shortcut> = b.iter().map(|(s, _)| s).collect();
-            for (i, c) in chords.iter().enumerate() {
-                assert!(!chords[..i].contains(c), "{p:?}: {} bound twice", format(*c, p));
+            let seen: Vec<(Shortcut, &str)> = b.iter().map(|(s, a)| (s, consumer(a))).collect();
+            for (i, c) in seen.iter().enumerate() {
+                assert!(!seen[..i].contains(c), "{p:?}: {} bound twice for the {}", format(c.0, p), c.1);
             }
+        }
+    }
+
+    /// The arrows reach a list on every platform, and still reach a caret.
+    /// Losing either half is the kind of thing that only shows up when
+    /// someone tries to use the app without a mouse.
+    #[test]
+    fn the_arrows_drive_both_a_caret_and_a_cursor() {
+        for p in ALL {
+            let b = ui_bindings(p);
+            let plain = Modifiers::default();
+            let all = |k: Key| -> Vec<UiAction> { b.resolve_all(k, &plain).collect() };
+            for (key, nav, motion) in [
+                (Key::ArrowDown, Nav::Next, Motion::Down),
+                (Key::ArrowUp, Nav::Previous, Motion::Up),
+                (Key::ArrowRight, Nav::Expand, Motion::Right),
+                (Key::ArrowLeft, Nav::Collapse, Motion::Left),
+            ] {
+                let acts = all(key);
+                assert!(acts.contains(&UiAction::Navigate(nav)), "{p:?}: {key:?} does not move a list cursor");
+                assert!(
+                    acts.contains(&UiAction::Move { motion, select: false }),
+                    "{p:?}: {key:?} stopped moving a caret"
+                );
+            }
+            assert!(all(Key::PageDown).contains(&UiAction::Navigate(Nav::PageNext)));
+            assert!(all(Key::Home).contains(&UiAction::Navigate(Nav::First)));
+            assert!(all(Key::End).contains(&UiAction::Navigate(Nav::Last)));
         }
     }
 

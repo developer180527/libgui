@@ -462,6 +462,54 @@ pub struct FrameOutput<'a> {
 /// fn is_send<T: Send>() {}
 /// is_send::<libgui::Ui>();
 /// ```
+/// How a collection's keyboard cursor behaves. See [`Ui::open_collection`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NavOptions {
+    /// How many items there are. The cursor is clamped into it, so a list that
+    /// shrinks under the cursor does not leave it pointing past the end.
+    pub len: usize,
+    /// How far [`Nav::PageNext`](crate::Nav::PageNext) jumps. The collection
+    /// knows this and the keymap does not: a screenful is however many rows
+    /// are actually on screen.
+    pub page: usize,
+    /// The cursor runs off the end back to the start. Off by default: in a
+    /// long list it is disorienting, and it is the wrong behaviour for a tree.
+    /// A combo or a short menu usually wants it on.
+    pub wrap: bool,
+}
+
+impl Default for NavOptions {
+    fn default() -> Self {
+        Self { len: 0, page: 10, wrap: false }
+    }
+}
+
+/// Where a collection's keyboard cursor is, and what the keyboard just did to
+/// it. See [`Ui::open_collection`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NavResponse {
+    /// The collection's own id, for [`Ui::cursor_at`].
+    pub id: Id,
+    /// Which item the keyboard is on. Always a valid index while the
+    /// collection is non-empty; 0 when it is empty.
+    pub cursor: usize,
+    /// The cursor changed this frame. A list that follows its cursor assigns
+    /// on this rather than every frame, so the pointer can select a different
+    /// row than the keyboard is resting on.
+    pub moved: bool,
+    /// The collection has keyboard focus.
+    pub focused: bool,
+    /// Activated from the keyboard (Enter) while focused: open the cursor's
+    /// item, the way a double click would.
+    pub activated: bool,
+    /// [`Nav::Expand`](crate::Nav::Expand) on the cursor — a tree's Right.
+    /// Nothing in libgui knows your tree's shape, so this is reported and not
+    /// acted on.
+    pub expand: bool,
+    /// [`Nav::Collapse`](crate::Nav::Collapse) — a tree's Left.
+    pub collapse: bool,
+}
+
 pub struct Ui {
     pub theme: Theme,
     pub fonts: Fonts,
@@ -575,6 +623,22 @@ pub struct Ui {
     pub(crate) ime_rect: Option<Rect>,
     // Scrolling
     scroll_states: FxMap<Id, ScrollState>,
+    // Keyboard navigation inside a collection
+    /// Where the keyboard cursor sits in each collection, by the collection's
+    /// own id. Swept with the rest when the collection stops being built.
+    nav_states: FxMap<Id, usize>,
+    /// Collections currently open, innermost last. A row built inside one is
+    /// not its own focus stop: the collection is the stop, and the arrows move
+    /// within it.
+    nav_open: Vec<Id>,
+    /// Collection id -> the container node that shows its focus ring.
+    ///
+    /// A collection is a focus stop without being a node: it has no rect of
+    /// its own, so the ring — which `paint` draws around the focused *node* —
+    /// had nowhere to go, and tabbing onto a list lit nothing up. It borrows
+    /// the ring of the container it was opened in, which is the rect a person
+    /// would call "the list" anyway.
+    nav_ring: FxMap<Id, Id>,
     // Drag and drop
     pub(crate) dnd: crate::dnd::Dnd,
     /// Zones that accepted the current drag, in paint order; the innermost one
@@ -759,6 +823,9 @@ impl Ui {
             copied: None,
             ime_rect: None,
             scroll_states: FxMap::default(),
+            nav_states: FxMap::default(),
+            nav_open: Vec::new(),
+            nav_ring: FxMap::default(),
             scroll_hits: Vec::new(),
             scroll_target: None,
             dnd: crate::dnd::Dnd::Idle,
@@ -1471,7 +1538,12 @@ impl Ui {
             offscreen: 0,
         };
         let t = crate::profile::Clock::start();
-        let focus_ring = self.focus_visible.then_some(self.focused).flatten();
+        // A focused collection shows its ring on the container it lives in.
+        let focus_ring = self
+            .focus_visible
+            .then_some(self.focused)
+            .flatten()
+            .map(|id| self.nav_ring.get(&id).copied().unwrap_or(id));
         paint(&mut self.nodes, &self.kids, 0, &mut painter, &mut sink, &mut self.scratch, &mut self.paints, &mut self.cache, focus_ring);
         for overlay in self.overlays.drain(..) {
             overlay(&mut painter);
@@ -1535,6 +1607,8 @@ impl Ui {
         self.text_states.retain(|id, _| seen.contains(id));
         self.text_history.retain(|id, _| seen.contains(id));
         self.scroll_states.retain(|id, _| seen.contains(id));
+        self.nav_states.retain(|id, _| seen.contains(id));
+        self.nav_ring.retain(|id, _| seen.contains(id));
         if self.focused.is_some_and(|f| !seen.contains(&f)) {
             self.focused = None;
         }
@@ -1677,6 +1751,16 @@ impl Ui {
     /// than a fact — see [`crate::focus`]. A widget that is not visited still
     /// works with the mouse; it simply never has focus.
     pub fn focusable(&mut self, id: Id, kind: crate::FocusKind) -> crate::KeyResponse {
+        // A row built inside an open collection is not a focus stop of its
+        // own: the collection is the stop and the arrows move within it, which
+        // is what `FocusKind::Collection` has always promised. Without this,
+        // Tab walks every row of a thousand-row list one at a time.
+        if kind == crate::FocusKind::Collection && !self.nav_open.is_empty() {
+            if self.focused == Some(id) {
+                self.focused = self.nav_open.last().copied();
+            }
+            return crate::KeyResponse::default();
+        }
         if !self.focus_policy.accepts(kind) {
             // Focus must not be left on something the policy no longer visits.
             if self.focused == Some(id) {
@@ -2427,6 +2511,150 @@ impl Ui {
     /// Open a scroll area without a closure, for a binding that cannot hold
     /// one. Close it with [`Ui::close_scroll_area`]; the same rules as
     /// [`Ui::open_container`] apply.
+    /// Give a list, tree or table's rows a **keyboard cursor**, and make the
+    /// whole thing one focus stop instead of one per row.
+    ///
+    /// Tab moves focus *between* widgets. This is the other half, which libgui
+    /// did not have: moving *within* one. A hierarchy panel you cannot arrow
+    /// through is the first thing a keyboard user — and any user of a
+    /// professional tool — reaches for and does not find.
+    ///
+    /// The cursor is an index, kept per collection id and swept when the
+    /// collection stops being built. The rows are built between this call and
+    /// [`Ui::close_collection`]; each row compares its own index against
+    /// `cursor` to draw itself as the current one.
+    ///
+    /// ```no_run
+    /// # use libgui::*;
+    /// # fn f(ui: &mut Ui, names: &[String], selected: &mut usize) {
+    /// let nav = ui.open_collection("hierarchy", names.len());
+    /// if nav.moved {
+    ///     *selected = nav.cursor; // this list follows the cursor; a
+    /// }                           // multi-select one would not
+    /// for (i, name) in names.iter().enumerate() {
+    ///     if ui.selectable_keyed(i, name, *selected == i).clicked {
+    ///         *selected = i;
+    ///         ui.set_cursor(nav.id, i); // clicking moves the cursor too
+    ///     }
+    /// }
+    /// ui.close_collection();
+    /// # }
+    /// ```
+    ///
+    /// Which key moves the cursor is not libgui's business — the arrows are
+    /// bound to [`UiAction::Navigate`] by the keymap, and a host with a
+    /// gamepad or a jog wheel sends the action directly.
+    pub fn open_collection(&mut self, key: &str, len: usize) -> NavResponse {
+        self.open_collection_with(key, NavOptions { len, ..Default::default() })
+    }
+
+    /// [`Ui::open_collection`] with a page size and wrapping. See
+    /// [`NavOptions`].
+    pub fn open_collection_with(&mut self, key: &str, opts: NavOptions) -> NavResponse {
+        let id = self.make_id(("collection", key));
+        self.keep_id(id);
+        // Lend the ring to the enclosing container, which is the rect a person
+        // would point at and call "the list".
+        let container = self.nodes[self.stack.last().expect("libgui: collection built outside a frame").0].id;
+        self.nav_ring.insert(id, container);
+        // The focus stop is resolved *before* the collection opens, or it
+        // would swallow its own focusability along with its rows'.
+        let k = self.focusable(id, crate::FocusKind::Collection);
+        self.nav_open.push(id);
+
+        let len = opts.len;
+        // An empty collection still has a cursor, so adding the first row does
+        // not move it from somewhere surprising.
+        let mut cursor = self.nav_states.get(&id).copied().unwrap_or(0);
+        cursor = cursor.min(len.saturating_sub(1));
+        let before = cursor;
+        let mut expand = false;
+        let mut collapse = false;
+
+        if k.focused && len > 0 {
+            let page = opts.page.max(1);
+            // Every pending Navigate is taken, not just the first: a key held
+            // down delivers several in a frame, and dropping them makes a long
+            // list feel like it is fighting the hand holding the key.
+            while let Some(nav) = self.take_nav() {
+                let step = |c: usize, d: isize| -> usize {
+                    let n = len as isize;
+                    let t = c as isize + d;
+                    if opts.wrap {
+                        t.rem_euclid(n) as usize
+                    } else {
+                        t.clamp(0, n - 1) as usize
+                    }
+                };
+                match nav {
+                    crate::Nav::Next => cursor = step(cursor, 1),
+                    crate::Nav::Previous => cursor = step(cursor, -1),
+                    crate::Nav::First => cursor = 0,
+                    crate::Nav::Last => cursor = len - 1,
+                    // A page never wraps, whatever `wrap` says: landing at the
+                    // far end of a list because a page overshot by two is not
+                    // what the key means.
+                    crate::Nav::PageNext => cursor = (cursor + page).min(len - 1),
+                    crate::Nav::PagePrevious => cursor = cursor.saturating_sub(page),
+                    crate::Nav::Expand => expand = true,
+                    crate::Nav::Collapse => collapse = true,
+                }
+            }
+        }
+        self.nav_states.insert(id, cursor);
+        NavResponse {
+            id,
+            cursor,
+            moved: cursor != before,
+            focused: k.focused,
+            activated: k.activated,
+            expand,
+            collapse,
+        }
+    }
+
+    pub fn close_collection(&mut self) {
+        self.nav_open.pop();
+    }
+
+    /// [`Ui::open_collection`] with a closure, for Rust callers. The
+    /// open/close pair exists because C has no closures.
+    pub fn collection<R>(&mut self, key: &str, len: usize, body: impl FnOnce(&mut Self, NavResponse) -> R) -> R {
+        let nav = self.open_collection(key, len);
+        let r = body(self, nav);
+        self.close_collection();
+        r
+    }
+
+    /// Put the cursor on `index`, so clicking a row leaves the keyboard where
+    /// the pointer left off rather than back where it was.
+    ///
+    /// Takes the id from [`NavResponse::id`] rather than the collection's key:
+    /// [`Ui::make_id`] disambiguates repeated keys by build order, so deriving
+    /// the id a second time would address a different collection.
+    pub fn set_cursor(&mut self, collection: Id, index: usize) {
+        self.nav_states.insert(collection, index);
+    }
+
+    /// Where the keyboard cursor is, by the id [`NavResponse`] carries. For
+    /// reading it back outside the frame that built the collection.
+    pub fn cursor_at(&self, id: Id) -> Option<usize> {
+        self.nav_states.get(&id).copied()
+    }
+
+    /// Take one pending [`Nav`](crate::Nav), whichever it is. `take_action`
+    /// wants the exact action, and a collection accepts any of eight.
+    fn take_nav(&mut self) -> Option<crate::Nav> {
+        let at = self.input.events.iter().position(|e| matches!(e, UiEvent::Action(UiAction::Navigate(_))));
+        match at {
+            Some(i) => match self.input.events.remove(i) {
+                UiEvent::Action(UiAction::Navigate(n)) => Some(n),
+                _ => None,
+            },
+            None => None,
+        }
+    }
+
     pub fn open_scroll_area(&mut self, key: &str) {
         let gap = self.theme.metrics.space;
         let opts = ScrollOptions { gap, ..ScrollOptions::new(Size::Grow(1.0)) };

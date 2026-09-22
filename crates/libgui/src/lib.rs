@@ -50,7 +50,7 @@ pub use dnd::{DragSource, DropZone, Payload};
 pub use draw::{Batch, DrawList, Instance, TextureId};
 pub use id::{Id, StableHasher};
 pub use input::{
-    Cursor, FrameInfo, FrameInput, Gesture, InputEvent, Key, KeyBindings, Modifiers, Motion, PlatformOutput, PointerButton,
+    Cursor, FrameInfo, FrameInput, Gesture, InputEvent, Key, KeyBindings, Modifiers, Motion, Nav, PlatformOutput, PointerButton,
     PointerKind, Shortcut, Touch, TouchPhase, UiAction, VirtualCursor, WheelUnit,
 };
 pub use layout::{Align, Axis, Insets, Layout, Size};
@@ -78,5 +78,5 @@ pub use theme_file::ThemeError;
 #[cfg(feature = "theme-watch")]
 pub use theme_watch::ThemeWatcher;
 pub use text_edit::{TextAreaOptions, TextResponse};
-pub use ui::{CanvasState, CanvasView, Frame, FrameOutput, Layer, LeafOptions, ListOptions, Response, ScrollOptions, Ui};
-pub use widgets::{Branch, TreeResponse};
+pub use ui::{CanvasState, CanvasView, Frame, FrameOutput, Layer, LeafOptions, ListOptions, NavOptions, NavResponse, Response, ScrollOptions, Ui};
+pub use widgets::{Branch, SplitterOptions, TreeResponse};

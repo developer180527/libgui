@@ -1473,7 +1473,7 @@ lag, fling, easing) stay as frame-trace tests like
    your document's; next: word wrap *inside* the editor, double-click word select.
 2. ~~Scroll areas~~ ✅ ~~virtualised lists, variable row heights, trees~~ ✅ `ui.virtual_list`, `ui.virtual_rows`, `ui.tree_row`; next: horizontal scroll, keyboard PageUp/Down, multi-select and drag-to-reparent.
 3. ~~Keyboard/shortcut routing~~ ✅ ~~menus, popups/context menus, tooltips, z-order~~ ✅ `Layer`, `popup`, `menu_button`, `context_menu`, `tooltip`; next: checkable/icon menu items, keyboard navigation within a menu, "safe triangle" submenu tracking.
-4. ~~Docking + tabs + splitters~~ ✅ Unity-style with OS-window tear-off; ~~layout save/load~~ ✅ `dock.layout()` / `dock.restore()`, versioned and repairing; next: tab close/context menu, maximize pane.
+4. ~~Docking + tabs + splitters~~ ✅ Unity-style with OS-window tear-off; ~~layout save/load~~ ✅ `dock.layout()` / `dock.restore()`, versioned and repairing; ~~a splitter outside the dock~~ ✅ `Ui::splitter`; next: tab close/context menu, maximize pane.
 5. ~~Paths~~ ✅ `p.line` / `polyline` / `bezier` / `wire`, a `Line` primitive at `CONTRACT_VERSION` 2;
    next: rotated images and glyphs (an angle in the `Image` kind's free `params` slot, so the
    96-byte stride holds — spinners, rotary knobs, vertical axis labels), stroked/filled
@@ -1483,12 +1483,16 @@ lag, fling, easing) stay as frame-trace tests like
    resizable and frozen columns~~ ✅ `ScrollOptions::both`, `drag_source` / `drop_zone` / `Payload`
    with a host seam for OS drags, `ui.table` with `TableState`; next: column reordering by drag,
    cell selection and keyboard navigation, and auto-scroll while dragging near an edge.
-7. **Real text shaping**: replace `text.rs` internals with `cosmic-text`/`swash` or HarfBuzz
-   (ligatures, bidi, font fallback, CJK), multi-page atlas with LRU eviction.
+7. ~~**Real text shaping**~~ ✅ `ShapeRasterizer` (feature `shape`) runs the font's own layout
+   tables through rustybuzz — ligatures, GPOS kerning, mark attachment, contextual forms, Indic
+   reordering; ~~font fallback~~ ✅ `FontStack` chains faces so a mixed-script string draws whole.
+   Next: bidi (RTL is shaped but laid out left to right), multi-page atlas with LRU eviction.
 8. ~~Theme hot-reload~~ ✅ TOML themes, per-widget styles, density presets; next: multiple fonts (UI/mono/icons) in the theme, per-widget disabled states.
 9. ~~Keyboard focus and navigation~~ ✅ `FocusKind` / `FocusPolicy`, activation through
-   `UiAction`, a centrally drawn focus ring, per-platform policy in `libgui_keymap`; next:
-   arrow-key navigation *within* lists, trees, tables and menus.
+   `UiAction`, a centrally drawn focus ring, per-platform policy in `libgui_keymap`;
+   ~~arrow-key navigation *within* a collection~~ ✅ `Ui::open_collection` gives a list or tree
+   one focus stop and a keyboard cursor, moved by `UiAction::Navigate`. Next: a table's 2-D cell
+   cursor, arrows inside an open menu, and type-ahead.
 10. **Accessibility** via AccessKit: emit a node per interactive widget from the same tree — now
    unblocked, since it needs a focus order to describe.
 11. ~~**Perf**: a "sleep when idle" mode instead of redrawing continuously~~ ✅
@@ -1515,8 +1519,11 @@ lag, fling, easing) stay as frame-trace tests like
 - Layouts nesting deeper than 256 are dropped and counted (`FrameCost::too_deep`), because the three
   recursive layout passes would otherwise overflow the stack. Any real layout is under fifty.
 - Container ids are positional; give containers explicit keys once you add conditional UI.
-- No standalone splitter: the dock has them, but two panes outside a dock cannot be dragged apart.
 - Only menu items have a disabled state. A button, checkbox, slider or field cannot be greyed out.
+- Keyboard navigation inside a collection covers a one-dimensional cursor (`Ui::open_collection`),
+  which is what a list and a tree need. A table's 2-D cell cursor, the arrows inside an open menu,
+  and type-ahead ("jump to the row starting with d") are not there. Nor is scrolling the cursor
+  into view: a collection inside a scroll area does not follow its own cursor yet.
 - The theme names a single face, so no separate UI/mono/icon fonts. `FontStack` covers *fallback*
   (a missing script), not *roles*.
 - Which fonts fill the chain is the host's problem: libgui bundles only Inter and will not go

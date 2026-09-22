@@ -173,10 +173,13 @@ impl InputState {
                         out.keys_pressed.push(key);
                     }
                     // Repeats resolve too, so a held Backspace keeps deleting.
-                    if let Some(action) = self.bindings.resolve(key, &self.mods) {
-                        if !out.keys_bound.contains(&key) {
-                            out.keys_bound.push(key);
-                        }
+                    // Every action the chord is bound to, not just the first:
+                    // see `KeyBindings::resolve_all`.
+                    let acts: Vec<UiAction> = self.bindings.resolve_all(key, &self.mods).collect();
+                    if !acts.is_empty() && !out.keys_bound.contains(&key) {
+                        out.keys_bound.push(key);
+                    }
+                    for action in acts {
                         self.action(action, &mut out);
                     }
                 }

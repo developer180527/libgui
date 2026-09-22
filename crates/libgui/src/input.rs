@@ -222,6 +222,32 @@ pub enum Motion {
     DocEnd,
 }
 
+/// Moving the keyboard cursor *inside* a collection — a list, a tree, a
+/// table's rows. Distinct from [`Motion`], which moves a caret through text:
+/// a tree can be expanded and collapsed, and text cannot.
+///
+/// Which key produces which of these is the keymap's, as always. Arrows are
+/// the usual binding, but a host driving the UI from a gamepad d-pad or a
+/// jog wheel sends them directly with [`InputEvent::Action`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Nav {
+    /// The next item (Down in a vertical list).
+    Next,
+    Previous,
+    First,
+    Last,
+    /// A screenful on (Page Down). How big a screenful is belongs to the
+    /// collection, not to the keymap: see `NavOptions::page`.
+    PageNext,
+    PagePrevious,
+    /// Open the cursor's branch, or step into it (Right in a tree). A list
+    /// with nothing to open ignores it.
+    Expand,
+    /// Close the cursor's branch, or step out to its parent (Left).
+    Collapse,
+}
+
 /// Something libgui's own widgets do in response to the keyboard. Widgets
 /// never look at keys for these, so every binding is the keymap's to choose,
 /// and a host can send them without a keyboard at all
@@ -264,6 +290,9 @@ pub enum UiAction {
     /// Move keyboard focus (Tab / Shift+Tab).
     FocusNext,
     FocusPrevious,
+    /// Move the cursor inside the focused collection (the arrow keys, usually).
+    /// Focus moves *between* widgets; this moves *within* one.
+    Navigate(Nav),
 }
 
 /// Which chords perform which [`UiAction`]: the part of the keymap libgui's
@@ -280,8 +309,14 @@ impl KeyBindings {
         Self::default()
     }
 
-    /// Add a binding. Several chords may perform one action; a chord bound
-    /// twice performs the first.
+    /// Add a binding.
+    ///
+    /// Several chords may perform one action, and **one chord may perform
+    /// several**: the arrow keys move a caret through text *and* a cursor
+    /// through a list, and which happens depends on what has focus, not on
+    /// the key. Both actions are raised and the focused widget takes the one
+    /// it understands. To replace a binding rather than add to it, `unbind`
+    /// the chord first.
     pub fn bind(&mut self, chord: Shortcut, action: UiAction) -> &mut Self {
         self.bindings.push((chord, action));
         self
@@ -293,9 +328,20 @@ impl KeyBindings {
         self
     }
 
-    /// The action `key` performs with `mods` held, if any.
+    /// The first action `key` performs with `mods` held, if any. Prefer
+    /// [`KeyBindings::resolve_all`]: a chord may be bound to more than one
+    /// action, and this reports only the first.
     pub fn resolve(&self, key: Key, mods: &Modifiers) -> Option<UiAction> {
         self.bindings.iter().find(|(c, _)| c.matches(key, mods)).map(|&(_, a)| a)
+    }
+
+    /// Every action `key` performs with `mods` held, in the order they were
+    /// bound. One chord can drive two different kinds of widget — Down moves a
+    /// caret and moves a list cursor — and only one of them ever has focus, so
+    /// raising both and letting the focused widget take its own is simpler and
+    /// more honest than making the keymap guess which is in front.
+    pub fn resolve_all<'a>(&'a self, key: Key, mods: &'a Modifiers) -> impl Iterator<Item = UiAction> + 'a {
+        self.bindings.iter().filter(move |(c, _)| c.matches(key, mods)).map(|&(_, a)| a)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (Shortcut, UiAction)> + '_ {
