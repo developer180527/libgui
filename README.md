@@ -19,6 +19,10 @@ See [`MANUAL.md`](MANUAL.md) for how an application drives the library:
 the frame loop, the host contract, multiple windows, and what every public API
 expects of you.
 
+[`WIDGETS.md`](WIDGETS.md) is a survey of fourteen professional and consumer
+applications against libgui's widget surface: what they use, what is here, what
+is not, and the order the gaps are worth closing in.
+
 ## Status
 
 | | |

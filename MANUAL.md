@@ -1133,6 +1133,9 @@ The honest list, as of now.
 
 ### Widgets
 
+[`WIDGETS.md`](WIDGETS.md) surveys fourteen applications against this list and
+puts it in the order the gaps are worth closing.
+
 - No colour picker. `plot` is a debug bar chart, not a real line/area chart.
 - No modal/dialog primitive (build one on `ui.popup` / `Layer`).
 - No date picker, no toast/notification.
