@@ -147,8 +147,8 @@ no closures, and a C++ host is a first-class target.
 
 **Decision.** Anything that takes a body also exists as a bracket:
 `open_container`/`close_container`, `open_scroll_area`, `open_popup_body`,
-`open_menu`, `open_collection`, `open_layer`. The closure form calls the pair,
-so the two cannot drift.
+`open_menu`, `open_collection`, `open_layer`, `open_cached`, `open_canvas`,
+`open_transform`. The closure form calls the pair, so the two cannot drift.
 
 **Consequences.**
 
@@ -432,7 +432,39 @@ and an application knows which it needs.
 
 ---
 
-## 16. Pre-1.0, and what that means for you
+## 16. Animation is one primitive, and there is no timeline
+
+**Context.** A UI library usually grows an animation system: keyframes, easing
+curves, springs, a scheduler. Every widget then needs to be written against it,
+and an app that wants motion the system does not express has nowhere to go.
+
+**Decision.** There is one call. `animate(id, slot, target)` keeps a value per
+`(id, slot)` and moves it a fraction of the way to `target` each frame, where
+the fraction is `1 - exp(-speed · dt)`. `animate_bool` is the hover/press form.
+Everything in the library is built from it — the dock's sliding tabs are four
+slots on one id.
+
+**Consequences.**
+
+- The motion is frame-rate independent by construction, not by correction: the
+  exponential form gives the same curve at 60 and 144 Hz and stays right across
+  a dropped frame. A linear `+= step * dt` would not.
+- An app writes its own motion with the same tool the library uses, so nothing
+  is second-class. The cost is that a designer asking for a specific easing
+  curve or an overshoot does not get one; exponential approach is the only
+  shape on offer.
+- It composes with sleeping. A value that has not arrived sets `animating`,
+  which becomes `repaint_after`, which is how an idle app stops drawing. An
+  animation system with its own clock would have to be taught this separately.
+- Values are retained, so they are dropped when an id is not seen — which is
+  what stops a long session accumulating state, and is also a trap. The C
+  calls mark the id themselves: C has no other way to say an id is alive, and
+  the failure mode is silent, an animation that resets to its target every
+  frame and never appears to run at all.
+
+---
+
+## 17. Pre-1.0, and what that means for you
 
 The Rust API changes. `Response` gained a field recently; `ShapedGlyph` gained
 one; a function's arity changed. That is what pre-1.0 means and it is fine:

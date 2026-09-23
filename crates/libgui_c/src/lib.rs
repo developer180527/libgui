@@ -30,6 +30,7 @@
 
 use std::os::raw::c_char;
 
+mod canvas;
 mod conformance;
 mod containers;
 mod convert;
@@ -48,6 +49,7 @@ mod theme_dnd;
 pub mod table;
 mod types;
 
+pub use canvas::*;
 pub use conformance::*;
 pub use containers::*;
 pub use handle::*;

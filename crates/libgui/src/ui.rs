@@ -3342,6 +3342,17 @@ impl Ui {
     /// app drives [`CanvasState`] itself. Returns the background's response:
     /// `clicked` there means "clicked empty canvas".
     pub fn canvas<R>(&mut self, key: &str, st: &mut CanvasState, body: impl FnOnce(&mut Self, CanvasView) -> R) -> (Response, R) {
+        let (bg, view) = self.open_canvas(key, st);
+        let r = body(self, view);
+        self.close_canvas();
+        (bg, r)
+    }
+
+    /// [`Ui::canvas`] as a pair, for a caller that cannot pass a closure.
+    ///
+    /// Build the contents, then call [`Ui::close_canvas`]. Everything
+    /// [`Ui::canvas`] documents applies.
+    pub fn open_canvas(&mut self, key: &str, st: &mut CanvasState) -> (Response, CanvasView) {
         let id = self.make_id(("canvas", key));
         let bg_id = id.with("bg");
         // The canvas's own position is last frame's; pan and zoom are the app's
@@ -3395,15 +3406,26 @@ impl Ui {
         // Background first, so everything built after it wins the pointer.
         let opts = LeafOptions { interactive: true, ..Default::default() };
         self.add_leaf_at(bg_id, visible, opts, |_, _| {});
-        let r = body(self, view);
-        self.xform_stack.pop();
-        self.close();
-        (bg, r)
+        (bg, view)
+    }
+
+    /// Close a canvas opened with [`Ui::open_canvas`].
+    pub fn close_canvas(&mut self) {
+        self.close_transform();
     }
 
     /// Draw and interact with `body` under an explicit [`Transform`]. The raw
     /// primitive behind [`Ui::canvas`], for a viewport you drive yourself.
     pub fn with_transform<R>(&mut self, id: Id, t: Transform, body: impl FnOnce(&mut Self) -> R) -> R {
+        self.open_transform(id, t);
+        let r = body(self);
+        self.close_transform();
+        r
+    }
+
+    /// [`Ui::with_transform`] as a pair, for a caller that cannot pass a
+    /// closure. Close it with [`Ui::close_transform`].
+    pub fn open_transform(&mut self, id: Id, t: Transform) {
         self.mark_seen(id);
         let mut n = Node::new(id, Layout::column().shrink());
         n.clip = true;
@@ -3411,10 +3433,12 @@ impl Ui {
         let idx = self.attach(n);
         self.open(idx);
         self.xform_stack.push(t);
-        let r = body(self);
+    }
+
+    /// Close a transform opened with [`Ui::open_transform`].
+    pub fn close_transform(&mut self) {
         self.xform_stack.pop();
         self.close();
-        r
     }
 
     pub fn row<R>(&mut self, body: impl FnOnce(&mut Self) -> R) -> R {

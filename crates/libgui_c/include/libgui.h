@@ -642,6 +642,89 @@ void        libgui_drop_zone(LibguiUi* ui, const char* const* kinds, uint64_t co
 const char* libgui_dragging(LibguiUi* ui);   /* NULL when nothing is */
 void        libgui_cancel_drag(LibguiUi* ui);
 
+/* --- Canvas, transforms and animation -------------------------------------- */
+
+/* Where the view sits over an unbounded canvas. The app owns this across
+ * frames; libgui writes `visible` each frame and the app may write the rest to
+ * drive the view itself (zoom to fit, a zoom box). */
+typedef struct {
+    LibguiVec2 pan;          /* canvas origin from the widget's top-left, window px */
+    float      zoom;
+    float      min_zoom, max_zoom;
+    uint8_t    wheel_zooms;  /* 1: wheel zooms (a sketch). 0: it scrolls (a timeline). */
+    LibguiRect visible;      /* written each frame, in canvas coordinates */
+} LibguiCanvasState;
+
+typedef struct {
+    LibguiRect visible;      /* in canvas coordinates: cull against it */
+    float      zoom;
+    LibguiVec2 xform_pan;    /* window = canvas * xform_zoom + xform_pan */
+    float      xform_zoom;
+} LibguiCanvasView;
+
+void libgui_canvas_state_default(LibguiCanvasState* state);
+
+/* THIS IS WHAT A SKETCHER IS BUILT ON. Widgets built between open and close
+ * lay out, hit-test and report their rect and drag deltas in CANVAS
+ * coordinates, so snapping, hit tolerance and the rest of your logic is
+ * written once in model units and is correct at any zoom. Text is rasterised
+ * at the zoomed size rather than scaled up.
+ *
+ * The wheel zooms toward the pointer, the middle button pans, two fingers pan
+ * and pinch about their midpoint. The response returned is the BACKGROUND's,
+ * so `clicked` on it means the user clicked empty canvas.
+ *
+ *     LibguiCanvasState view;
+ *     libgui_canvas_state_default(&view);          // once, kept across frames
+ *
+ *     LibguiCanvasView v;
+ *     LibguiResponse bg = libgui_open_canvas(ui, "sketch", &view, &v);
+ *     for (size_t i = 0; i < n; i++) {
+ *         if (!overlaps(ent[i].bounds, v.visible)) continue;    // cull
+ *         draw_entity(ui, &ent[i]);
+ *     }
+ *     libgui_close_canvas(ui);
+ *     if (bg.clicked) deselect_all();
+ */
+LibguiResponse libgui_open_canvas(LibguiUi* ui, const char* key,
+                                  LibguiCanvasState* state, LibguiCanvasView* out);
+void           libgui_close_canvas(LibguiUi* ui);
+
+/* The same, without the input handling: a transform you drive yourself, for a
+ * view libgui should not manage. zoom is clamped away from zero. */
+void libgui_open_transform(LibguiUi* ui, uint64_t id, LibguiVec2 pan, float zoom);
+void libgui_close_transform(LibguiUi* ui);
+
+LibguiVec2 libgui_transform_point(LibguiVec2 pan, float zoom, LibguiVec2 p);
+LibguiVec2 libgui_transform_inv_point(LibguiVec2 pan, float zoom, LibguiVec2 p);
+/* Zoom about a window position, keeping the canvas point under it still: what
+ * a zoom button calls. `origin` is the canvas widget's top-left in window
+ * coordinates, which is the rect a previous frame reported for it. */
+void libgui_canvas_zoom_at(LibguiCanvasState* state, LibguiVec2 window_pos,
+                           LibguiVec2 origin, float factor);
+
+/* HOW A CUSTOM WIDGET MOVES. A value is retained per (id, slot) -- 256 slots
+ * per widget -- and eases towards the target you pass each frame. The rate is
+ * frame-rate independent: the same motion at 60 and 144 Hz, and right across a
+ * dropped frame. libgui asks the host for another frame until it arrives,
+ * which is what `repaint_after` in the frame reports.
+ *
+ *     float hot = libgui_animate_bool(ui, id, 0, resp.hovered);
+ */
+float libgui_animate(LibguiUi* ui, uint64_t id, uint8_t slot, float target);
+float libgui_animate_bool(LibguiUi* ui, uint64_t id, uint8_t slot, uint8_t on);
+/* speed is 1/s; higher is snappier. */
+float libgui_animate_with_speed(LibguiUi* ui, uint64_t id, uint8_t slot, float target, float speed);
+/* Jump to a value; it eases from there towards its next target. */
+void  libgui_set_anim(LibguiUi* ui, uint64_t id, uint8_t slot, float value);
+/* Ask for another frame for a reason libgui cannot see: your own simulation is
+ * running, a file finished loading, a tool is mid-gesture. */
+void  libgui_request_repaint(LibguiUi* ui);
+/* Keep an id's retained state alive for a frame in which no widget with that
+ * id was built -- a row scrolled out of a list, a panel behind a tab. libgui
+ * forgets an id it did not see. The libgui_animate* calls do this for you. */
+void  libgui_keep_id(LibguiUi* ui, uint64_t id);
+
 /* --- Popups, layers and modals -------------------------------------------- */
 
 #define LIBGUI_LAYER_WINDOW  0u

@@ -453,8 +453,30 @@ pass. `ui.popup`, `ui.layer`, `ui.overlay`, `ui.tooltip`, `ui.context_menu`.
 ### 5.6 Canvases
 
 `ui.canvas` gives a pan/zoom transform for a node graph, a timeline, a
-schematic. Widgets inside work in canvas coordinates at any zoom —
-`Response::drag_delta` and `mouse_pos` are already converted.
+schematic, a CAD sketch. Widgets inside work in canvas coordinates at any zoom
+— `Response::drag_delta` and `mouse_pos` are already converted — so snapping,
+hit tolerance and the rest of your logic is written once in model units and is
+correct at every zoom. Text is rasterised at the zoomed size rather than scaled
+up. `CanvasView::visible` is the cull rect.
+
+One exception, worth knowing before you build a sketcher on it: the `Response`
+the canvas *returns* is the background's, and it is produced before the
+transform is pushed, so **its `mouse_pos` is in window coordinates** while
+everything built inside reports canvas coordinates. Convert it with the view's
+transform if you need where on the canvas the user clicked empty space.
+
+`ui.with_transform` is the same thing without the input handling, for a view
+you drive yourself. Both have `open_`/`close_` forms.
+
+**Animation** is one call, not a system. `ui.animate(id, slot, target)` keeps a
+value per `(id, slot)` and eases it towards `target` each frame — the rate is
+frame-rate independent, so the motion is the same at 60 and 144 Hz and right
+across a dropped frame. `animate_bool` is the hover/press form. libgui asks the
+host for another frame until the value arrives, which is what
+`PlatformOutput::repaint_after` reports; `ui.request_repaint()` asks for one
+for a reason libgui cannot see. There are no keyframes, easing curves or
+springs: everything in the library, including the dock's sliding tabs, is built
+from this.
 
 ### 5.7 Drag and drop
 
@@ -967,7 +989,8 @@ progress, selectable, tree row, menu items, tooltip, context menu), text input
 and text area over a caller-owned buffer, combo and segmented pickers,
 containers, scroll areas, the disabled scope, the collection cursor,
 multi-select, stable ids, custom painting, the full input set, the keymap, the
-viewport and painter image calls, docking, tables, drag and drop, themes from
+viewport and painter image calls, the pan/zoom canvas and raw transforms,
+animation, docking, tables, drag and drop, themes from
 TOML, and the frame output — instances, batches, atlas, globals, platform
 requests, the expanded mesh and its chunks, the reference renderer and the
 conformance gallery, and a shared font system.
@@ -1004,6 +1027,40 @@ that is how you decide where.
 1.5× display lands on a pixel and a half and renders as a grey smear; `hairline`
 gives you exactly N *physical* pixels, so rules, grid lines and witness lines
 stay crisp at any scale.
+
+A custom widget also needs to **move**, and to sit in a **coordinate space** of
+its own. Both cross:
+
+```c
+LibguiCanvasState view;
+libgui_canvas_state_default(&view);          /* once, kept across frames */
+
+/* ... each frame ... */
+LibguiCanvasView v;
+LibguiResponse bg = libgui_open_canvas(ui, "sketch", &view, &v);
+for (size_t i = 0; i < n; i++) {
+    if (!overlaps(ent[i].bounds, v.visible)) continue;   /* cull */
+    draw_entity(ui, &ent[i]);                            /* in model units */
+}
+libgui_close_canvas(ui);
+if (bg.clicked) deselect_all();
+```
+
+Inside that, a widget's rect, `mouse_pos` and `drag_delta` are in **canvas**
+coordinates, which is the whole reason to use it rather than a viewport and
+your own arithmetic: the snapping is written once and is right at every zoom.
+`bg` itself is the documented exception — window coordinates, as in §5.6 —
+and `libgui_transform_inv_point` converts it.
+
+`libgui_open_transform` is the raw form, for a camera you drive yourself.
+
+Motion is `libgui_animate_bool(ui, id, slot, on)` and friends, returning a 0..1
+you blend with. Unlike the Rust calls these mark `id` alive for the frame
+themselves: C has no other way to say an id exists, and the alternative failure
+is an animation that silently resets every frame and never moves.
+`libgui_request_repaint` asks for a frame for a reason libgui cannot see, and
+`libgui_needs_frame` answers whether one is needed at all — the call a CAD host
+spinning its viewport at 120 Hz makes before deciding to rebuild the UI.
 
 Your widget also inherits things it does not ask for: the focus ring, keyboard
 reachability (if you use `libgui_interact`), clipping, and — because the fade
@@ -1083,9 +1140,9 @@ The honest list, as of now.
   type-ahead in lists.
 - Trees have no drag-to-reparent. Multi-select works (§5.4) but only by
   pointer: Shift+Arrow does not extend a selection.
-- The C API (§14) covers widgets, containers and custom painting. Docking does
-  not cross it yet: `TabViewer` is a Rust trait and needs a function-pointer
-  vtable like the paint callback has.
+- The C API (§14) covers everything the Rust API does that a host needs,
+  docking and tables included — both through function-pointer vtables. What it
+  does not cross is what does not exist yet, which is the rest of this list.
 
 ### Text
 

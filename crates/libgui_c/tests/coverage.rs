@@ -1125,3 +1125,171 @@ fn a_second_ui_can_share_the_first_ones_atlas() {
         assert!(libgui_ui_new_sharing_fonts(std::ptr::null_mut()).is_null());
     }
 }
+
+/// The canvas, the transform under it, and the animation a custom widget
+/// moves by — the four things a C++ sketcher needs and could not reach.
+///
+/// The claim worth testing is not that the calls are callable but that a
+/// widget built inside a canvas sees **canvas** coordinates: that is the whole
+/// reason to use one rather than a viewport plus arithmetic, and it is what
+/// lets a sketcher's snapping be written once in model units.
+#[test]
+fn a_canvas_puts_a_c_caller_in_canvas_coordinates() {
+    unsafe {
+        let u = ui();
+        let mut st = LibguiCanvasState::default();
+        libgui_canvas_state_default(&mut st);
+        assert_eq!(st.zoom, 1.0, "the defaults did not reach the caller");
+        assert_eq!(st.wheel_zooms, 1);
+
+        // Zoom to 2x about the canvas widget's own origin, so the mapping is a
+        // clean doubling and a wrong one cannot look right by accident.
+        let origin = LibguiVec2 { x: 0.0, y: 0.0 };
+        libgui_canvas_zoom_at(&mut st, origin, origin, 2.0);
+        assert_eq!(st.zoom, 2.0, "zoom_at did not zoom");
+
+        // Put the pointer somewhere unambiguous and settle a frame, so the
+        // canvas has a rect and the hit test has something to answer with.
+        libgui_push_pointer_moved(u, 200.0, 120.0);
+        let mut view = LibguiCanvasView::default();
+        let mut seen = LibguiVec2 { x: 0.0, y: 0.0 };
+        let mut bg_mouse = LibguiVec2 { x: 0.0, y: 0.0 };
+        let mut window_mouse = LibguiVec2 { x: 0.0, y: 0.0 };
+        for _ in 0..3 {
+            libgui_begin_frame(u, 400.0, 300.0, 1.0, 1.0 / 60.0);
+            // Outside the canvas: window coordinates.
+            let out = libgui_button(u, c("outside").as_ptr());
+            window_mouse = out.mouse_pos;
+
+            let bg = libgui_open_canvas(u, c("sketch").as_ptr(), &mut st, &mut view);
+            bg_mouse = bg.mouse_pos;
+            // A widget *inside* is the one that sees canvas coordinates.
+            seen = libgui_button(u, c("inside").as_ptr()).mouse_pos;
+            libgui_close_canvas(u);
+            libgui_end_frame(u);
+        }
+        assert_eq!(libgui_ui_poisoned(u), 0, "the canvas poisoned the handle");
+
+        // The view was reported and the state kept its zoom across frames.
+        assert_eq!(view.zoom, 2.0, "the view did not carry the zoom");
+        assert_eq!(view.xform_zoom, 2.0);
+        assert_eq!(st.zoom, 2.0, "the canvas lost the app's zoom");
+        assert!(view.visible.w > 0.0, "the visible rect was never written");
+        // The state is the app's copy, and libgui writes back into it: this is
+        // the field a sketcher culls against, so a lost write-back means it
+        // builds every entity in the model every frame.
+        assert_eq!(
+            (st.visible.w, st.visible.h),
+            (view.visible.w, view.visible.h),
+            "libgui's update to the canvas state never reached the caller"
+        );
+        assert!(st.visible.w > 0.0, "the caller's own visible rect stayed empty");
+
+        // The point of the whole thing: at 2x the canvas sees half the window
+        // coordinate, because the canvas origin is the widget's own here.
+        assert_eq!(window_mouse.x, 200.0, "a widget outside the canvas moved");
+        assert!(
+            (seen.x - 100.0).abs() < 0.01,
+            "inside a 2x canvas the pointer read {:?}, not half the window position",
+            seen
+        );
+        // The background's own response is the exception, and the header says
+        // so: it is produced before the transform is pushed, so it carries
+        // WINDOW coordinates. Pinned here because a sketcher that assumed
+        // otherwise would misplace every click on empty canvas by the zoom.
+        assert_eq!(bg_mouse.x, 200.0, "the background response is documented as window-space");
+
+        // The same mapping, exposed for a host translating its own events.
+        let pan = view.xform_pan;
+        let there = libgui_transform_point(pan, view.xform_zoom, LibguiVec2 { x: 100.0, y: 60.0 });
+        let back = libgui_transform_inv_point(pan, view.xform_zoom, there);
+        assert!(
+            (back.x - 100.0).abs() < 0.01 && (back.y - 60.0).abs() < 0.01,
+            "point and inv_point do not round-trip: {back:?}"
+        );
+
+        // The raw transform, for a view the app drives itself.
+        libgui_begin_frame(u, 400.0, 300.0, 1.0, 1.0 / 60.0);
+        libgui_open_transform(u, 77, LibguiVec2 { x: 10.0, y: 5.0 }, 3.0);
+        libgui_label(u, c("under a transform").as_ptr());
+        libgui_close_transform(u);
+        libgui_end_frame(u);
+        assert_eq!(libgui_ui_poisoned(u), 0, "the transform poisoned the handle");
+
+        libgui_ui_free(u);
+    }
+}
+
+/// A custom widget's motion: the value is retained, eases rather than jumping,
+/// and keeps the host awake until it arrives.
+#[test]
+fn a_c_caller_can_animate_its_own_widget() {
+    unsafe {
+        let u = ui();
+        let id = libgui_id_from_name(c("my_widget").as_ptr());
+
+        // First call starts *at* the target: nothing to ease from.
+        libgui_begin_frame(u, 400.0, 300.0, 1.0, 1.0 / 60.0);
+        assert_eq!(libgui_animate_bool(u, id, 0, 0), 0.0);
+        libgui_end_frame(u);
+
+        // Now aim at 1 and watch it approach rather than arrive.
+        libgui_begin_frame(u, 400.0, 300.0, 1.0, 1.0 / 60.0);
+        let first = libgui_animate_bool(u, id, 0, 1);
+        libgui_end_frame(u);
+        assert!(first > 0.0 && first < 1.0, "the animation jumped straight to {first}");
+
+        let mut plat = LibguiPlatformOutput::default();
+        libgui_frame_platform(u, &mut plat);
+        assert!(plat.repaint_after >= 0.0, "an unfinished animation let the host sleep");
+
+        // It keeps going, and it is retained: a second slot is its own value.
+        libgui_begin_frame(u, 400.0, 300.0, 1.0, 1.0 / 60.0);
+        let second = libgui_animate_bool(u, id, 0, 1);
+        let other = libgui_animate(u, id, 1, 0.0);
+        libgui_end_frame(u);
+        assert!(second > first, "the animation did not advance: {first} then {second}");
+        assert_eq!(other, 0.0, "slot 1 was not its own value");
+
+        // Enough frames and it settles exactly, rather than creeping forever.
+        for _ in 0..200 {
+            libgui_begin_frame(u, 400.0, 300.0, 1.0, 1.0 / 60.0);
+            libgui_animate_bool(u, id, 0, 1);
+            libgui_end_frame(u);
+        }
+        libgui_begin_frame(u, 400.0, 300.0, 1.0, 1.0 / 60.0);
+        let settled = libgui_animate_bool(u, id, 0, 1);
+        libgui_end_frame(u);
+        assert_eq!(settled, 1.0, "the animation never settled");
+
+        // An explicit rate, and a jump that the next ease starts from.
+        libgui_begin_frame(u, 400.0, 300.0, 1.0, 1.0 / 60.0);
+        libgui_set_anim(u, id, 0, 0.0);
+        let after_jump = libgui_animate_with_speed(u, id, 0, 1.0, 4.0);
+        libgui_end_frame(u);
+        assert!(after_jump < 0.5, "set_anim did not take, or the speed was ignored: {after_jump}");
+
+        // keep_id on its own: an animation whose widget was not built this
+        // frame is still there when it comes back.
+        libgui_begin_frame(u, 400.0, 300.0, 1.0, 1.0 / 60.0);
+        libgui_set_anim(u, id, 2, 0.5);
+        libgui_end_frame(u);
+        libgui_begin_frame(u, 400.0, 300.0, 1.0, 1.0 / 60.0);
+        libgui_keep_id(u, id); // the widget is off screen this frame
+        libgui_end_frame(u);
+        libgui_begin_frame(u, 400.0, 300.0, 1.0, 1.0 / 60.0);
+        let kept = libgui_animate_with_speed(u, id, 2, 0.5, 20.0);
+        libgui_end_frame(u);
+        assert_eq!(kept, 0.5, "the animation was forgotten while its widget was away");
+
+        // A repaint asked for with nothing moving.
+        libgui_begin_frame(u, 400.0, 300.0, 1.0, 1.0 / 60.0);
+        libgui_request_repaint(u);
+        libgui_end_frame(u);
+        libgui_frame_platform(u, &mut plat);
+        assert_eq!(plat.repaint_after, 0.0, "request_repaint did not wake the host");
+
+        assert_eq!(libgui_ui_poisoned(u), 0);
+        libgui_ui_free(u);
+    }
+}

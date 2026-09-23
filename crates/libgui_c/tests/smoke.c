@@ -458,6 +458,48 @@ int main(int argc, char** argv) {
     }
     libgui_enable_reference_render(ui, 0);
 
+    /* The canvas and animation, compiled against the committed header: a
+     * sketcher's two load-bearing calls, and the struct layouts they pass by
+     * value. A mismatch here is the one this file exists to catch. */
+    {
+        LibguiCanvasState view;
+        libgui_canvas_state_default(&view);
+        CHECK(view.zoom == 1.0f, "canvas defaults did not arrive");
+        CHECK(view.wheel_zooms == 1, "canvas defaults did not arrive");
+
+        LibguiVec2 origin = { 0.0f, 0.0f };
+        libgui_canvas_zoom_at(&view, origin, origin, 2.0f);
+        CHECK(view.zoom == 2.0f, "canvas_zoom_at did not zoom");
+
+        uint64_t wid = libgui_id_from_name("sketch_entity");
+        for (int pass = 0; pass < 2; pass++) {
+            LibguiCanvasView v;
+            libgui_begin_frame(ui, 400.0f, 300.0f, 1.0f, 1.0f / 60.0f);
+            libgui_open_canvas(ui, "sketch", &view, &v);
+            CHECK(v.xform_zoom == 2.0f, "the canvas view did not carry the zoom");
+            libgui_label(ui, "an entity");
+            libgui_close_canvas(ui);
+
+            libgui_open_transform(ui, 4242, origin, 1.5f);
+            libgui_label(ui, "under my own camera");
+            libgui_close_transform(ui);
+
+            libgui_animate_bool(ui, wid, 0, 1);
+            libgui_end_frame(ui);
+        }
+        CHECK(view.visible.w > 0.0f, "the canvas never reported what is visible");
+        CHECK(libgui_ui_poisoned(ui) == 0, "the canvas poisoned the handle");
+
+        LibguiVec2 p = { 12.0f, 34.0f };
+        LibguiVec2 there = libgui_transform_point(origin, 2.0f, p);
+        LibguiVec2 back = libgui_transform_inv_point(origin, 2.0f, there);
+        CHECK(there.x == 24.0f, "transform_point did not scale");
+        CHECK(back.x == 12.0f && back.y == 34.0f, "transform did not round-trip");
+
+        libgui_request_repaint(ui);
+        libgui_keep_id(ui, wid);
+    }
+
     libgui_ui_free(ui);
     libgui_ui_free(NULL);
     free(font);
