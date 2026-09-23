@@ -9,8 +9,10 @@
 //!
 //! Skipped, with a note, when no GPU adapter is available.
 
-#[path = "../../libgui_soft/tests/scenes/mod.rs"]
-mod scenes;
+use libgui_soft::scenes;
+
+/// The font the scenes are drawn with; the library does not embed one.
+const SCENE_FONT: &[u8] = include_bytes!("../../../assets/Inter.ttf");
 
 use libgui::Backend;
 use libgui_soft::SoftRenderer;
@@ -117,7 +119,7 @@ fn the_cpu_renderer_matches_the_gpu() {
     for scene in SCENES {
         for (theme_name, theme) in THEMES {
             for scale in SCALES {
-                let (gpu_px, cpu) = scene.run(theme(), scale, |out, size| {
+                let (gpu_px, cpu) = scene.run(theme(), scale, SCENE_FONT, |out, size| {
                     (render_gpu(&g, out, size), SoftRenderer::new().render_to_image(out, size.0, size.1))
                 });
                 let (mut disagree, mut worst, mut exact) = (0usize, 0u8, 0usize);

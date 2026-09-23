@@ -6,7 +6,10 @@ use std::ops::Range;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TextureId {
     Atlas,
-    User(u32),
+    /// One of the host's own textures. Opaque to libgui: it is whatever the
+    /// host's renderer uses to name a texture, and 64 bits so that a native
+    /// handle or a pointer fits without being cut down.
+    User(u64),
 }
 
 use crate::render_contract::PrimitiveKind;

@@ -26,8 +26,8 @@ pub struct Renderer {
     atlas_version: u64,
     instances: wgpu::Buffer,
     capacity: usize,
-    user: HashMap<u32, wgpu::BindGroup>,
-    next_user: u32,
+    user: HashMap<u64, wgpu::BindGroup>,
+    next_user: u64,
 }
 
 impl Renderer {

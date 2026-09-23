@@ -975,6 +975,26 @@ impl Ui {
     /// colour conversion happens, so a linear or HDR target must be converted
     /// before it gets here. See `libgui::render_contract`.
     pub fn viewport(&mut self, key: &str, texture: TextureId, overlay: impl FnOnce(&mut Painter, Rect) + 'static) -> Response {
+        self.viewport_uv(key, texture, [0.0, 0.0, 1.0, 1.0], overlay)
+    }
+
+    /// [`Ui::viewport`] showing only part of the texture.
+    ///
+    /// A renderer rarely has a texture the exact size of the widget: targets
+    /// are pooled or fixed-size, a scene may be rendered at half resolution,
+    /// several views may be packed into one atlas. `uv` is `[u0, v0, u1, v1]`
+    /// in 0..1, so the widget shows that sub-rect.
+    ///
+    /// libgui's origin is top-left. An API whose render targets are
+    /// bottom-left (GL) passes `v0` and `v1` the other way round — `[0, 1, 1,
+    /// 0]` shows the whole texture, turned over.
+    pub fn viewport_uv(
+        &mut self,
+        key: &str,
+        texture: TextureId,
+        uv: [f32; 4],
+        overlay: impl FnOnce(&mut Painter, Rect) + 'static,
+    ) -> Response {
         let s = self.theme.viewport;
         let id = self.make_id(("viewport", key));
         let resp = self.interact_drag(id);
@@ -983,7 +1003,7 @@ impl Ui {
         }
         let focus = self.animate_bool(id, 0, resp.hovered || resp.active);
         self.add_leaf(id, Layout::leaf(Size::Grow(1.0), Size::Grow(1.0)), Vec2::ZERO, true, move |p, r| {
-            p.image(r, texture, s.radius);
+            p.image_uv(r, texture, uv, s.radius);
             p.draw.push_clip(r);
             overlay(p, r);
             p.draw.pop_clip();

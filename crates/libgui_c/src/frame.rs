@@ -13,12 +13,19 @@ use crate::types::LibguiColor;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LibguiBatch {
+    /// Which of your textures, when `texture_kind` is 1.
+    ///
+    /// 64 bits, and first, so that it is aligned and so that a native handle
+    /// or a pointer survives the trip. It used to be 32, which silently cut
+    /// anything wider in half.
+    pub texture_index: u64,
     /// 0 = the glyph atlas, 1 = one of your own textures.
     pub texture_kind: u32,
-    /// Which of your textures, when `texture_kind` is 1.
-    pub texture_index: u32,
     pub first: u32,
     pub count: u32,
+    /// Zero. Named so the struct has no padding a compiler could fill
+    /// differently, which is what `libgui_sizeof_batch` is checked against.
+    pub _pad: u32,
 }
 
 /// The uniform block: target size in logical pixels and the DPI scale.
@@ -80,6 +87,14 @@ pub(crate) struct FrameData {
     pub mesh: libgui::mesh::Mesh,
     /// The mesh's batches, as index ranges rather than instance ranges.
     pub mesh_batches: Vec<LibguiBatch>,
+    /// Off unless the host asked for it: this rasterises the whole frame on
+    /// the CPU, which is for checking a renderer, not for shipping.
+    pub want_reference: bool,
+    /// The reference image, RGBA8, premultiplied, top-left origin.
+    pub reference: Vec<u8>,
+    pub reference_size: (u32, u32),
+    /// Kept between frames: it caches the atlas it has uploaded.
+    pub soft: libgui_soft::SoftRenderer,
 }
 
 pub(crate) fn capture(out: &libgui::FrameOutput, into: &mut FrameData) {
@@ -92,7 +107,13 @@ pub(crate) fn capture(out: &libgui::FrameOutput, into: &mut FrameData) {
             libgui::TextureId::Atlas => (0, 0),
             libgui::TextureId::User(i) => (1, i),
         };
-        LibguiBatch { texture_kind: kind, texture_index: index, first: b.range.start, count: b.range.end - b.range.start }
+        LibguiBatch {
+            texture_kind: kind,
+            texture_index: index,
+            first: b.range.start,
+            count: b.range.end - b.range.start,
+            _pad: 0,
+        }
     }));
     let atlas = out.atlas();
     into.atlas = atlas.data.as_ptr();
@@ -107,6 +128,22 @@ pub(crate) fn capture(out: &libgui::FrameOutput, into: &mut FrameData) {
     let c = out.clear_color;
     into.clear = LibguiColor { r: c.r, g: c.g, b: c.b, a: c.a };
 
+    // The reference image, for a host checking its own renderer against it.
+    if into.want_reference {
+        let g = out.globals();
+        let (w, h) = (
+            (g.screen_size[0] * g.scale).round().max(1.0) as u32,
+            (g.screen_size[1] * g.scale).round().max(1.0) as u32,
+        );
+        let target = into.soft.render_to_image(out, w, h);
+        into.reference.clear();
+        into.reference.extend_from_slice(&target.data);
+        into.reference_size = (w, h);
+    } else {
+        into.reference.clear();
+        into.reference_size = (0, 0);
+    }
+
     // The triangle form, for a renderer with no per-instance attributes:
     // bgfx, GLES2, WebGL1, and every RHI that exposes a vertex+index draw and
     // nothing else. Built only when asked for.
@@ -118,7 +155,13 @@ pub(crate) fn capture(out: &libgui::FrameOutput, into: &mut FrameData) {
                 libgui::TextureId::Atlas => (0, 0),
                 libgui::TextureId::User(i) => (1, i),
             };
-            LibguiBatch { texture_kind: kind, texture_index: index, first: b.indices.start, count: b.indices.end - b.indices.start }
+            LibguiBatch {
+                texture_kind: kind,
+                texture_index: index,
+                first: b.indices.start,
+                count: b.indices.end - b.indices.start,
+                _pad: 0,
+            }
         }));
     } else {
         into.mesh.vertices.clear();
@@ -357,6 +400,36 @@ pub extern "C" fn libgui_vertex_attribute_count() -> u32 {
     libgui::render_contract::VERTEX_ATTRIBUTES.len() as u32
 }
 
+/// What the attribute at `index` *is*: "pos", "local", "uv", "color",
+/// "border_color", "clip", "params", "half_size", "seg". Null when out of
+/// range.
+///
+/// Width and offset alone let a host lay out a vertex buffer but not connect
+/// it to a shader, which left the mapping hard-coded on the host's side. The
+/// name is the shader's varying, so the two can be matched by name instead.
+///
+/// Owned by the library and valid for the life of the process.
+#[no_mangle]
+pub extern "C" fn libgui_vertex_attribute_name(index: u32) -> *const std::os::raw::c_char {
+    // The names are known at compile time, so each gets its own NUL-terminated
+    // literal and nothing is allocated or has to be kept alive by the caller.
+    const NAMES: [&str; 9] = [
+        "pos\0",
+        "local\0",
+        "uv\0",
+        "color\0",
+        "border_color\0",
+        "clip\0",
+        "params\0",
+        "half_size\0",
+        "seg\0",
+    ];
+    match NAMES.get(index as usize) {
+        Some(n) => n.as_ptr() as *const std::os::raw::c_char,
+        None => std::ptr::null(),
+    }
+}
+
 /// One vertex attribute: how many floats it is, and its byte offset into the
 /// vertex. Returns 0 and writes nothing when `index` is out of range, so a
 /// host can describe its vertex layout without hard-coding this one.
@@ -376,3 +449,53 @@ pub unsafe extern "C" fn libgui_vertex_attribute(index: u32, out_floats: *mut u3
     }
     1
 }
+
+// ---- the reference image -------------------------------------------------
+
+/// Render every frame on the CPU as well, so a host can compare its own
+/// output against it. Off by default: this rasterises the whole frame in
+/// software and is for checking a renderer, not for shipping one.
+///
+/// See `libgui_conformance_*` for the scene gallery to point it at.
+///
+/// # Safety
+/// `ui` must be null or a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn libgui_enable_reference_render(ui: *mut LibguiUi, on: u8) {
+    if let Some(h) = unsafe { ui.as_mut() } {
+        if !h.poisoned {
+            h.frame.want_reference = on != 0;
+        }
+    }
+}
+
+/// The reference image for the last frame: RGBA8, **premultiplied**, top-left
+/// origin, tightly packed, `width * height * 4` bytes. Null unless
+/// `libgui_enable_reference_render` was on when the frame ended.
+///
+/// Valid until the next `libgui_begin_frame`.
+///
+/// A texture of your own draws as nothing here — the CPU renderer has not
+/// been given your pixels — so compare scenes that do not use one, or
+/// register the same image with both.
+///
+/// # Safety
+/// `ui` must be null or a live handle; the out-parameters null or writable.
+#[no_mangle]
+pub unsafe extern "C" fn libgui_reference_pixels(ui: *mut LibguiUi, out_w: *mut u32, out_h: *mut u32) -> *const u8 {
+    let (p, w, h) = crate::handle::with_frame(ui, (std::ptr::null(), 0, 0), |f| {
+        if f.reference.is_empty() {
+            (std::ptr::null(), 0, 0)
+        } else {
+            (f.reference.as_ptr(), f.reference_size.0, f.reference_size.1)
+        }
+    });
+    if let Some(s) = unsafe { out_w.as_mut() } {
+        *s = w;
+    }
+    if let Some(s) = unsafe { out_h.as_mut() } {
+        *s = h;
+    }
+    p
+}
+

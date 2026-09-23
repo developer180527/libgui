@@ -22,3 +22,6 @@ libgui = { path = "../libgui" }
 # The per-platform key bindings and focus policy. libgui binds no keys itself,
 # so without this a text field ignores Backspace.
 libgui_keymap = { path = "../libgui_keymap" }
+# The CPU reference renderer, for the conformance kit: a host diffs its own
+# pixels against these. Pure CPU, no dependencies of its own beyond libgui.
+libgui_soft = { path = "../libgui_soft" }

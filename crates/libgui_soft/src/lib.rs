@@ -27,6 +27,8 @@
 //! If this and the shader disagree, the shader is right: this file follows it
 //! line by line, and `libgui_wgpu`'s parity test checks the two against each
 //! other on a real GPU.
+pub mod scenes;
+
 
 use libgui::render_contract::{PrimitiveKind, CONTRACT_VERSION};
 use libgui::{Backend, Color, FrameOutput, Globals, Instance, TextureId};
@@ -128,8 +130,8 @@ pub struct SoftRenderer {
     atlas: Vec<u8>,
     atlas_size: u32,
     atlas_version: u64,
-    user: HashMap<u32, Texture>,
-    next_user: u32,
+    user: HashMap<u64, Texture>,
+    next_user: u64,
 }
 
 impl SoftRenderer {

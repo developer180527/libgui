@@ -282,3 +282,49 @@ fn a_frame_has_no_per_pixel_alpha_but_can_be_tinted() {
     let red = dimmed.at(0.5, 0.5)[0];
     assert!((100..=160).contains(&red), "a half-alpha tint did not fade the frame: red {red}");
 }
+
+/// A GL render target has its origin at the bottom left, so a host whose API
+/// disagrees with libgui's top-left convention needs a way to flip. There is
+/// no flag for it; swapping the v coordinates is the way, and this is the test
+/// that makes saying so honest.
+#[test]
+fn swapping_the_v_coordinates_turns_an_image_over() {
+    /// Red on the top half, blue on the bottom.
+    fn halves() -> Texture {
+        let (w, h) = (8u32, 8u32);
+        let mut data = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let _ = x;
+                let px: [u8; 4] = if y < h / 2 { [255, 0, 0, 255] } else { [0, 0, 255, 255] };
+                data.extend_from_slice(&px);
+            }
+        }
+        Texture { width: w, height: h, data }
+    }
+
+    let draw = |flip: bool| {
+        let mut soft = SoftRenderer::new();
+        let tex = soft.register_texture(halves());
+        run(&mut soft, 1.0, move |ui| {
+            let layout = Layout::column().width(Size::Grow(1.0)).height(Size::Grow(1.0)).padding(Insets::all(20.0));
+            ui.container(layout, Frame::none(), |ui| {
+                let id = Id::new("flipped");
+                let uv = if flip { [0.0, 1.0, 1.0, 0.0] } else { [0.0, 0.0, 1.0, 1.0] };
+                ui.add_leaf(id, Layout::leaf(Size::Grow(1.0), Size::Grow(1.0)), Vec2::ZERO, false, move |p, r| {
+                    p.image_uv(r, tex, uv, 0.0);
+                });
+                ui.rect_of(id).unwrap_or_default()
+            })
+        })
+    };
+
+    let upright = draw(false);
+    let flipped = draw(true);
+    // A quarter down and three quarters down, well inside each half.
+    let redish = |px: [u8; 4]| px[0] > px[2];
+    assert!(redish(upright.at(0.5, 0.25)), "the top is not the top: {:?}", upright.at(0.5, 0.25));
+    assert!(!redish(upright.at(0.5, 0.75)), "the bottom is not the bottom");
+    assert!(!redish(flipped.at(0.5, 0.25)), "swapping v did not turn it over: {:?}", flipped.at(0.5, 0.25));
+    assert!(redish(flipped.at(0.5, 0.75)), "swapping v did not turn it over");
+}

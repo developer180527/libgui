@@ -1,19 +1,22 @@
-//! Scenes for golden-image and GPU-parity tests. Shared by path:
-//! `libgui_soft/tests/golden.rs` renders them on the CPU against checked-in
-//! PNGs, and `libgui_wgpu/tests/parity.rs` renders them through the real shader
-//! to check the CPU renderer against a GPU.
+//! A gallery of scenes covering every primitive libgui can draw: borders,
+//! shadows, lines, glyphs, images with rounded corners, clipping, text
+//! selection and fractional DPI.
+//!
+//! In the library rather than beside the tests, because a renderer that is not
+//! libgui's own needs them most. `libgui_soft/tests/golden.rs` renders them on
+//! the CPU against checked-in PNGs, `libgui_wgpu/tests/parity.rs` renders them
+//! through the real shader to check the CPU renderer against a GPU, and a C or
+//! C++ host builds them through `libgui_conformance_*` and diffs its own
+//! output against [`crate::SoftRenderer`]'s. "My port looks slightly off"
+//! becomes a failing test naming the primitive.
 //!
 //! A scene is deterministic by construction: libgui's clock is the sum of the
 //! frames' `dt`, never the wall clock, and every run uses the same frames.
 //! libgui has no platform-dependent behaviour to pin: shortcut hints are text
 //! the app passes in.
 
-#![allow(dead_code)] // each including test uses a different subset
-
 use libgui::*;
 use std::cell::Cell;
-
-pub const FONT: &[u8] = include_bytes!("../../../../assets/Inter.ttf");
 
 /// Every scene is rendered at each of these DPI scales. 1.5 is where
 /// pixel-snapping bugs show.
@@ -76,8 +79,12 @@ impl Scene {
     }
 
     /// Run the scene's frames and hand the final one to `f`.
-    pub fn run<R>(&self, theme: Theme, scale: f32, f: impl FnOnce(&FrameOutput, (u32, u32)) -> R) -> R {
-        let mut ui = Ui::new(theme, FONT).expect("font");
+    ///
+    /// The font is the caller's: embedding one here would put a megabyte of
+    /// Inter into every binary that links this crate, and a host checking its
+    /// renderer already has the font it passed to libgui.
+    pub fn run<R>(&self, theme: Theme, scale: f32, font: &[u8], f: impl FnOnce(&FrameOutput, (u32, u32)) -> R) -> R {
+        let mut ui = Ui::new(theme, font).expect("font");
         TARGET.with(|t| t.set(Rect::default()));
         FIELD.with(|t| t.borrow_mut().clear());
         AREA.with(|t| {

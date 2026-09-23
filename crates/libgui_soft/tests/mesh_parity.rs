@@ -10,7 +10,10 @@
 //! the point: what is under test is the **vertex** stage — the quad, the
 //! anti-aliasing padding, and the interpolated varyings.
 
-mod scenes;
+use libgui_soft::scenes;
+
+/// The font the scenes are drawn with; the library does not embed one.
+const SCENE_FONT: &[u8] = include_bytes!("../../../assets/Inter.ttf");
 
 use libgui::mesh::Mesh;
 use libgui_soft::SoftRenderer;
@@ -22,7 +25,7 @@ fn every_scene_renders_identically_from_triangles() {
     for scene in SCENES {
         for (theme_name, theme) in THEMES {
             for scale in SCALES {
-                scene.run(theme(), scale, |out, (w, h)| {
+                scene.run(theme(), scale, SCENE_FONT, |out, (w, h)| {
                     let instanced = SoftRenderer::new().render_to_image(out, w, h);
                     let mut mesh = Mesh::new();
                     mesh.build(out.draw);
@@ -90,7 +93,7 @@ fn an_empty_frame_expands_to_nothing() {
 #[test]
 fn the_expansion_costs_what_the_docs_say() {
     let scene = SCENES.iter().max_by_key(|s| s.name.len()).expect("scenes");
-    scene.run(scenes::THEMES[0].1(), 1.0, |out, _| {
+    scene.run(scenes::THEMES[0].1(), 1.0, SCENE_FONT, |out, _| {
         let mut mesh = Mesh::new();
         mesh.build(out.draw);
         let instanced = out.draw.instances.len() * libgui::render_contract::INSTANCE_STRIDE;

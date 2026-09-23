@@ -419,6 +419,45 @@ int main(int argc, char** argv) {
         CHECK((uint64_t)at == stride, "the attributes do not add up to the stride");
     }
 
+    /* --- the conformance kit ---------------------------------------------
+     *
+     * What a host with its own renderer does: build each scene, render it
+     * both ways, and diff. Here there is no second renderer, so this checks
+     * the loop itself — every scene builds, and the reference comes back at
+     * the size it should be.
+     */
+    libgui_enable_reference_render(ui, 1);
+    {
+        uint32_t scenes = libgui_conformance_scene_count();
+        uint32_t checked = 0;
+        CHECK(scenes > 0, "the conformance gallery is empty");
+        for (uint32_t i = 0; i < scenes; i++) {
+            if (libgui_conformance_scene_needs_input(i)) continue;  /* needs a pointer driven */
+            const char* name = libgui_conformance_scene_name(i);
+            float w = 0.0f, h = 0.0f;
+            CHECK(libgui_conformance_scene_size(i, &w, &h), "a scene has no size");
+
+            const float scale = 1.5f;  /* where pixel snapping shows */
+            for (int pass = 0; pass < 2; pass++) {  /* layout settles on the second */
+                libgui_begin_frame(ui, w, h, scale, 1.0f);
+                CHECK(libgui_conformance_build(ui, i), "a scene did not build");
+                libgui_end_frame(ui);
+            }
+
+            uint32_t rw = 0, rh = 0;
+            const uint8_t* px = libgui_reference_pixels(ui, &rw, &rh);
+            if (px == NULL || rw == 0 || rh == 0) {
+                printf("FAIL: no reference image for scene %s\n", name ? name : "?");
+                failures++;
+                continue;
+            }
+            /* my_renderer_draw(ui); compare(my_readback(), px, rw, rh); */
+            checked++;
+        }
+        CHECK(checked >= 4, "too few scenes could be checked without driving input");
+    }
+    libgui_enable_reference_render(ui, 0);
+
     libgui_ui_free(ui);
     libgui_ui_free(NULL);
     free(font);

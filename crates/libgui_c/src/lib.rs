@@ -30,6 +30,7 @@
 
 use std::os::raw::c_char;
 
+mod conformance;
 mod containers;
 mod convert;
 mod handle;
@@ -47,6 +48,7 @@ mod theme_dnd;
 pub mod table;
 mod types;
 
+pub use conformance::*;
 pub use containers::*;
 pub use handle::*;
 pub use dock::*;
@@ -64,7 +66,10 @@ pub use table::*;
 pub use types::*;
 
 /// Bump on any change that moves a byte or renames a symbol.
-pub const LIBGUI_ABI_VERSION: u32 = 1;
+/// 2: texture ids are 64-bit, and `LibguiBatch` grew a field, so a binary
+/// built against version 1 would read the wrong bytes. That is exactly what
+/// this number is for.
+pub const LIBGUI_ABI_VERSION: u32 = 2;
 
 /// The ABI version this library was built with. A host compares it against the
 /// `LIBGUI_ABI_VERSION` in the header it compiled against, once, at start-up:

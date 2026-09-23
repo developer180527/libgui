@@ -828,7 +828,31 @@ check `libgui_mesh_fits_u16` if your index buffers are 16-bit.
 It costs about four and a half times the bytes, so it is off by default and a
 renderer that can instance should keep instancing.
 
-### 14.2 How it stays in step with the library
+### 14.2 Checking your renderer against the reference
+
+A backend for an unusual RHI is ported by hand, and a hand port is *nearly*
+right: corners a shade off, a shadow that clips, glyphs half a pixel up at 1.5x
+DPI. Each is invisible until something puts it beside the reference, so the
+reference ships.
+
+`libgui_soft` renders a frame on the CPU by evaluating the same shader per
+pixel with IEEE-exact operations, so it produces the same bytes on every
+machine. `libgui_enable_reference_render(ui, 1)` renders every frame that way
+as well, and `libgui_reference_pixels` hands back RGBA8, premultiplied,
+top-left origin. `libgui_conformance_*` is a gallery covering every primitive —
+borders, shadows, lines, glyphs, rounded images, clipping — so a failure names
+the scene, which names the primitive. `crates/libgui_c/tests/smoke.c` runs the
+loop.
+
+What your renderer has to agree with is in the header, in one block, because
+none of it is guessable: premultiplied output, sRGB-encoded straight-alpha
+colours into a UNORM target, bilinear clamped sampling, a top-left origin, and
+no depth, culling or scissor. So is the order within a frame — **build →
+`libgui_end_frame` → size your targets → render your scene → draw the UI** —
+because a widget's rect exists only after layout, and rendering a scene before
+that sizes it from last frame's rect.
+
+### 14.3 How it stays in step with the library
 
 The widget surface is declared **once**, in `src/table.rs`, and the macro emits
 the `extern "C"` functions, the header declarations and a symbol manifest from
@@ -853,7 +877,7 @@ bugs hide, and that test prints things like:
 FAIL: LibguiResponse is 88 bytes here and 96 in the library
 ```
 
-### 14.3 C++
+### 14.4 C++
 
 `libgui.hpp` sits on the same ABI and costs nothing at runtime. It exists
 because the three tedious things in C are the three you do constantly:
@@ -890,7 +914,7 @@ ui.end_frame();
 C++17, header-only, and it adds nothing to the ABI — so `tests/smoke.cpp`
 compiles it against the same static library the C test uses.
 
-### 14.4 What crosses, and what does not yet
+### 14.5 What crosses, and what does not yet
 
 Widgets (label, heading, button, checkbox, toggle, slider, drag value,
 progress, selectable, tree row, menu items, tooltip, context menu), text input
@@ -921,7 +945,7 @@ boxes.
 **Every exported function is called by a test**, checked by extracting the
 symbols and grepping the test directory rather than by reading the list.
 
-### 14.5 Drawing your own widgets, and drawing them less often
+### 14.6 Drawing your own widgets, and drawing them less often
 
 The whole painter crosses — `measure`, `hairline`, `snap_rect`, `shadow`,
 `polyline`, `bezier`, `wire`, `chevron`, the four text placements, tinted
@@ -966,7 +990,7 @@ That is the second of three ways to do less work. The first is
 last frame's batches with no UI frame at all, which is how a viewport animates
 while the UI around it costs nothing.
 
-### 14.6 Building it from CMake
+### 14.7 Building it from CMake
 
 ```cmake
 add_subdirectory(third_party/libgui/crates/libgui_c)

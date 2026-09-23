@@ -16,7 +16,10 @@
 //! (changed pixels in magenta over a faded copy of the expected image) next to
 //! the build, and prints where.
 
-mod scenes;
+use libgui_soft::scenes;
+
+/// The font the scenes are drawn with; the library does not embed one.
+const SCENE_FONT: &[u8] = include_bytes!("../../../assets/Inter.ttf");
 
 use libgui_soft::{SoftRenderer, Target};
 use scenes::{Scene, SCALES, THEMES};
@@ -42,7 +45,7 @@ fn file_name(scene: &Scene, scale: f32, theme: &str) -> String {
 }
 
 fn render(scene: &Scene, theme: fn() -> libgui::Theme, scale: f32) -> Target {
-    scene.run(theme(), scale, |out, (w, h)| SoftRenderer::new().render_to_image(out, w, h))
+    scene.run(theme(), scale, SCENE_FONT, |out, (w, h)| SoftRenderer::new().render_to_image(out, w, h))
 }
 
 fn write_png(path: &Path, width: u32, height: u32, rgba: &[u8]) {

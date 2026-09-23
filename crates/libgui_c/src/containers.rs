@@ -346,7 +346,7 @@ pub unsafe extern "C" fn libgui_painter_line(
 #[no_mangle]
 pub unsafe extern "C" fn libgui_painter_image(p: *mut LibguiPainter, r: LibguiRect, texture: u64, radius: f32) {
     if let Some(p) = painter(p) {
-        p.image(Rect::new(r.x, r.y, r.w, r.h), libgui::TextureId::User(texture as u32), radius);
+        p.image(Rect::new(r.x, r.y, r.w, r.h), libgui::TextureId::User(texture), radius);
     }
 }
 
@@ -369,7 +369,7 @@ pub unsafe extern "C" fn libgui_painter_image_uv(
     tint: LibguiColor,
 ) {
     if let Some(p) = painter(p) {
-        let tex = libgui::TextureId::User(texture as u32);
+        let tex = libgui::TextureId::User(texture);
         p.image_tinted(Rect::new(r.x, r.y, r.w, r.h), tex, [u0, v0, u1, v1], radius, color(tint));
     }
 }
@@ -512,7 +512,7 @@ pub unsafe extern "C" fn libgui_painter_shadow(
 pub unsafe extern "C" fn libgui_painter_image_tinted(
     p: *mut LibguiPainter,
     r: LibguiRect,
-    texture_index: u32,
+    texture_index: u64,
     u0: f32,
     v0: f32,
     u1: f32,

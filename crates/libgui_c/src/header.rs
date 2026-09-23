@@ -43,6 +43,39 @@ const PREAMBLE: &str = r##"/* libgui — C ABI.
  *  - A NULL Ui, a NULL string or a NULL out-parameter is tolerated: the call
  *    does nothing useful and libgui_last_error() says what happened. It will
  *    not crash.
+ *
+ * What your renderer must agree with — none of it is guessable, and getting
+ * one wrong looks like a nearly-right port:
+ *
+ *  - BLENDING: the shader outputs PREMULTIPLIED colour. Blend with
+ *    src=ONE, dst=ONE_MINUS_SRC_ALPHA.
+ *  - COLOUR SPACE: colours crossing this boundary are sRGB-ENCODED with
+ *    STRAIGHT alpha, and the shader premultiplies. Render into a UNORM
+ *    target, not an sRGB view -- the values are already encoded, so an sRGB
+ *    target encodes them twice. libgui_frame_clear_color() is in the same
+ *    space: 0..1 sRGB-encoded, straight alpha.
+ *  - YOUR TEXTURES: RGBA8, sRGB-encoded values, composited as OPAQUE RGB --
+ *    a viewport's own alpha is ignored. The instance colour still tints it.
+ *  - SAMPLING: bilinear, clamped to edge. Hardware filtering is fine; the CPU
+ *    reference does the same thing by hand, which is what makes the two
+ *    comparable.
+ *  - ORIENTATION: top-left origin, for both the glyph atlas and your
+ *    textures; uv (0,0) is the top-left texel. An API whose render targets
+ *    are bottom-left (GL) needs the image turned over: swap v0 and v1 in
+ *    libgui_painter_image_uv (pass 1 then 0).
+ *  - NO depth test, NO culling, NO scissor: clipping is per-instance, in the
+ *    fragment shader.
+ *
+ * And the order within a frame, which matters to anyone rendering a scene
+ * into a texture the UI shows:
+ *
+ *     build -> libgui_end_frame -> size your targets -> render your scene
+ *           -> draw the UI
+ *
+ * A widget's rect exists only after layout, which happens inside
+ * libgui_end_frame. Render your scene BEFORE that and you are sizing it from
+ * last frame's rect, which shows as the viewport lagging a frame behind while
+ * a window is resized.
  */
 #ifndef LIBGUI_H
 #define LIBGUI_H
@@ -54,7 +87,7 @@ const PREAMBLE: &str = r##"/* libgui — C ABI.
 extern "C" {
 #endif
 
-#define LIBGUI_ABI_VERSION 1u
+#define LIBGUI_ABI_VERSION 2u
 
 typedef struct LibguiUi LibguiUi;
 
@@ -206,7 +239,7 @@ void libgui_painter_text_wrapped(LibguiPainter* p, LibguiRect r, float size, Lib
                                  const char* text);
 
 void libgui_painter_shadow(LibguiPainter* p, LibguiRect r, float radius, float blur, LibguiColor c);
-void libgui_painter_image_tinted(LibguiPainter* p, LibguiRect r, uint32_t texture_index,
+void libgui_painter_image_tinted(LibguiPainter* p, LibguiRect r, uint64_t texture_index,
                                  float u0, float v0, float u1, float v1, float radius, LibguiColor tint);
 /* `points` is `count` pairs of floats. */
 void libgui_painter_polyline(LibguiPainter* p, const float* points, uint64_t count, float width, LibguiColor c);
@@ -340,10 +373,13 @@ uint8_t libgui_consume_shortcut(LibguiUi* ui, uint32_t key, LibguiModifiers m);
 /* --- Frame output -------------------------------------------------------- */
 
 typedef struct {
+    /* Which of your textures, when texture_kind is 1. 64 bits, so a native
+     * handle or a pointer survives the trip; it was 32 and cut them in half. */
+    uint64_t texture_index;
     uint32_t texture_kind;   /* 0 = glyph atlas, 1 = one of your textures */
-    uint32_t texture_index;
     uint32_t first;
     uint32_t count;
+    uint32_t _pad;           /* zero */
 } LibguiBatch;
 
 typedef struct {
@@ -401,6 +437,56 @@ uint8_t            libgui_mesh_fits_u16(LibguiUi* ui);
 uint64_t           libgui_vertex_stride(void);
 uint32_t           libgui_vertex_attribute_count(void);
 uint8_t            libgui_vertex_attribute(uint32_t index, uint32_t* out_floats, uint32_t* out_offset);
+/* What that attribute is: "pos", "local", "uv", "color", "border_color",
+ * "clip", "params", "half_size", "seg" -- the shader's varyings, so a host can
+ * match by name instead of hard-coding the order. NULL when out of range. */
+const char*        libgui_vertex_attribute_name(uint32_t index);
+
+/* --- Checking your renderer ----------------------------------------------
+ *
+ * A backend written for an unusual RHI is ported by hand, and a hand port is
+ * *nearly* right: corners a shade off, a shadow that clips, glyphs half a
+ * pixel up at 1.5x DPI. Each is invisible until something puts it beside the
+ * reference. So the reference ships.
+ *
+ * libgui_soft renders a frame on the CPU by evaluating the same shader per
+ * pixel, with IEEE-exact operations only, so it produces the same bytes on
+ * every machine. Turn it on, build a scene, compare:
+ *
+ *     libgui_enable_reference_render(ui, 1);
+ *     for (uint32_t i = 0; i < libgui_conformance_scene_count(); i++) {
+ *         if (libgui_conformance_scene_needs_input(i)) continue;
+ *         float w, h;
+ *         libgui_conformance_scene_size(i, &w, &h);
+ *         for (int pass = 0; pass < 2; pass++) {    // layout settles on 2
+ *             libgui_begin_frame(ui, w, h, scale, 1.0f);
+ *             libgui_conformance_build(ui, i);
+ *             libgui_end_frame(ui);
+ *         }
+ *         my_renderer_draw(ui);
+ *         uint32_t rw, rh;
+ *         const uint8_t* want = libgui_reference_pixels(ui, &rw, &rh);
+ *         compare(my_readback(), want, rw, rh);
+ *     }
+ *
+ * A failure names the scene, which names the primitive.
+ */
+void           libgui_enable_reference_render(LibguiUi* ui, uint8_t on);
+/* RGBA8, premultiplied, top-left origin, width*height*4 bytes. NULL unless
+ * the reference render was on when the frame ended. Valid until the next
+ * libgui_begin_frame. Your own textures draw as nothing here. */
+const uint8_t* libgui_reference_pixels(LibguiUi* ui, uint32_t* out_w, uint32_t* out_h);
+
+uint32_t       libgui_conformance_scene_count(void);
+/* Owned by the library, valid until the next call. NULL when out of range. */
+const char*    libgui_conformance_scene_name(uint32_t index);
+uint8_t        libgui_conformance_scene_size(uint32_t index, float* out_w, float* out_h);
+/* 1 when the scene needs the pointer or keyboard driven first — a hovered
+ * button, a drag in flight. Skip those for a first port; the rest cover every
+ * primitive. */
+uint8_t        libgui_conformance_scene_needs_input(uint32_t index);
+/* Build it between begin_frame and end_frame, at the size above. */
+uint8_t        libgui_conformance_build(LibguiUi* ui, uint32_t index);
 
 /* --- Text fields and pickers --------------------------------------------- */
 

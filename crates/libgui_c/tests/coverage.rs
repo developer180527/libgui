@@ -826,3 +826,181 @@ fn a_polyline_is_read_in_place_and_reads_the_same_points() {
 
     assert_eq!(from_c, from_rust, "the polyline read through C is not the one the caller passed");
 }
+
+/// A texture id is whatever the host's renderer calls a texture — a bgfx
+/// handle, a GL name, a pointer. It used to be cut to 32 bits on the way
+/// through, so anything above 4 billion came back as a different texture and
+/// the host drew the wrong thing with no error anywhere.
+#[test]
+fn a_64_bit_texture_id_survives_the_trip() {
+    unsafe {
+        // A value with bits set above 32, the way a pointer or a packed
+        // handle has: truncation would return the low half.
+        const ID: u64 = 0x1234_5678_9abc_def0;
+        let u = ui();
+        frame(u, || {
+            let _ = libgui_viewport(u, c("scene").as_ptr(), ID);
+        });
+        let mut n = 0u64;
+        let batches = std::slice::from_raw_parts(libgui_frame_batches(u, &mut n), n as usize);
+        let mine = batches.iter().find(|b| b.texture_kind == 1).expect("the viewport drew nothing");
+        assert_eq!(mine.texture_index, ID, "the texture id was cut on the way through");
+        libgui_ui_free(u);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The conformance kit
+// ---------------------------------------------------------------------------
+
+/// The reference image a host checks its own renderer against must be the
+/// same image `libgui_soft` produces directly — otherwise the kit certifies
+/// the wrong thing, which is worse than having no kit.
+#[test]
+fn the_reference_pixels_are_the_reference_renderers_own() {
+    use libgui_soft::scenes::SCENES;
+
+    // A scene that needs no input, so both paths can build it the same way.
+    let (index, scene) = SCENES
+        .iter()
+        .enumerate()
+        .find(|(_, s)| s.pointer == libgui_soft::scenes::Pointer::None)
+        .expect("no input-free scene");
+
+    let scale = 1.5; // where pixel-snapping bugs show
+    let (w, h) = scene.size;
+
+    let through_c = unsafe {
+        let u = ui();
+        libgui_enable_reference_render(u, 1);
+        // Twice: layout is solved after a frame is built.
+        for _ in 0..2 {
+            libgui_begin_frame(u, w, h, scale, 1.0);
+            assert_eq!(libgui_conformance_build(u, index as u32), 1, "the scene did not build");
+            libgui_end_frame(u);
+        }
+        let (mut rw, mut rh) = (0u32, 0u32);
+        let p = libgui_reference_pixels(u, &mut rw, &mut rh);
+        assert!(!p.is_null(), "no reference image");
+        assert_eq!((rw, rh), scene.pixels(scale), "the reference is the wrong size");
+        let px = std::slice::from_raw_parts(p, (rw * rh * 4) as usize).to_vec();
+        libgui_ui_free(u);
+        px
+    };
+
+    // The same scene, rendered by libgui_soft directly.
+    let (pw, ph) = scene.pixels(scale);
+    let direct = scene.run(libgui::Theme::dark(), scale, FONT, |out, _| {
+        libgui_soft::SoftRenderer::new().render_to_image(out, pw, ph).data
+    });
+
+    assert_eq!(through_c.len(), direct.len(), "the two paths disagree about the image size");
+    let differing = through_c.iter().zip(&direct).filter(|(a, b)| a != b).count();
+    assert_eq!(differing, 0, "{differing} bytes differ between the C path and the reference renderer");
+    assert!(through_c.iter().any(|&b| b != 0), "the reference image is blank");
+}
+
+/// The gallery describes itself, so a host can loop over it without knowing
+/// what is in it.
+#[test]
+fn the_scene_gallery_describes_itself() {
+    unsafe {
+        let n = libgui_conformance_scene_count();
+        assert!(n > 5, "a gallery of {n} scenes does not cover much");
+        let mut input_free = 0;
+        for i in 0..n {
+            let name = libgui_conformance_scene_name(i);
+            assert!(!name.is_null(), "scene {i} has no name");
+            let name = std::ffi::CStr::from_ptr(name).to_string_lossy().into_owned();
+            assert!(!name.is_empty());
+
+            let (mut w, mut h) = (0.0f32, 0.0f32);
+            assert_eq!(libgui_conformance_scene_size(i, &mut w, &mut h), 1, "{name} has no size");
+            assert!(w > 0.0 && h > 0.0, "{name} is {w}x{h}");
+            input_free += (libgui_conformance_scene_needs_input(i) == 0) as u32;
+        }
+        assert!(input_free >= 4, "only {input_free} scenes can be checked without driving input");
+
+        // Out of range is an answer, not a crash.
+        assert!(libgui_conformance_scene_name(n).is_null());
+        assert_eq!(libgui_conformance_scene_size(n, std::ptr::null_mut(), std::ptr::null_mut()), 0);
+        let u = ui();
+        libgui_begin_frame(u, 100.0, 100.0, 1.0, 1.0 / 60.0);
+        assert_eq!(libgui_conformance_build(u, n), 0, "an out-of-range scene claimed to build");
+        libgui_end_frame(u);
+        assert_eq!(libgui_ui_poisoned(u), 0);
+        libgui_ui_free(u);
+    }
+}
+
+/// Off by default: it rasterises the whole frame in software.
+#[test]
+fn the_reference_render_is_off_until_asked_for() {
+    unsafe {
+        let u = ui();
+        frame(u, || libgui_label(u, c("x").as_ptr()));
+        let (mut w, mut h) = (1u32, 1u32);
+        assert!(libgui_reference_pixels(u, &mut w, &mut h).is_null(), "it rendered without being asked");
+        assert_eq!((w, h), (0, 0));
+        libgui_ui_free(u);
+    }
+}
+
+/// Width and offset describe a vertex buffer; the name connects it to a
+/// shader. Without it a host hard-codes the mapping, which is a silent
+/// dependency on an order that could change.
+#[test]
+fn every_vertex_attribute_says_what_it_is() {
+    unsafe {
+        let count = libgui_vertex_attribute_count();
+        let names: Vec<String> = (0..count)
+            .map(|i| {
+                let p = libgui_vertex_attribute_name(i);
+                assert!(!p.is_null(), "attribute {i} has no name");
+                std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned()
+            })
+            .collect();
+        // The names are the shader's varyings, in the order the vertex packs
+        // them, and they must agree with what libgui itself calls them.
+        let want: Vec<&str> =
+            libgui::render_contract::VERTEX_ATTRIBUTES.iter().map(|&(_, name, _, _)| name).collect();
+        assert_eq!(names, want, "the C names have drifted from the contract");
+        assert!(libgui_vertex_attribute_name(count).is_null(), "past the end should be null");
+    }
+}
+
+/// A renderer rarely has a texture the exact size of the widget: pooled or
+/// fixed-size targets, a scene rendered at half resolution, several views in
+/// one atlas. Showing the whole texture and nothing else meant rebuilding the
+/// widget by hand out of add_leaf, painter_image_uv and interact.
+#[test]
+fn a_viewport_can_show_part_of_a_texture() {
+    unsafe {
+        let u = ui();
+        frame(u, || {
+            // The top-left quarter of a screen-sized target.
+            let _ = libgui_viewport_uv(u, c("scene").as_ptr(), 9, 0.0, 0.0, 0.5, 0.5);
+        });
+        let mut n = 0u64;
+        let batches = std::slice::from_raw_parts(libgui_frame_batches(u, &mut n), n as usize);
+        assert!(batches.iter().any(|b| b.texture_kind == 1 && b.texture_index == 9), "it drew no texture");
+
+        // And the uv actually reaches the instance rather than being ignored.
+        let full = {
+            let u2 = ui();
+            libgui_begin_frame(u2, 400.0, 300.0, 1.0, 1.0 / 60.0);
+            let _ = libgui_viewport(u2, c("scene").as_ptr(), 9);
+            libgui_end_frame(u2);
+            let mut m = 0u64;
+            let p = libgui_frame_instances(u2, &mut m) as *const u8;
+            let bytes = std::slice::from_raw_parts(p, m as usize * libgui_instance_stride() as usize).to_vec();
+            libgui_ui_free(u2);
+            bytes
+        };
+        let mut m = 0u64;
+        let p = libgui_frame_instances(u, &mut m) as *const u8;
+        let part = std::slice::from_raw_parts(p, m as usize * libgui_instance_stride() as usize).to_vec();
+        assert_ne!(part, full, "the sub-rect drew the same instances as the whole texture");
+        libgui_ui_free(u);
+    }
+}

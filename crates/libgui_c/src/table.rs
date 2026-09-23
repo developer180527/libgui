@@ -364,7 +364,21 @@ widgets! { ui =>
     /// to give: inside one whose height is `Fit`, a viewport is zero pixels
     /// tall and draws nothing at all.
     fn libgui_viewport(key: str, texture: u64) -> LibguiResponse {
-        ui.viewport(key, libgui::TextureId::User(texture as u32), |_, _| {})
+        ui.viewport(key, libgui::TextureId::User(texture), |_, _| {})
+    }
+
+    /// `libgui_viewport` showing only part of the texture.
+    ///
+    /// A renderer rarely has a texture the exact size of the widget: targets
+    /// are pooled or fixed-size, a scene may be rendered at half resolution,
+    /// several views may be packed into one atlas. `u0`,`v0`,`u1`,`v1` are in
+    /// 0..1 and select the sub-rect to show.
+    ///
+    /// libgui's origin is top-left. An API whose render targets are
+    /// bottom-left (GL) passes v the other way round: 0,1,1,0 shows the whole
+    /// texture, turned over.
+    fn libgui_viewport_uv(key: str, texture: u64, u0: f32, v0: f32, u1: f32, v1: f32) -> LibguiResponse {
+        ui.viewport_uv(key, libgui::TextureId::User(texture), [u0, v0, u1, v1], |_, _| {})
     }
 
     /// Put the keyboard cursor on `index`, so clicking a row leaves it where

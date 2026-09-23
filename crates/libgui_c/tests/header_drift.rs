@@ -96,3 +96,45 @@ fn every_generated_declaration_is_documented() {
     );
 }
 
+/// No block comment in the header may contain another `/*`.
+///
+/// A C block comment does not nest: an example that writes one inside a
+/// comment ends it early, and the rest of the comment is compiled as code.
+/// The generated half escapes this when it renders doc text; the hand-written
+/// preamble has no such protection, and this caught exactly that mistake.
+///
+/// The C smoke test would also catch it, but only in the job that has a C
+/// compiler, and the error it gives names a line number a hundred lines later.
+#[test]
+fn no_comment_in_the_header_ends_early() {
+    let header = libgui_c::header::render();
+    let mut inside = false;
+    let bytes = header.as_bytes();
+    let mut line = 1;
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        if bytes[i] == b'\n' {
+            line += 1;
+        }
+        match (&bytes[i..i + 2], inside) {
+            (b"/*", false) => {
+                inside = true;
+                i += 2;
+                continue;
+            }
+            (b"/*", true) => panic!(
+                "line {line}: a `/*` inside a block comment ends it early — \
+                 write examples with `//` instead"
+            ),
+            (b"*/", true) => {
+                inside = false;
+                i += 2;
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    assert!(!inside, "the header ends inside a block comment");
+}
+
