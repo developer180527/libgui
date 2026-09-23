@@ -254,6 +254,19 @@ pub unsafe extern "C" fn libgui_end_frame(ui: *mut LibguiUi) {
     if uip.is_null() {
         return;
     }
+    // A container the caller never closed. libgui's own check for this is a
+    // `debug_assert`, which is nothing in the release build a shipping
+    // application uses — and the frame that comes out is quietly wrong rather
+    // than absent. Half a built frame is not worth continuing into, so it is
+    // reported here instead, where the caller can be named.
+    let open = unsafe { &*uip }.open_depth();
+    if open > 0 {
+        set_error(&format!(
+            "libgui_end_frame: {open} container(s) still open — every open_* needs its close_*"
+        ));
+        *poisoned = true;
+        return;
+    }
     if catch_unwind(AssertUnwindSafe(|| {
         let out = unsafe { &mut *uip }.end_frame();
         crate::frame::capture(&out, frame);

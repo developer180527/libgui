@@ -546,10 +546,17 @@ pub unsafe extern "C" fn libgui_painter_polyline(
     if points.is_null() || count == 0 {
         return;
     }
-    let xs = unsafe { std::slice::from_raw_parts(points, count as usize * 2) };
-    let pts: Vec<Vec2> = xs.chunks_exact(2).map(|q| Vec2::new(q[0], q[1])).collect();
+    // Read in place rather than copied into a `Vec`. This is a paint callback
+    // — it runs for every polyline of every frame — and a CAD drawing is
+    // mostly polylines, so allocating per call is the wrong shape. `Vec2` is
+    // `#[repr(C)]`, two `f32`s with no padding, which the assertions below
+    // pin; every bit pattern is a valid `f32`, so the caller's array *is* a
+    // slice of points.
+    const _: () = assert!(std::mem::size_of::<Vec2>() == 2 * std::mem::size_of::<f32>());
+    const _: () = assert!(std::mem::align_of::<Vec2>() == std::mem::align_of::<f32>());
+    let pts = unsafe { std::slice::from_raw_parts(points as *const Vec2, count as usize) };
     if let Some(p) = painter(p) {
-        p.polyline(&pts, width, color(c));
+        p.polyline(pts, width, color(c));
     }
 }
 

@@ -154,9 +154,23 @@ so the two cannot drift.
 
 - The C ABI needs a callback only where one is genuinely unavoidable: custom
   painting, dock panels and table cells.
+- One declaration carries the documentation too. The doc comment on a widget's
+  line in the table becomes both its rustdoc and the comment above its C
+  declaration, so the header explains itself and cannot drift from the Rust
+  side; a widget without one fails the drift test.
 - Two entry points per builder to document.
 - `open_depth()` exists so a binding can blame the caller for a missing close
-  rather than letting an assertion fire somewhere less useful.
+  rather than letting an assertion fire somewhere less useful. The C binding
+  checks it at `libgui_end_frame` and poisons the handle, because libgui's own
+  check is a `debug_assert` and an application ships the release build.
+- **A pair whose `open_` answers a question is the sharp one.** `open_cached`
+  returns false on a frame that replayed, and `open_popup_body` returns false
+  while the popup is closed — which is most frames. Ignoring the answer
+  compiles, and closing anyway used to pop the *enclosing* cache or close the
+  caller's own container: content vanished from later frames and the handle
+  still called itself healthy. Both now refuse, name themselves, and check
+  they are closing the node they opened. A quiet `debug_assert` was the wrong
+  choice for a mistake only a release build can make.
 
 ---
 

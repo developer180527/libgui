@@ -549,6 +549,9 @@ pub struct NavResponse {
 /// in a field, so a cache inside a cache still closes the right one.
 struct CachedOpen {
     id: Id,
+    /// The node `open_cached` attached, so `close_cached` can check it is
+    /// closing its own and not a container the caller opened in between.
+    node: usize,
     deps: u64,
     pointer: crate::subtree_cache::Pointer,
     env: crate::subtree_cache::Env,
@@ -1176,8 +1179,33 @@ impl Ui {
         true
     }
 
-    /// Close the panel opened by [`Ui::open_popup_body`].
+    /// Close the panel opened by [`Ui::open_popup_body`]. Only call this when
+    /// it returned true.
+    ///
+    /// # Panics
+    ///
+    /// When no popup body is open, or when a container opened inside it has
+    /// not been closed yet.
+    ///
+    /// A popup is *closed* most of the time, so `open_popup_body` returns
+    /// false on most frames — which makes ignoring its answer the easiest
+    /// mistake here, and the most damaging: closing anyway used to close
+    /// whatever container the caller had open instead, quietly, and the panic
+    /// that eventually followed named some later `close_container` rather than
+    /// the call that caused it.
     pub fn close_popup_body(&mut self) {
+        let Some(&id) = self.popup_stack.last() else {
+            panic!(
+                "libgui: close_popup_body without an open popup body — open_popup_body \
+                 returns false while the popup is closed, and then there is nothing to \
+                 build and nothing to close"
+            );
+        };
+        assert_eq!(
+            self.stack.last().map(|&(i, _)| self.nodes[i].id),
+            Some(id),
+            "libgui: close_popup_body with a container still open inside the popup"
+        );
         self.close();
         self.popup_stack.pop();
     }
@@ -2421,17 +2449,38 @@ impl Ui {
         n.recording = true;
         let i = self.attach(n);
         self.open(i);
-        self.cached_open.push(CachedOpen { id, deps, pointer, env, start, settled_before });
+        self.cached_open.push(CachedOpen { id, node: i, deps, pointer, env, start, settled_before });
         true
     }
 
     /// Close the subtree [`Ui::open_cached`] opened. Only call this when it
     /// returned true.
+    ///
+    /// # Panics
+    ///
+    /// When no `open_cached` is waiting to be closed, or when a container
+    /// opened inside the subtree has not been closed yet.
+    ///
+    /// Panicking rather than returning quietly, for the same reason
+    /// [`Ui::close_container`] does: the likeliest mistake is closing on a
+    /// frame that *replayed* — where `open_cached` returned false and built
+    /// nothing — and a quiet return there pops the enclosing cache instead,
+    /// which ends its recording early. Everything built afterwards then falls
+    /// outside it, and every later replay draws a subtree with a piece
+    /// missing. That was silent in a release build, where `debug_assert` is
+    /// nothing, and silently losing content is far worse than stopping.
     pub fn close_cached(&mut self) {
         let Some(o) = self.cached_open.pop() else {
-            debug_assert!(false, "libgui: close_cached without a matching open_cached");
-            return;
+            panic!(
+                "libgui: close_cached without a matching open_cached — it returns false \
+                 on a frame that replayed, and then there is nothing to build and nothing to close"
+            );
         };
+        assert_eq!(
+            self.stack.last().map(|&(i, _)| i),
+            Some(o.node),
+            "libgui: close_cached with a container still open inside the cached subtree"
+        );
         self.close();
         self.cache.close_ids(o.id, o.start);
         self.cache.set_deps(o.id, o.deps, o.pointer, o.env);

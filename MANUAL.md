@@ -838,6 +838,11 @@ output and not the others.
 `cargo test -p libgui_c` regenerates the header and fails if the committed one
 is stale (`LIBGUI_WRITE_HEADER=1` updates it).
 
+Each widget's doc comment is carried into the header above its declaration, so
+`libgui.h` reads the way the Rust documentation does and neither can be updated
+without the other. A widget with no doc comment fails the drift test, since a
+declaration nobody explained is what the generated half used to be.
+
 The hand-written part of the header — the types, the callback vtables, the
 containers — is guarded differently, by `tests/smoke.c`: a C program compiled
 against the committed header and linked to the real static library, which

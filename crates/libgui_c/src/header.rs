@@ -610,21 +610,116 @@ const FOOTER: &str = r##"
 #endif /* LIBGUI_H */
 "##;
 
+/// A widget's Rust doc comment as a C block comment.
+///
+/// The same words reach both outputs, so a C programmer is not left with a
+/// wall of bare prototypes while the Rust side is documented. Only the
+/// spelling changes: rustdoc link and code syntax means nothing in C, and a
+/// `*/` inside the text would end the comment early.
+fn doc_comment(docs: &[&str]) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    for line in docs {
+        // `/// text` arrives as " text"; fences carry no meaning here.
+        let line = line.strip_prefix(' ').unwrap_or(line);
+        if line.trim_start().starts_with("```") {
+            continue;
+        }
+        lines.push(
+            line.replace("[`", "")
+                .replace("`]", "")
+                .replace('`', "")
+                // Never let the text close the comment it is inside.
+                .replace("*/", "* /"),
+        );
+    }
+    while lines.last().is_some_and(|l| l.trim().is_empty()) {
+        lines.pop();
+    }
+    if lines.is_empty() {
+        return String::new();
+    }
+    // A one-liner on one line; most of the table is one-liners.
+    if lines.len() == 1 {
+        return format!("/* {} */\n", lines[0].trim());
+    }
+    let mut out = String::from("/*");
+    for (i, line) in lines.iter().enumerate() {
+        if i == 0 {
+            out.push(' ');
+        } else {
+            out.push_str(" *");
+            if !line.is_empty() {
+                out.push(' ');
+            }
+        }
+        out.push_str(line.trim_end());
+        out.push('\n');
+    }
+    // Close on its own line, so adding a line to the doc is a one-line diff.
+    out.push_str(" */\n");
+    out
+}
+
 /// Render the header this build would produce.
 pub fn render() -> String {
     let mut out = String::from(PREAMBLE);
     out.push_str("\n/* === BEGIN GENERATED — from src/table.rs === */\n\n");
     // Widest return type and name, so the declarations line up in a column the
     // way a hand-written header would.
-    let ret_w = TABLE.iter().map(|(_, r, _)| r.len()).max().unwrap_or(0);
-    for (name, ret, params) in TABLE {
+    let ret_w = TABLE.iter().map(|(_, r, _, _)| r.len()).max().unwrap_or(0);
+    for (name, ret, params, docs) in TABLE {
         let mut args = String::from("LibguiUi* ui");
         for (p, ty) in *params {
             args.push_str(&format!(", {ty} {p}"));
         }
-        out.push_str(&format!("{ret:<ret_w$} {name}({args});\n"));
+        out.push_str(&doc_comment(docs));
+        out.push_str(&format!("{ret:<ret_w$} {name}({args});\n\n"));
     }
     out.push_str("\n/* === END GENERATED === */\n");
     out.push_str(FOOTER);
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Most of the table is one-liners, and a lone `*/` under each would
+    /// double the length of the header for nothing.
+    #[test]
+    fn a_one_line_doc_is_a_one_line_comment() {
+        assert_eq!(doc_comment(&[" A heading."]), "/* A heading. */\n");
+    }
+
+    #[test]
+    fn a_longer_doc_keeps_its_shape() {
+        let out = doc_comment(&[" First line.", "", " Second paragraph."]);
+        assert_eq!(out, "/* First line.\n *\n * Second paragraph.\n */\n");
+    }
+
+    /// The one way documentation could break the file it is written into.
+    #[test]
+    fn a_comment_terminator_in_the_text_cannot_end_the_comment() {
+        let out = doc_comment(&[" Divide with /* and */ carefully.", " More."]);
+        assert!(!out.contains("*/\n *"), "the comment ended early:\n{out}");
+        assert_eq!(out.matches("*/").count(), 1, "exactly one terminator, the real one:\n{out}");
+    }
+
+    /// rustdoc syntax means nothing in C: links and backticks are noise to a
+    /// reader who cannot click them.
+    #[test]
+    fn rustdoc_syntax_is_spelled_the_way_c_reads_it() {
+        let out = doc_comment(&[" See [`libgui_close_menu`] and `key`."]);
+        assert_eq!(out, "/* See libgui_close_menu and key. */\n");
+    }
+
+    /// A fenced block is Rust's way of marking an example; the example itself
+    /// is worth keeping, the fence is not.
+    #[test]
+    fn code_fences_are_dropped_and_their_contents_kept() {
+        let out = doc_comment(&[" Like this:", "", " ```c", " libgui_label(ui, \"hi\");", " ```"]);
+        assert!(out.contains("libgui_label(ui,"), "the example was lost:\n{out}");
+        assert!(!out.contains("```"), "a fence survived:\n{out}");
+    }
+}
+

@@ -575,40 +575,143 @@ uint64_t libgui_sizeof_drop_zone(void);
 
 /* === BEGIN GENERATED — from src/table.rs === */
 
+/* A line of body text. */
 void               libgui_label(LibguiUi* ui, const char* text);
+
+/* Body text in the muted colour. */
 void               libgui_label_muted(LibguiUi* ui, const char* text);
+
+/* A heading. */
 void               libgui_heading(LibguiUi* ui, const char* text);
+
+/* A section header, for grouping a panel's contents. */
 void               libgui_section(LibguiUi* ui, const char* text);
+
+/* Read-only text that wraps to the width it is given. */
 void               libgui_paragraph(LibguiUi* ui, const char* text);
+
+/* Fixed empty space along the container's axis. */
 void               libgui_space(LibguiUi* ui, float px);
+
+/* Space that takes whatever is left: what pushes the next widget to the
+ * far end of a row.
+ */
 void               libgui_flex(LibguiUi* ui);
+
+/* A rule across the container. */
 void               libgui_separator(LibguiUi* ui);
+
+/* A button. clicked on the response is the thing to check. */
 LibguiResponse     libgui_button(LibguiUi* ui, const char* label);
+
+/* A button in the accent colour, for the one action a panel is about. */
 LibguiResponse     libgui_button_primary(LibguiUi* ui, const char* label);
+
+/* A button whose identity is key rather than its label, for rows whose
+ * labels repeat.
+ */
 LibguiResponse     libgui_button_keyed(LibguiUi* ui, uint64_t key, const char* label);
+
+/* A checkbox over a uint8_t the caller owns. */
 LibguiResponse     libgui_checkbox(LibguiUi* ui, const char* label, uint8_t* value);
+
+/* A switch over a uint8_t the caller owns. */
 LibguiResponse     libgui_toggle(LibguiUi* ui, const char* label, uint8_t* value);
+
+/* A slider between min and max over a float the caller owns. */
 LibguiResponse     libgui_slider(LibguiUi* ui, const char* label, float* value, float min, float max);
+
+/* A vertical slider of height logical pixels. */
 LibguiResponse     libgui_slider_vertical(LibguiUi* ui, const char* label, float* value, float min, float max, float height);
+
+/* A number you scrub by dragging, at speed units per pixel. */
 LibguiResponse     libgui_drag_value(LibguiUi* ui, const char* label, float* value, float speed);
+
+/* A progress bar. Pass a negative value for the indeterminate one. */
 void               libgui_progress(LibguiUi* ui, const char* label, float value);
+
+/* A selectable row, for lists and browsers. */
 LibguiResponse     libgui_selectable(LibguiUi* ui, const char* label, uint8_t selected);
+
+/* A selectable row identified by key, for rows whose labels repeat. */
 LibguiResponse     libgui_selectable_keyed(LibguiUi* ui, uint64_t key, const char* label, uint8_t selected);
+
+/* One row of a menu. */
 LibguiResponse     libgui_menu_item(LibguiUi* ui, const char* label);
+
+/* A menu row with the chord that performs it shown on the right. */
 LibguiResponse     libgui_menu_item_shortcut(LibguiUi* ui, const char* label, const char* hint);
+
+/* A rule between groups of menu rows. */
 void               libgui_menu_separator(LibguiUi* ui);
+
+/* Open a menu. Build its items only if this returns 1, and then call
+ * libgui_close_menu.
+ */
 uint8_t            libgui_open_menu(LibguiUi* ui, const char* label);
+
+/* Close the menu opened by libgui_open_menu. */
 void               libgui_close_menu(LibguiUi* ui);
+
+/* Scroll whatever area contains this widget until it is visible. */
 void               libgui_scroll_to(LibguiUi* ui, uint64_t id);
+
+/* Whether widgets built now can be used. See libgui_open_enabled. */
 uint8_t            libgui_is_enabled(LibguiUi* ui);
+
+/* One row of a tree. depth is the indentation level; branch is 0 for a
+ * leaf, 1 for a collapsed branch, 2 for an expanded one.
+ *
+ * toggled on the response means the disclosure arrow was hit rather than
+ * the row, and the two are mutually exclusive: a toggle never also selects.
+ */
 LibguiTreeResponse libgui_tree_row(LibguiUi* ui, uint64_t key, uint64_t depth, uint64_t branch, const char* label, uint8_t selected);
+
+/* A tooltip on the widget id, shown after a hover settles. */
 void               libgui_tooltip(LibguiUi* ui, uint64_t id, const char* text);
+
+/* Open a context menu for the widget id, if it was right-clicked.
+ * Build items only when this returns 1, then call libgui_close_menu.
+ */
 uint8_t            libgui_open_context_menu(LibguiUi* ui, uint64_t id);
+
+/* A menu row that can be greyed out, with the chord that performs it.
+ * Pass an empty hint for none.
+ */
 LibguiResponse     libgui_menu_item_ex(LibguiUi* ui, const char* label, const char* hint, uint8_t enabled);
+
+/* Give a list or tree a keyboard cursor and make it one focus stop
+ * instead of one per row. Close it with libgui_close_collection.
+ *
+ * Returns the collection's id; read the cursor with libgui_nav_*.
+ */
 uint64_t           libgui_open_collection(LibguiUi* ui, const char* key, uint64_t len);
+
+/* Close the collection opened by libgui_open_collection. */
 void               libgui_close_collection(LibguiUi* ui);
+
+/* Your own texture, filling the space left in the container: the 3D
+ * view, a render target, a video frame.
+ *
+ * texture is the index you register with your renderer; it comes back
+ * in LibguiBatch::texture_index with texture_kind 1, and drawing it
+ * is the host's job. The response is the one to drive a camera from:
+ * dragging with drag_dx/drag_dy for a tumble, scroll_y for dolly.
+ *
+ * For an overlay — a gizmo, a HUD, a selection rectangle — build a
+ * container over it, or use libgui_add_leaf and paint into it.
+ *
+ * It *grows* to fill what it is given, so its container must have a size
+ * to give: inside one whose height is Fit, a viewport is zero pixels
+ * tall and draws nothing at all.
+ */
 LibguiResponse     libgui_viewport(LibguiUi* ui, const char* key, uint64_t texture);
+
+/* Put the keyboard cursor on index, so clicking a row leaves it where
+ * the pointer left off.
+ */
 void               libgui_set_cursor(LibguiUi* ui, uint64_t collection, uint64_t index);
+
 
 /* === END GENERATED === */
 

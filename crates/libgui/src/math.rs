@@ -1,7 +1,14 @@
 use std::ops::{Add, AddAssign, Mul, Sub};
 
+/// A point or a size in logical pixels.
+///
+/// `#[repr(C)]` so its layout is the obvious one — two `f32`s, no padding —
+/// which lets a C caller's `float[2*n]` be read as a slice of these without
+/// copying it. Nothing about the rendering contract depends on it: instances
+/// and vertices are plain float arrays.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize), serde(deny_unknown_fields))]
+#[repr(C)]
 pub struct Vec2 {
     pub x: f32,
     pub y: f32,

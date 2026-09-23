@@ -10,11 +10,15 @@
 //!
 //! 1. the `extern "C"` function, with its null checks, UTF-8 validation and
 //!    panic catching;
-//! 2. the C declaration for the header (see `header.rs`);
+//! 2. the C declaration for the header (see `header.rs`), **with this line's
+//!    doc comment above it** — the same words the Rust docs get, so a C
+//!    programmer reading `libgui.h` is not handed a hundred bare prototypes;
 //! 3. an entry in the symbol manifest the drift test reads.
 //!
 //! **Adding a widget is one line.** It cannot be added to one output and not
-//! the others, because there is only one input.
+//! the others, because there is only one input — and it cannot be added
+//! undocumented, because `header_drift.rs` fails when a widget has no doc
+//! comment to carry.
 //!
 //! The vocabulary is small on purpose. Across forty-odd widgets libgui uses
 //! about a dozen parameter types, so each is given a spelling here and every
@@ -125,12 +129,16 @@ macro_rules! c_ret {
 macro_rules! widgets {
     // `$ui` is named by the caller, once, so every body below can see it:
     // a binding the macro introduced itself would be hidden by hygiene.
+    // Doc comments are captured as literals rather than as opaque `meta`s, so
+    // the same text reaches both outputs: the Rust docs and the C header. A C
+    // programmer reading libgui.h gets what a Rust programmer reading rustdoc
+    // gets, from one source, and neither can be updated without the other.
     ($ui:ident => $(
-        $(#[$meta:meta])*
+        $(#[doc = $doc:literal])*
         fn $c_name:ident ( $($p:ident : $kind:ident),* $(,)? ) -> $ret:tt $body:block
     )*) => {
         $(
-            $(#[$meta])*
+            $(#[doc = $doc])*
             ///
             /// Generated from the table in `table.rs`; see that module.
             ///
@@ -155,14 +163,15 @@ macro_rules! widgets {
             }
         )*
 
-        /// Every generated symbol, its C return type and its C parameters, in
-        /// declaration order. `header.rs` turns this into the header and the
-        /// drift test compares it against the committed one.
-        pub const TABLE: &[(&str, &str, &[(&str, &str)])] = &[
+        /// Every generated symbol, its C return type, its C parameters and its
+        /// documentation, in declaration order. `header.rs` turns this into the
+        /// header and the drift test compares it against the committed one.
+        pub const TABLE: &[(&str, &str, &[(&str, &str)], &[&str])] = &[
             $((
                 stringify!($c_name),
                 c_ret!($ret),
                 &[$((stringify!($p), c_type!($kind))),*],
+                &[$($doc),*],
             )),*
         ];
     };

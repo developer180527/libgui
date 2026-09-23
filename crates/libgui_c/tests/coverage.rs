@@ -619,3 +619,210 @@ fn the_whole_painter_and_the_subtree_cache_reach_c() {
         libgui_ui_free(u);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Misuse of the open/close pairs
+//
+// A C caller has no borrow checker and no destructors. The pairs are the one
+// place where a mistake is easy to make and was, until these, easy to miss:
+// both of the cases below produced a quietly wrong frame in a release build
+// and a handle that reported itself healthy.
+// ---------------------------------------------------------------------------
+
+/// Builds a frame in which an inner cache replays while the outer one is still
+/// building, and returns the instance count and whether the handle survived.
+/// With `stray`, the caller closes whatever `libgui_open_cached` returned —
+/// the likeliest mistake there is, since ignoring a return value compiles.
+unsafe fn cached_frames(stray: bool) -> (u64, u8) {
+    unsafe {
+        let u = ui();
+        let mut instances = 0;
+        for i in 0..6u64 {
+            libgui_begin_frame(u, 400.0, 300.0, 1.0, 1.0 / 60.0);
+            // Builds on the first two frames and replays after, so the second
+            // frame's recording is what every later frame draws.
+            if libgui_open_cached(u, c("outer").as_ptr(), i.min(1)) != 0 {
+                libgui_label(u, c("outer content").as_ptr());
+                let inner = libgui_open_cached(u, c("inner").as_ptr(), 1);
+                libgui_label(u, c("inner content").as_ptr());
+                if stray || inner != 0 {
+                    libgui_close_cached(u);
+                }
+                // The caller believes it is still inside the outer subtree.
+                libgui_label(u, c("after the inner one").as_ptr());
+                libgui_close_cached(u);
+            }
+            libgui_end_frame(u);
+            libgui_frame_instances(u, &mut instances);
+        }
+        let poisoned = libgui_ui_poisoned(u);
+        libgui_ui_free(u);
+        (instances, poisoned)
+    }
+}
+
+/// The pair used correctly: a nested cache replays inside one that is
+/// rebuilding, and the frame is whole.
+#[test]
+fn a_cache_inside_a_cache_replays_and_keeps_the_frame_whole() {
+    unsafe {
+        let (instances, poisoned) = cached_frames(false);
+        assert_eq!(poisoned, 0, "the correct program was refused");
+        assert!(instances > 0, "nothing was drawn");
+    }
+}
+
+/// Closing on a frame that replayed must not quietly pop the *enclosing*
+/// cache. It used to: the outer recording ended early, everything after the
+/// inner subtree fell outside it, and every later replay drew a subtree with a
+/// piece missing — 52 instances become 36, with the handle reporting itself
+/// healthy. `debug_assert` made that a release-only fault, which is the build
+/// an application ships.
+#[test]
+fn a_stray_close_cached_is_refused_rather_than_losing_content() {
+    unsafe {
+        let (whole, _) = cached_frames(false);
+        let (after_stray, poisoned) = cached_frames(true);
+        assert_ne!(poisoned, 0, "a stray close_cached was accepted silently");
+        assert!(
+            after_stray != whole || poisoned != 0,
+            "the frame lost content ({whole} instances -> {after_stray}) without saying so"
+        );
+    }
+}
+
+/// A container the caller never closed. libgui's own check is a
+/// `debug_assert`, so in release the frame was simply wrong; the boundary
+/// names the caller instead.
+#[test]
+fn a_container_left_open_is_reported_rather_than_drawn_wrong() {
+    unsafe {
+        let u = ui();
+        libgui_begin_frame(u, 400.0, 300.0, 1.0, 1.0 / 60.0);
+        libgui_open_scroll_area(u, c("list").as_ptr());
+        libgui_label(u, c("inside").as_ptr());
+        // ... and no close.
+        libgui_end_frame(u);
+
+        assert_ne!(libgui_ui_poisoned(u), 0, "an unbalanced frame was accepted");
+        let err = libgui_last_error();
+        assert!(!err.is_null(), "nothing said why");
+        let err = std::ffi::CStr::from_ptr(err).to_string_lossy();
+        assert!(err.contains("still open"), "the error does not name the mistake: {err}");
+        libgui_ui_free(u);
+    }
+}
+
+/// A popup is closed most of the time, so `libgui_open_popup_body` returns 0
+/// on most frames — which makes ignoring its answer both the easiest mistake
+/// and the worst one. Closing anyway used to close whatever container the
+/// caller had open, with no check at all in either build; the panic that
+/// eventually followed named a later `close_container`, so the call that
+/// actually did the damage never appeared.
+#[test]
+fn a_stray_close_popup_body_names_itself() {
+    unsafe {
+        let u = ui();
+        let mut layout: LibguiLayout = std::mem::zeroed();
+        layout.axis = 1;
+        layout.width = LibguiSize { kind: LibguiSizeKind::Grow, value: 1.0 };
+        layout.height = LibguiSize { kind: LibguiSizeKind::Fit, value: 0.0 };
+        let frame_: LibguiFrame = std::mem::zeroed();
+
+        libgui_begin_frame(u, 400.0, 300.0, 1.0, 1.0 / 60.0);
+        libgui_open_container(u, libgui_id_from_name(c("panel").as_ptr()), layout, frame_);
+        assert_eq!(libgui_open_popup_body(u, 77, 200.0), 0, "nothing opened this popup");
+        libgui_close_popup_body(u); // the mistake
+        libgui_end_frame(u);
+
+        assert_ne!(libgui_ui_poisoned(u), 0, "a stray close_popup_body was accepted");
+        let err = std::ffi::CStr::from_ptr(libgui_last_error()).to_string_lossy().into_owned();
+        assert!(err.contains("close_popup_body"), "the error blames the wrong call: {err}");
+        libgui_ui_free(u);
+    }
+}
+
+/// A polyline is read from the caller's array in place, with no copy: this is
+/// a paint callback, it runs for every polyline of every frame, and a CAD
+/// drawing is mostly polylines.
+///
+/// The check that matters is that reading it in place still reads the right
+/// points, so the same polyline is drawn through C and through the Rust API
+/// and the two frames are compared byte for byte.
+#[test]
+fn a_polyline_is_read_in_place_and_reads_the_same_points() {
+    // A shape with distinct, asymmetric coordinates: swapped or shifted
+    // components would still draw *something*, and this notices.
+    const PTS: [f32; 10] = [10.0, 20.0, 60.0, 25.0, 70.0, 80.0, 30.0, 95.0, 12.0, 55.0];
+
+    unsafe extern "C" fn paint(p: *mut LibguiPainter, _r: LibguiRect, _user: *mut c_void) {
+        let white = LibguiColor { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
+        unsafe { libgui_painter_polyline(p, PTS.as_ptr(), 5, 2.0, white) };
+        // Degenerate inputs are not a crash.
+        unsafe { libgui_painter_polyline(p, std::ptr::null(), 5, 2.0, white) };
+        unsafe { libgui_painter_polyline(p, PTS.as_ptr(), 0, 2.0, white) };
+    }
+
+    let layout = LibguiLayout {
+        axis: 1,
+        _pad: [0; 3],
+        width: LibguiSize { kind: LibguiSizeKind::Fixed, value: 100.0 },
+        height: LibguiSize { kind: LibguiSizeKind::Fixed, value: 100.0 },
+        pad_left: 0.0,
+        pad_right: 0.0,
+        pad_top: 0.0,
+        pad_bottom: 0.0,
+        gap: 0.0,
+        align_main: 0,
+        align_cross: 0,
+        _pad2: [0; 2],
+    };
+
+    // Through C.
+    let from_c = unsafe {
+        let u = ui();
+        libgui_begin_frame(u, 200.0, 200.0, 1.0, 1.0 / 60.0);
+        libgui_add_leaf(
+            u,
+            libgui_id_from_name(c("pl").as_ptr()),
+            layout,
+            0,
+            LibguiPaintFn { paint: Some(paint), drop_user: None, user: std::ptr::null_mut() },
+        );
+        libgui_end_frame(u);
+        let mut n = 0u64;
+        let p = libgui_frame_instances(u, &mut n) as *const u8;
+        let bytes = std::slice::from_raw_parts(p, n as usize * libgui_instance_stride() as usize).to_vec();
+        assert!(!bytes.is_empty(), "the polyline drew nothing");
+        libgui_ui_free(u);
+        bytes
+    };
+
+    // The same polyline, through the Rust API.
+    let from_rust = {
+        let mut ui = libgui::Ui::new(libgui::Theme::dark(), FONT).expect("font");
+        ui.begin_frame(libgui::FrameInfo {
+            screen_size: libgui::Vec2::new(200.0, 200.0),
+            scale: 1.0,
+            dt: 1.0 / 60.0,
+        });
+        let pts: Vec<libgui::Vec2> = PTS.chunks_exact(2).map(|q| libgui::Vec2::new(q[0], q[1])).collect();
+        ui.add_leaf(
+            libgui::Id::from_name("pl"),
+            libgui::Layout::leaf(libgui::Size::Fixed(100.0), libgui::Size::Fixed(100.0)),
+            libgui::Vec2::ZERO,
+            false,
+            move |p, _r| p.polyline(&pts, 2.0, libgui::Color::WHITE),
+        );
+        let out = ui.end_frame();
+        let inst = out.draw.instances.as_slice();
+        let bytes = unsafe {
+            std::slice::from_raw_parts(inst.as_ptr() as *const u8, std::mem::size_of_val(inst))
+        }
+        .to_vec();
+        drop(out);
+        bytes
+    };
+
+    assert_eq!(from_c, from_rust, "the polyline read through C is not the one the caller passed");
+}

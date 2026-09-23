@@ -435,3 +435,43 @@ fn nested_caches_agree_with_an_uncached_build() {
     }
     assert!(cached.profile().cached_hits > 0, "the nested caches never resumed replaying");
 }
+
+/// The open/close pair is a contract, and breaking it must stop rather than
+/// quietly damage the recording.
+///
+/// `open_cached` returns false on a frame that replayed — nothing to build,
+/// nothing to close. A `close_cached` there used to pop the *enclosing* cache,
+/// ending its recording early so that everything built afterwards fell outside
+/// it, and every later replay drew a subtree with a piece missing. It was a
+/// `debug_assert`, so a release build lost the content in silence.
+#[test]
+#[should_panic(expected = "close_cached without a matching open_cached")]
+fn closing_a_cache_that_never_opened_is_refused() {
+    let mut ui = Ui::new(Theme::dark(), FONT).expect("font");
+    ui.begin_frame(FrameInfo { screen_size: Vec2::new(200.0, 100.0), scale: 1.0, dt: 1.0 / 60.0 });
+    ui.close_cached();
+}
+
+/// And the subtree has to be closed from the same depth it was opened at: a
+/// container still open inside it would otherwise be closed by the cache.
+#[test]
+#[should_panic(expected = "container still open")]
+fn closing_a_cache_over_an_open_container_is_refused() {
+    let mut ui = Ui::new(Theme::dark(), FONT).expect("font");
+    ui.begin_frame(FrameInfo { screen_size: Vec2::new(200.0, 100.0), scale: 1.0, dt: 1.0 / 60.0 });
+    assert!(ui.open_cached("panel", 1u64), "the first frame must build");
+    ui.open_container(Id::new("inner"), Layout::row(), Frame::none());
+    ui.close_cached();
+}
+
+/// The popup body's pair, which has the same shape and the sharper edge: a
+/// popup is closed most frames, so `open_popup_body` answers false most of the
+/// time and closing anyway used to close the caller's own container.
+#[test]
+#[should_panic(expected = "close_popup_body without an open popup body")]
+fn closing_a_popup_body_that_never_opened_is_refused() {
+    let mut ui = Ui::new(Theme::dark(), FONT).expect("font");
+    ui.begin_frame(FrameInfo { screen_size: Vec2::new(200.0, 100.0), scale: 1.0, dt: 1.0 / 60.0 });
+    ui.open_container(Id::new("panel"), Layout::column(), Frame::none());
+    ui.close_popup_body();
+}

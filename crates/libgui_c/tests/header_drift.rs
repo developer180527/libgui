@@ -46,7 +46,7 @@ fn the_committed_header_matches_the_table() {
 #[test]
 fn every_declared_symbol_is_exported() {
     let want = libgui_c::header::render();
-    for (name, _, _) in libgui_c::table::TABLE {
+    for (name, _, _, _) in libgui_c::table::TABLE {
         assert!(name.starts_with("libgui_"), "{name} does not carry the prefix");
         assert!(want.contains(&format!(" {name}(")), "{name} is in the table but not in the header");
     }
@@ -66,3 +66,33 @@ fn the_reported_sizes_are_the_real_ones() {
     assert_eq!(libgui_sizeof_color() as usize, 16);
     assert_eq!(libgui_sizeof_modifiers() as usize, 4);
 }
+
+/// Every widget in the table carries its documentation into the header.
+///
+/// The generated half used to arrive as bare prototypes while the hand-written
+/// half was documented, so a C++ caller reading libgui.h met a hundred-odd
+/// undeclared intentions. Now the doc comment is captured from the same line
+/// that declares the widget — which only helps if there is one, so adding a
+/// widget without a doc comment fails here.
+#[test]
+fn every_generated_declaration_is_documented() {
+    let header = libgui_c::header::render();
+    let mut undocumented = Vec::new();
+    for (name, _, _, docs) in libgui_c::table::TABLE {
+        if docs.iter().all(|d| d.trim().is_empty()) {
+            undocumented.push(*name);
+            continue;
+        }
+        // And the words actually reach the file, above the declaration.
+        let at = header.find(&format!(" {name}(")).unwrap_or_else(|| panic!("{name} is not in the header"));
+        let before = &header[..at];
+        let comment_end = before.rfind("*/").unwrap_or(0);
+        let decl_start = before.rfind('\n').unwrap_or(0);
+        assert!(comment_end + 3 >= decl_start, "{name} has no comment above it");
+    }
+    assert!(
+        undocumented.is_empty(),
+        "these widgets have no doc comment, so the header would describe them to nobody: {undocumented:?}"
+    );
+}
+
