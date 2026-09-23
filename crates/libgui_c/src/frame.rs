@@ -28,6 +28,23 @@ pub struct LibguiBatch {
     pub _pad: u32,
 }
 
+/// One upload's worth of the mesh: the slices to put in a vertex and an index
+/// buffer, and which batches to draw from them.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LibguiMeshChunk {
+    /// Into the vertex array, in vertices.
+    pub vertex_first: u32,
+    pub vertex_count: u32,
+    /// Into the index array, in indices. The values there count from
+    /// `vertex_first`, so upload the slice and use it as it is.
+    pub index_first: u32,
+    pub index_count: u32,
+    /// Into the batch array. Each batch's `first` counts from `index_first`.
+    pub batch_first: u32,
+    pub batch_count: u32,
+}
+
 /// The uniform block: target size in logical pixels and the DPI scale.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -65,7 +82,6 @@ pub struct LibguiPlatformOutput {
 
 /// Captured at `libgui_end_frame`, because `FrameOutput` borrows the `Ui` and
 /// cannot itself be handed to C.
-#[derive(Default)]
 pub(crate) struct FrameData {
     pub instances: *const libgui::Instance,
     pub instance_count: u64,
@@ -87,6 +103,9 @@ pub(crate) struct FrameData {
     pub mesh: libgui::mesh::Mesh,
     /// The mesh's batches, as index ranges rather than instance ranges.
     pub mesh_batches: Vec<LibguiBatch>,
+    pub mesh_chunks: Vec<LibguiMeshChunk>,
+    /// Per-chunk ceilings, or `u32::MAX` for none.
+    pub mesh_limits: (u32, u32),
     /// Off unless the host asked for it: this rasterises the whole frame on
     /// the CPU, which is for checking a renderer, not for shipping.
     pub want_reference: bool,
@@ -96,6 +115,34 @@ pub(crate) struct FrameData {
     /// Kept between frames: it caches the atlas it has uploaded.
     pub soft: libgui_soft::SoftRenderer,
 }
+
+impl Default for FrameData {
+    fn default() -> Self {
+        Self {
+            instances: std::ptr::null(),
+            instance_count: 0,
+            batches: Vec::new(),
+            atlas: std::ptr::null(),
+            atlas_size: 0,
+            atlas_version: 0,
+            globals: LibguiGlobals::default(),
+            clear: LibguiColor::default(),
+            platform: LibguiPlatformOutput::default(),
+            copied: None,
+            want_mesh: false,
+            mesh: libgui::mesh::Mesh::default(),
+            mesh_batches: Vec::new(),
+            mesh_chunks: Vec::new(),
+            // No ceiling until a host asks for one.
+            mesh_limits: (u32::MAX, u32::MAX),
+            want_reference: false,
+            reference: Vec::new(),
+            reference_size: (0, 0),
+            soft: libgui_soft::SoftRenderer::new(),
+        }
+    }
+}
+
 
 pub(crate) fn capture(out: &libgui::FrameOutput, into: &mut FrameData) {
     let g = out.globals();
@@ -148,8 +195,17 @@ pub(crate) fn capture(out: &libgui::FrameOutput, into: &mut FrameData) {
     // bgfx, GLES2, WebGL1, and every RHI that exposes a vertex+index draw and
     // nothing else. Built only when asked for.
     into.mesh_batches.clear();
+    into.mesh_chunks.clear();
     if into.want_mesh {
-        into.mesh.build(out.draw);
+        into.mesh.build_limited(out.draw, into.mesh_limits.0, into.mesh_limits.1);
+        into.mesh_chunks.extend(into.mesh.chunks.iter().map(|c| LibguiMeshChunk {
+            vertex_first: c.vertices.start,
+            vertex_count: c.vertices.end - c.vertices.start,
+            index_first: c.indices.start,
+            index_count: c.indices.end - c.indices.start,
+            batch_first: c.batches.start,
+            batch_count: c.batches.end - c.batches.start,
+        }));
         into.mesh_batches.extend(into.mesh.batches.iter().map(|b| {
             let (kind, index) = match b.texture {
                 libgui::TextureId::Atlas => (0, 0),
@@ -167,6 +223,7 @@ pub(crate) fn capture(out: &libgui::FrameOutput, into: &mut FrameData) {
         into.mesh.vertices.clear();
         into.mesh.indices.clear();
         into.mesh.batches.clear();
+        into.mesh.chunks.clear();
     }
 
     let p = &out.platform;
@@ -495,6 +552,57 @@ pub unsafe extern "C" fn libgui_reference_pixels(ui: *mut LibguiUi, out_w: *mut 
     }
     if let Some(s) = unsafe { out_h.as_mut() } {
         *s = h;
+    }
+    p
+}
+
+/// Cut each frame's mesh into chunks that fit `max_vertices` and
+/// `max_indices`. Zero for either means no limit, which is the default.
+///
+/// For a renderer streaming into a fixed per-frame buffer. bgfx's transient
+/// buffer is 6 MB by default — about thirteen thousand quads — and a frame
+/// that goes over it does not run slowly, it loses the draw call. A dense
+/// table or a node graph passes that sooner than people expect.
+///
+/// The limits are rounded down to whole quads (4 vertices, 6 indices), and
+/// anything below one quad is treated as one.
+///
+/// # Safety
+/// `ui` must be null or a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn libgui_set_mesh_limits(ui: *mut LibguiUi, max_vertices: u32, max_indices: u32) {
+    if let Some(h) = unsafe { ui.as_mut() } {
+        if !h.poisoned {
+            let cap = |v: u32| if v == 0 { u32::MAX } else { v };
+            h.frame.mesh_limits = (cap(max_vertices), cap(max_indices));
+        }
+    }
+}
+
+/// The chunks to upload, and how many. One unless a limit forced a split.
+///
+/// ```c
+/// uint64_t n = 0;
+/// const LibguiMeshChunk* chunks = libgui_mesh_chunks(ui, &n);
+/// for (uint64_t i = 0; i < n; i++) {
+///     upload_vertices(vertices + chunks[i].vertex_first, chunks[i].vertex_count);
+///     upload_indices(indices + chunks[i].index_first, chunks[i].index_count);
+///     for (uint32_t b = 0; b < chunks[i].batch_count; b++) {
+///         const LibguiBatch* d = &batches[chunks[i].batch_first + b];
+///         draw(d->first, d->count);
+///     }
+/// }
+/// ```
+///
+/// # Safety
+/// `ui` must be null or a live handle; `out_count` null or writable.
+#[no_mangle]
+pub unsafe extern "C" fn libgui_mesh_chunks(ui: *mut LibguiUi, out_count: *mut u64) -> *const LibguiMeshChunk {
+    let (p, n) = crate::handle::with_frame(ui, (std::ptr::null(), 0), |f| {
+        (f.mesh_chunks.as_ptr(), f.mesh_chunks.len() as u64)
+    });
+    if let Some(slot) = unsafe { out_count.as_mut() } {
+        *slot = n;
     }
     p
 }

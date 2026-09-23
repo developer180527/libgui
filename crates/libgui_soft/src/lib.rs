@@ -177,17 +177,26 @@ impl SoftRenderer {
     ) -> Target {
         let mut target = Target::new(width, height, frame.clear_color);
         self.prepare(frame);
-        for batch in &mesh.batches {
-            let Some(tex) = self.texture(batch.texture) else { continue };
-            if tex.width == 0 || tex.height == 0 {
-                continue;
-            }
-            // Two triangles per quad, and the first index of each pair names
-            // its top-left vertex — the layout `Mesh::build` documents.
-            let range = batch.indices.start as usize..batch.indices.end as usize;
-            for tri in mesh.indices[range].chunks_exact(6) {
-                let base = tri[0] as usize;
-                draw_quad(&mut target, &self.globals, &mesh.vertices[base..base + 4], &tex);
+        // Exactly what a host does: for each chunk, take its two slices and
+        // draw its batches out of them. Indices count from the chunk's first
+        // vertex, and a batch's range from the chunk's first index.
+        for chunk in &mesh.chunks {
+            let (v0, i0) = (chunk.vertices.start as usize, chunk.indices.start as usize);
+            let vertices = &mesh.vertices[v0..chunk.vertices.end as usize];
+            let indices = &mesh.indices[i0..chunk.indices.end as usize];
+            for batch in &mesh.batches[chunk.batches.start as usize..chunk.batches.end as usize] {
+                let Some(tex) = self.texture(batch.texture) else { continue };
+                if tex.width == 0 || tex.height == 0 {
+                    continue;
+                }
+                // Two triangles per quad, and the first index of each pair
+                // names its top-left vertex — the layout `Mesh::build`
+                // documents.
+                let range = batch.indices.start as usize..batch.indices.end as usize;
+                for tri in indices[range].chunks_exact(6) {
+                    let base = tri[0] as usize;
+                    draw_quad(&mut target, &self.globals, &vertices[base..base + 4], &tex);
+                }
             }
         }
         target

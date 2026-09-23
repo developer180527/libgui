@@ -435,7 +435,12 @@ pub struct FrameOutput<'a> {
     /// Where this frame's time went. All zeroes without the `profile` feature.
     pub profile: crate::Profile,
     pub draw: &'a DrawList,
-    pub atlas: &'a Atlas,
+    /// A snapshot of the glyph atlas, not a borrow of it.
+    ///
+    /// The image is behind an `Rc`, so this costs a handful of numbers — and
+    /// it means a finished frame does not hold the font system, which is what
+    /// lets several `Ui`s share one ([`Fonts::share`]).
+    pub atlas: Atlas,
     pub screen_size: Vec2,
     pub scale: f32,
     pub clear_color: Color,
@@ -819,7 +824,7 @@ impl Ui {
     /// are not a readable font.
     #[cfg(feature = "fontdue")]
     pub fn new(theme: Theme, font_bytes: &[u8]) -> Result<Self, crate::FontError> {
-        let mut fonts = Fonts::new();
+        let fonts = Fonts::new();
         let font = fonts.add_font(font_bytes)?;
         Ok(Self::with_fonts(theme, fonts, font))
     }
@@ -840,9 +845,24 @@ impl Ui {
 
     /// Build a `Ui` whose default font is your own [`crate::FontRasterizer`].
     pub fn with_rasterizer(theme: Theme, rasterizer: Box<dyn crate::FontRasterizer>) -> Self {
-        let mut fonts = Fonts::new();
+        let fonts = Fonts::new();
         let font = fonts.add_rasterizer(rasterizer);
         Self::with_fonts(theme, fonts, font)
+    }
+
+    /// A second `Ui` drawing from the same font system as `other`: the same
+    /// faces, the same shaping caches and **one atlas**.
+    ///
+    /// For a docked application, where a panel torn into its own window gets
+    /// its own `Ui`. Without this each window rasterises every glyph again and
+    /// the host uploads another copy of the same image; with it there is one
+    /// atlas to rasterise into and one texture to upload.
+    ///
+    /// The new `Ui` starts with `other`'s default font, and its own theme,
+    /// input, focus and retained widget state — only the font system is
+    /// shared.
+    pub fn sharing_fonts(theme: Theme, other: &Ui) -> Self {
+        Self::with_fonts(theme, other.fonts.share(), other.font)
     }
 
     fn with_fonts(theme: Theme, fonts: Fonts, font: FontId) -> Self {

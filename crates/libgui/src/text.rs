@@ -41,13 +41,19 @@ impl std::error::Error for FontError {}
 /// often a per-language one (Go is eight, plenty of web repositories are two).
 pub const DEFAULT_TAB_WIDTH: usize = 4;
 
+#[derive(Clone)]
 pub struct Atlas {
     pub size: u32,
     /// How large it may grow before it starts evicting instead. A single
     /// channel, so 4096 is 16 MB — enough for CJK at several sizes, or a
     /// zooming canvas asking for hundreds of them.
     pub max_size: u32,
-    pub data: Vec<u8>,
+    /// Behind an `Rc` so the atlas is cheap to *clone*, which is what lets a
+    /// finished frame carry a snapshot of it instead of borrowing the font
+    /// system — and so several `Ui`s can share one. Writing to it clones the
+    /// image only while a snapshot is outstanding, which a host that uploads
+    /// and drops its frame output never causes.
+    pub data: Rc<Vec<u8>>,
     pub version: u64,
     /// Bumped when the atlas is repacked (reset or grown), which moves every
     /// glyph: anything holding uv coordinates from before is stale. `version`
@@ -59,7 +65,15 @@ pub struct Atlas {
 
 impl Atlas {
     fn new(size: u32) -> Self {
-        Self { size, max_size: 4096, data: vec![0; (size * size) as usize], version: 1, repacks: 0, cursor: (1, 1), row_h: 0 }
+        Self {
+            size,
+            max_size: 4096,
+            data: Rc::new(vec![0; (size * size) as usize]),
+            version: 1,
+            repacks: 0,
+            cursor: (1, 1),
+            row_h: 0,
+        }
     }
 
     /// Could a `w` x `h` glyph ever fit, even in a freshly reset atlas *at
@@ -99,7 +113,7 @@ impl Atlas {
     }
 
     fn reset(&mut self) {
-        self.data.fill(0);
+        Rc::make_mut(&mut self.data).fill(0);
         self.cursor = (1, 1);
         self.row_h = 0;
         self.version += 1;
@@ -115,7 +129,7 @@ impl Atlas {
             return false;
         }
         self.size = next;
-        self.data = vec![0; (next * next) as usize];
+        self.data = Rc::new(vec![0; (next * next) as usize]);
         self.cursor = (1, 1);
         self.row_h = 0;
         self.version += 1;
@@ -142,7 +156,9 @@ struct Run {
     width: f32,
 }
 
-pub struct Fonts {
+/// Everything the font system owns. Private: `Fonts` is the handle to it, so
+/// that several `Ui`s can be given the same one.
+struct FontsInner {
     fonts: Vec<Box<dyn FontRasterizer>>,
     /// (font, face, glyph id, px) -> atlas entry. The face is part of the key
     /// because a glyph id only means something inside the face that issued it:
@@ -198,7 +214,7 @@ pub(crate) struct Line {
     pub width: f32,
 }
 
-impl Fonts {
+impl FontsInner {
     /// Glyphs rasterised since the last call, and reset. [`Ui`](crate::Ui)
     /// takes it once a frame for [`FrameCost`](crate::testing::FrameCost).
     /// True while a glyph is waiting for the atlas to be repacked: the host
@@ -739,7 +755,8 @@ impl Fonts {
                     for row in 0..h {
                         let dst = ((pos.1 + row) * s + pos.0) as usize;
                         let src = (row * w) as usize;
-                        self.atlas.data[dst..dst + w as usize].copy_from_slice(&bitmap[src..src + w as usize]);
+                        Rc::make_mut(&mut self.atlas.data)[dst..dst + w as usize]
+                            .copy_from_slice(&bitmap[src..src + w as usize]);
                     }
                     self.atlas.version += 1;
                     let sf = s as f32;
@@ -832,10 +849,169 @@ impl Fonts {
     }
 }
 
+impl Default for FontsInner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The font system: the faces, the shaping and wrapping caches, and the glyph
+/// atlas they are packed into.
+///
+/// A **handle**, so it can be shared. Every window in a docked application has
+/// its own [`Ui`](crate::Ui), and each used to carry its own atlas: a panel
+/// torn into a new window rasterised every glyph again and the host uploaded a
+/// second copy of the same image. Give the new `Ui` [`Fonts::share`] of the
+/// old one and there is a single atlas, rasterised once and uploaded once.
+///
+/// Sharing is by `Rc`: a `Ui` is not `Send`, and neither is this.
+///
+/// ```no_run
+/// # use libgui::*;
+/// # fn f(theme: Theme, font: &[u8]) -> Result<(), FontError> {
+/// let main = Ui::new(theme.clone(), font)?;
+/// // A torn-off window, drawing from the same atlas.
+/// let panel = Ui::sharing_fonts(theme, &main);
+/// # let _ = panel; Ok(()) }
+/// ```
+#[derive(Clone)]
+pub struct Fonts(Rc<RefCell<FontsInner>>);
+
 impl Default for Fonts {
     fn default() -> Self {
         Self::new()
     }
+}
+
+impl Fonts {
+    pub fn new() -> Self {
+        Fonts(Rc::new(RefCell::new(FontsInner::new())))
+    }
+
+    /// Another handle to the same faces, caches and atlas.
+    ///
+    /// What makes one atlas serve every window. The two are the same font
+    /// system: a glyph either rasterises for both or for neither.
+    pub fn share(&self) -> Fonts {
+        Fonts(Rc::clone(&self.0))
+    }
+
+    /// Do these two handles name the same font system?
+    pub fn is_shared_with(&self, other: &Fonts) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+
+    /// The glyph atlas as it stands, to upload.
+    ///
+    /// A cheap snapshot, not a borrow: the image is behind an `Rc`, so this
+    /// copies a handful of numbers. Holding one while text is drawn copies the
+    /// image once rather than failing — a host that uploads its frame output
+    /// and drops it never causes that.
+    pub fn atlas(&self) -> Atlas {
+        self.0.borrow().atlas().clone()
+    }
+
+    #[cfg(feature = "fontdue")]
+    pub fn add_font(&self, bytes: &[u8]) -> Result<FontId, FontError> {
+        self.0.borrow_mut().add_font(bytes)
+    }
+
+    pub fn add_rasterizer(&self, rasterizer: Box<dyn FontRasterizer>) -> FontId {
+        self.0.borrow_mut().add_rasterizer(rasterizer)
+    }
+
+    pub fn tab_width(&self) -> usize {
+        self.0.borrow().tab_width()
+    }
+
+    pub fn set_tab_width(&self, spaces: usize) {
+        self.0.borrow_mut().set_tab_width(spaces);
+    }
+
+    pub fn set_atlas_limit(&self, max: u32) {
+        self.0.borrow_mut().set_atlas_limit(max);
+    }
+
+    pub fn take_rasterized(&self) -> u32 {
+        self.0.borrow_mut().take_rasterized()
+    }
+
+    pub fn take_shaped_runs(&self) -> u32 {
+        self.0.borrow_mut().take_shaped_runs()
+    }
+
+    pub fn take_text_draws(&self) -> u32 {
+        self.0.borrow_mut().take_text_draws()
+    }
+
+    pub fn measure(&self, font: FontId, size: f32, text: &str) -> Vec2 {
+        self.0.borrow().measure(font, size, text)
+    }
+
+    pub fn caret_x(&self, font: FontId, size: f32, text: &str, byte: usize) -> f32 {
+        self.0.borrow().caret_x(font, size, text, byte)
+    }
+
+    pub fn byte_at_x(&self, font: FontId, size: f32, text: &str, x: f32) -> usize {
+        self.0.borrow().byte_at_x(font, size, text, x)
+    }
+
+    pub fn carets(&self, font: FontId, size: f32, text: &str) -> Vec<f32> {
+        self.0.borrow().carets(font, size, text)
+    }
+
+    pub fn wrap_lines_for_test(&self, font: FontId, size: f32, text: &str, max: f32) -> Vec<String> {
+        self.0.borrow().wrap_lines_for_test(font, size, text, max)
+    }
+
+    pub fn measure_wrapped(&self, font: FontId, size: f32, text: &str, max: f32) -> Vec2 {
+        self.0.borrow().measure_wrapped(font, size, text, max)
+    }
+
+    pub fn min_wrap_width(&self, font: FontId, size: f32, text: &str) -> f32 {
+        self.0.borrow().min_wrap_width(font, size, text)
+    }
+
+    pub fn line_height(&self, font: FontId, size: f32) -> f32 {
+        self.0.borrow().line_height(font, size)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_wrapped(
+        &self,
+        dl: &mut DrawList,
+        font: FontId,
+        size: f32,
+        r: Rect,
+        color: Color,
+        align: crate::Align,
+        text: &str,
+    ) {
+        self.0.borrow_mut().draw_wrapped(dl, font, size, r, color, align, text);
+    }
+
+    pub fn draw(&self, dl: &mut DrawList, font: FontId, size: f32, pos: Vec2, color: Color, text: &str) {
+        self.0.borrow_mut().draw(dl, font, size, pos, color, text);
+    }
+
+    // ---- crate-internal ---------------------------------------------------
+
+    pub(crate) fn repack_pending(&self) -> bool {
+        self.0.borrow().repack_pending()
+    }
+
+    pub(crate) fn repack(&self) -> bool {
+        self.0.borrow_mut().repack()
+    }
+
+    pub(crate) fn set_scale(&self, scale: f32) {
+        self.0.borrow_mut().set_scale(scale);
+    }
+
+    pub(crate) fn set_zoom(&self, zoom: f32) {
+        self.0.borrow_mut().set_zoom(zoom);
+    }
+
 }
 
 /// Width of `text[a..b]` in raster px, from an already-shaped run.
@@ -876,8 +1052,8 @@ fn cut_to_fit(run: &Run, text: &str, start: usize, limit: usize, max: f32) -> us
 mod tests {
     use super::*;
 
-    fn fonts(scale: f32) -> Fonts {
-        let mut f = Fonts::new();
+    fn fonts(scale: f32) -> FontsInner {
+        let mut f = FontsInner::new();
         f.add_font(include_bytes!("../../../assets/Inter.ttf")).unwrap();
         f.set_scale(scale);
         f
@@ -926,8 +1102,8 @@ mod tab_tests {
 
     const FONT: &[u8] = include_bytes!("../../../assets/Inter.ttf");
 
-    fn fonts() -> (Fonts, FontId) {
-        let mut f = Fonts::new();
+    fn fonts() -> (FontsInner, FontId) {
+        let mut f = FontsInner::new();
         let id = f.add_font(FONT).expect("font");
         (f, id)
     }

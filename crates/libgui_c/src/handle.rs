@@ -167,6 +167,42 @@ pub unsafe extern "C" fn libgui_ui_new(font_bytes: *const u8, font_len: u64) -> 
     }
 }
 
+/// Create a second `Ui` drawing from the same font system as `other`: the
+/// same faces, the same shaping caches, and **one glyph atlas**.
+///
+/// This is what a docked application wants for a torn-off window. Without it
+/// each window rasterises every glyph again and you upload another copy of the
+/// same image — for a CJK interface, thousands of glyphs and megabytes of
+/// texture per window. With it there is one atlas: upload it once and let
+/// every window's draw calls sample it.
+///
+/// `libgui_frame_atlas` then reports the same pointer and the same version for
+/// every window sharing it, so the "has it changed?" check a host already does
+/// is all it needs.
+///
+/// The new `Ui` has its own theme, input, focus and widget state. Only the
+/// font system is shared, and it lives until the last handle sharing it is
+/// freed — the order they are freed in does not matter.
+///
+/// Returns null if `other` is null or poisoned.
+///
+/// # Safety
+/// `other` must be null or a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn libgui_ui_new_sharing_fonts(other: *mut LibguiUi) -> *mut LibguiUi {
+    let Some(handle) = (unsafe { other.as_mut() }) else {
+        set_error("libgui_ui_new_sharing_fonts: null Ui handle");
+        return std::ptr::null_mut();
+    };
+    if handle.poisoned || handle.ui.is_null() {
+        set_error("libgui_ui_new_sharing_fonts: the Ui is poisoned");
+        return std::ptr::null_mut();
+    }
+    // A shared borrow is enough, and nothing here re-enters.
+    let source = unsafe { &*handle.ui };
+    into_handle(Ui::sharing_fonts(source.theme.clone(), source))
+}
+
 /// Wrap a `Ui` in a handle the caller owns.
 ///
 /// The raw pointer *is* the owner: a `Box<Ui>` beside it would be derived from

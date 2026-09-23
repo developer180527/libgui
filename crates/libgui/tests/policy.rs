@@ -16,7 +16,7 @@ const INFO: FrameInfo = FrameInfo { screen_size: Vec2::new(600.0, 400.0), scale:
 /// eight, plenty of web repositories are two. It was four, full stop.
 #[test]
 fn an_app_sets_its_own_tab_width() {
-    let mut ui = Ui::new(Theme::dark(), FONT).expect("font");
+    let ui = Ui::new(Theme::dark(), FONT).expect("font");
     let size = 16.0;
     // Measured against each other rather than against a space: `measure`
     // rounds a width up to a whole pixel, so four times a ceiled space is not
@@ -40,7 +40,7 @@ fn an_app_sets_its_own_tab_width() {
 /// forever. A shaped run holds the tab's advance, and so does a wrapped line.
 #[test]
 fn changing_the_tab_width_drops_the_caches_that_baked_it_in() {
-    let mut ui = Ui::new(Theme::dark(), FONT).expect("font");
+    let ui = Ui::new(Theme::dark(), FONT).expect("font");
     let size = 16.0;
     // Measure first, so the run and wrap caches both hold the old advance.
     let before = ui.fonts.measure(ui.font, size, "\tx").x;
@@ -57,7 +57,7 @@ fn changing_the_tab_width_drops_the_caches_that_baked_it_in() {
 /// A zero-width tab would stack every character after it in one place.
 #[test]
 fn a_tab_is_never_zero_wide() {
-    let mut ui = Ui::new(Theme::dark(), FONT).expect("font");
+    let ui = Ui::new(Theme::dark(), FONT).expect("font");
     ui.fonts.set_tab_width(0);
     assert_eq!(ui.fonts.tab_width(), 1);
     assert!(ui.fonts.measure(ui.font, 16.0, "\t").x > 0.0);
@@ -136,7 +136,7 @@ fn an_app_sets_its_own_undo_grouping_pause() {
 /// every frame instead of growing.
 #[test]
 fn an_app_sets_its_own_atlas_limit() {
-    let mut ui = Ui::new(Theme::dark(), FONT).expect("font");
+    let ui = Ui::new(Theme::dark(), FONT).expect("font");
     assert_eq!(ui.fonts.atlas().max_size, 4096);
 
     ui.fonts.set_atlas_limit(8192);

@@ -51,7 +51,7 @@ impl FrameOutput<'_> {
     }
 
     pub fn atlas(&self) -> &Atlas {
-        self.atlas
+        &self.atlas
     }
 }
 

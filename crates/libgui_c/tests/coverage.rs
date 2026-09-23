@@ -1004,3 +1004,109 @@ fn a_viewport_can_show_part_of_a_texture() {
         libgui_ui_free(u);
     }
 }
+
+/// A renderer streaming into a fixed per-frame buffer loses draw calls once a
+/// frame passes its ceiling — bgfx's default transient buffer is about
+/// thirteen thousand quads. The mesh can be cut to fit, and the cut has to
+/// describe itself well enough to upload without arithmetic.
+#[test]
+fn the_mesh_can_be_cut_to_fit_a_fixed_buffer() {
+    unsafe {
+        let u = ui();
+        libgui_enable_mesh(u, 1);
+        libgui_set_mesh_limits(u, 64, 96); // 16 quads
+
+        frame(u, || {
+            for i in 0..40 {
+                let _ = libgui_button(u, c(&format!("Row {i}")).as_ptr());
+            }
+        });
+
+        let (mut nv, mut ni, mut nb, mut nc) = (0u64, 0u64, 0u64, 0u64);
+        libgui_mesh_vertices(u, &mut nv);
+        let all_indices = libgui_mesh_indices(u, &mut ni);
+        let all_indices = std::slice::from_raw_parts(all_indices, ni as usize);
+        let batches = std::slice::from_raw_parts(libgui_mesh_batches(u, &mut nb), nb as usize);
+        let chunks = std::slice::from_raw_parts(libgui_mesh_chunks(u, &mut nc), nc as usize);
+        assert!(nc > 1, "a frame this size should have been cut into chunks, got {nc}");
+        assert_eq!(libgui_mesh_fits_u16(u), 1, "chunks this small must fit 16-bit indices");
+
+        let (mut v_seen, mut i_seen, mut b_seen) = (0u32, 0u32, 0u32);
+        for (n, ch) in chunks.iter().enumerate() {
+            assert!(ch.vertex_count <= 64, "chunk {n} has {} vertices", ch.vertex_count);
+            assert!(ch.index_count <= 96, "chunk {n} has {} indices", ch.index_count);
+            // The chunks tile the arrays in order, so nothing is drawn twice
+            // and nothing is skipped.
+            assert_eq!(ch.vertex_first, v_seen, "chunk {n} does not follow the one before it");
+            assert_eq!(ch.index_first, i_seen);
+            assert_eq!(ch.batch_first, b_seen);
+            v_seen += ch.vertex_count;
+            i_seen += ch.index_count;
+            b_seen += ch.batch_count;
+
+            // Its indices address its own vertices, and its batches its own
+            // indices: upload the slices, draw, no arithmetic.
+            for &idx in &all_indices[ch.index_first as usize..(ch.index_first + ch.index_count) as usize] {
+                assert!(idx < ch.vertex_count, "chunk {n} indexes vertex {idx} of {}", ch.vertex_count);
+            }
+            for b in &batches[ch.batch_first as usize..(ch.batch_first + ch.batch_count) as usize] {
+                assert!(b.first + b.count <= ch.index_count, "a batch runs past chunk {n}");
+            }
+        }
+        assert_eq!((v_seen as u64, i_seen as u64, b_seen as u64), (nv, ni, nb), "the chunks do not cover the mesh");
+
+        // No limit is the default, and puts it back to one upload.
+        libgui_set_mesh_limits(u, 0, 0);
+        frame(u, || {
+            for i in 0..40 {
+                let _ = libgui_button(u, c(&format!("Row {i}")).as_ptr());
+            }
+        });
+        let mut one = 0u64;
+        libgui_mesh_chunks(u, &mut one);
+        assert_eq!(one, 1, "with no limit the mesh is a single chunk");
+        libgui_ui_free(u);
+    }
+}
+
+/// A torn-off window draws from the window it came from: one atlas,
+/// rasterised once and uploaded once. Each window used to carry its own, which
+/// for a CJK interface is thousands of glyphs and megabytes of texture per
+/// window.
+#[test]
+fn a_second_ui_can_share_the_first_ones_atlas() {
+    unsafe {
+        let main = ui();
+        frame(main, || libgui_label(main, c("Geometry Spreadsheet").as_ptr()));
+        let (mut size_a, mut ver_a) = (0u32, 0u64);
+        let atlas_a = libgui_frame_atlas(main, &mut size_a, &mut ver_a);
+        assert!(!atlas_a.is_null());
+
+        let torn = libgui_ui_new_sharing_fonts(main);
+        assert!(!torn.is_null(), "sharing failed: {:?}", std::ffi::CStr::from_ptr(libgui_last_error()));
+        frame(torn, || libgui_label(torn, c("Geometry Spreadsheet").as_ptr()));
+
+        let (mut size_b, mut ver_b) = (0u32, 0u64);
+        let atlas_b = libgui_frame_atlas(torn, &mut size_b, &mut ver_b);
+        // The same image: a host uploads it once and both windows sample it.
+        assert_eq!(atlas_a, atlas_b, "the windows report different atlases");
+        assert_eq!((size_a, ver_a), (size_b, ver_b), "the windows disagree about the atlas");
+
+        // A window given its own fonts still has its own.
+        let alone = ui();
+        frame(alone, || libgui_label(alone, c("Geometry Spreadsheet").as_ptr()));
+        let (mut size_c, mut ver_c) = (0u32, 0u64);
+        assert_ne!(libgui_frame_atlas(alone, &mut size_c, &mut ver_c), atlas_a, "an unshared window shared one");
+
+        // Freed in the wrong order on purpose: the font system outlives
+        // whichever handle goes first.
+        libgui_ui_free(main);
+        frame(torn, || libgui_label(torn, c("Still here").as_ptr()));
+        assert_eq!(libgui_ui_poisoned(torn), 0, "the survivor was poisoned by the other window closing");
+        libgui_ui_free(torn);
+        libgui_ui_free(alone);
+
+        // Null and poisoned handles are answers, not crashes.
+        assert!(libgui_ui_new_sharing_fonts(std::ptr::null_mut()).is_null());
+    }
+}

@@ -141,6 +141,13 @@ typedef struct {
 uint32_t    libgui_abi_version(void);
 const char* libgui_last_error(void);
 LibguiUi*   libgui_ui_new(const uint8_t* font_bytes, uint64_t font_len);
+/* A second Ui drawing from the same font system: the same faces, the same
+ * shaping caches, and ONE glyph atlas. What a docked application wants for a
+ * torn-off window -- otherwise each window rasterises every glyph again and
+ * you upload another copy of the same image. libgui_frame_atlas then reports
+ * the same pointer and version for every window sharing it. The new Ui has its
+ * own theme, input, focus and widget state; free the handles in any order. */
+LibguiUi*   libgui_ui_new_sharing_fonts(LibguiUi* other);
 void        libgui_ui_free(LibguiUi* ui);
 uint8_t     libgui_ui_poisoned(LibguiUi* ui);
 void        libgui_begin_frame(LibguiUi* ui, float width, float height, float scale, float dt);
@@ -434,6 +441,36 @@ const void*        libgui_mesh_vertices(LibguiUi* ui, uint64_t* out_count);
 const uint32_t*    libgui_mesh_indices(LibguiUi* ui, uint64_t* out_count);
 const LibguiBatch* libgui_mesh_batches(LibguiUi* ui, uint64_t* out_count);
 uint8_t            libgui_mesh_fits_u16(LibguiUi* ui);
+
+/* One upload's worth of the mesh. A renderer streaming into a fixed per-frame
+ * buffer has a ceiling -- bgfx's transient buffer is 6 MB by default, about
+ * thirteen thousand quads -- and a frame that goes over it does not run
+ * slowly, it loses the draw call. Set a limit and the frame is cut to fit.
+ *
+ * Indices count from the chunk's vertex_first, and each batch's `first` counts
+ * from its chunk's index_first, so the two slices upload and draw untouched:
+ *
+ *     uint64_t n = 0;
+ *     const LibguiMeshChunk* chunks = libgui_mesh_chunks(ui, &n);
+ *     for (uint64_t i = 0; i < n; i++) {
+ *         upload_vertices(vertices + chunks[i].vertex_first, chunks[i].vertex_count);
+ *         upload_indices(indices + chunks[i].index_first, chunks[i].index_count);
+ *         for (uint32_t b = 0; b < chunks[i].batch_count; b++) {
+ *             const LibguiBatch* d = &batches[chunks[i].batch_first + b];
+ *             draw(d->first, d->count);
+ *         }
+ *     }
+ */
+typedef struct {
+    uint32_t vertex_first, vertex_count;
+    uint32_t index_first, index_count;
+    uint32_t batch_first, batch_count;
+} LibguiMeshChunk;
+
+/* Zero for either means no limit, which is the default. Rounded down to whole
+ * quads; below one quad is treated as one. */
+void                   libgui_set_mesh_limits(LibguiUi* ui, uint32_t max_vertices, uint32_t max_indices);
+const LibguiMeshChunk* libgui_mesh_chunks(LibguiUi* ui, uint64_t* out_count);
 uint64_t           libgui_vertex_stride(void);
 uint32_t           libgui_vertex_attribute_count(void);
 uint8_t            libgui_vertex_attribute(uint32_t index, uint32_t* out_floats, uint32_t* out_offset);

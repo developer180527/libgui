@@ -94,8 +94,32 @@ pub struct Vertex {
 #[derive(Clone, Debug, PartialEq)]
 pub struct MeshBatch {
     pub texture: TextureId,
-    /// Half-open range into [`Mesh::indices`].
+    /// Half-open range into its chunk's slice of [`Mesh::indices`] — that is,
+    /// relative to [`MeshChunk::indices`]`.start`, which is what a host needs
+    /// after uploading that chunk. Unchunked there is one chunk starting at
+    /// zero, so these are positions in [`Mesh::indices`] directly.
     pub indices: Range<u32>,
+}
+
+/// One upload's worth of a [`Mesh`]: the slices to put in a vertex and an
+/// index buffer, and the draws to make from them.
+///
+/// A renderer that streams into a per-frame buffer has a ceiling — bgfx's
+/// transient buffer is 6 MB by default, about thirteen thousand quads — and a
+/// frame that goes over it is not a slow frame, it is a dropped draw call.
+/// [`Mesh::build_limited`] cuts the frame into chunks that each fit.
+///
+/// `indices` holds values relative to `vertices.start`, and each batch's range
+/// is relative to `indices.start`, so a host uploads the two slices and draws
+/// the batches with no arithmetic of its own.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MeshChunk {
+    /// Into [`Mesh::vertices`].
+    pub vertices: Range<u32>,
+    /// Into [`Mesh::indices`].
+    pub indices: Range<u32>,
+    /// Into [`Mesh::batches`].
+    pub batches: Range<u32>,
 }
 
 /// An expanded [`DrawList`]: triangles, ready to upload.
@@ -104,6 +128,8 @@ pub struct MeshBatch {
 /// steady frame allocates nothing.
 #[derive(Default)]
 pub struct Mesh {
+    /// One chunk unless [`Mesh::build_limited`] had to split the frame.
+    pub chunks: Vec<MeshChunk>,
     pub vertices: Vec<Vertex>,
     /// Two triangles per quad, `0,1,2, 2,1,3` from each quad's base vertex.
     /// 32-bit because a UI frame passes 16,384 quads sooner than people
@@ -126,31 +152,97 @@ impl Mesh {
 
     /// True when every index fits in a `u16`, for a renderer whose index
     /// buffers are 16-bit (GLES2, WebGL1, bgfx's default).
+    ///
+    /// Indices are relative to their own chunk, so this asks about the largest
+    /// chunk: passing a vertex limit of 65,536 or less to
+    /// [`Mesh::build_limited`] makes it true whatever the frame contains.
     pub fn fits_u16(&self) -> bool {
-        self.vertices.len() <= u16::MAX as usize + 1
+        self.chunks.iter().all(|c| (c.vertices.end - c.vertices.start) as usize <= u16::MAX as usize + 1)
     }
 
-    /// Expand `draw` into triangles, replacing whatever was here before.
+    /// Expand `draw` into triangles, replacing whatever was here before, as
+    /// one chunk however large the frame is.
     pub fn build(&mut self, draw: &DrawList) {
+        self.build_limited(draw, u32::MAX, u32::MAX);
+    }
+
+    /// [`Mesh::build`], cut into chunks that each stay within `max_vertices`
+    /// and `max_indices`.
+    ///
+    /// For a renderer streaming into a fixed per-frame buffer: bgfx's
+    /// transient buffer holds about thirteen thousand quads by default, and
+    /// going over it drops the draw rather than slowing it down. A dense table
+    /// or node graph passes that sooner than people expect.
+    ///
+    /// The limits are rounded down to whole quads, and a limit smaller than
+    /// one quad is treated as one — a chunk that could hold nothing would
+    /// never finish.
+    pub fn build_limited(&mut self, draw: &DrawList, max_vertices: u32, max_indices: u32) {
         self.vertices.clear();
         self.indices.clear();
         self.batches.clear();
+        self.chunks.clear();
+
+        // Whole quads only: half a quad in one buffer and half in the next is
+        // not a thing a draw call can express.
+        let by_vertices = max_vertices as usize / VERTICES_PER_QUAD;
+        let by_indices = max_indices as usize / INDICES_PER_QUAD;
+        let quads_per_chunk = by_vertices.min(by_indices).max(1);
+
+        // Where the chunk being filled starts.
+        let (mut v0, mut i0, mut b0) = (0usize, 0usize, 0usize);
+        let mut quads = 0usize;
 
         for batch in &draw.batches {
-            let first_index = self.indices.len() as u32;
+            let mut first_index = (self.indices.len() - i0) as u32;
             for inst in &draw.instances[batch.range.start as usize..batch.range.end as usize] {
-                self.push_quad(inst);
+                if quads == quads_per_chunk {
+                    // Close the part of this batch that fits, then the chunk.
+                    let indices = first_index..(self.indices.len() - i0) as u32;
+                    if !indices.is_empty() {
+                        self.batches.push(MeshBatch { texture: batch.texture, indices });
+                    }
+                    self.close_chunk(v0, i0, b0);
+                    (v0, i0, b0) = (self.vertices.len(), self.indices.len(), self.batches.len());
+                    quads = 0;
+                    first_index = 0;
+                }
+                // Indices count from the chunk's first vertex, not the mesh's.
+                let before = self.vertices.len();
+                self.push_quad(inst, v0);
+                if self.vertices.len() != before {
+                    quads += 1;
+                }
             }
-            let indices = first_index..self.indices.len() as u32;
+            let indices = first_index..(self.indices.len() - i0) as u32;
             // A batch that expanded to nothing (an unknown kind) would
             // otherwise become an empty draw call for every backend to skip.
             if !indices.is_empty() {
                 self.batches.push(MeshBatch { texture: batch.texture, indices });
             }
         }
+        self.close_chunk(v0, i0, b0);
+        // An empty frame still describes itself: one chunk, drawing nothing.
+        if self.chunks.is_empty() {
+            self.chunks.push(MeshChunk { vertices: 0..0, indices: 0..0, batches: 0..0 });
+        }
     }
 
-    fn push_quad(&mut self, inst: &Instance) {
+    /// Record the chunk that started at these marks, unless it is empty.
+    fn close_chunk(&mut self, v0: usize, i0: usize, b0: usize) {
+        if self.vertices.len() == v0 {
+            return;
+        }
+        self.chunks.push(MeshChunk {
+            vertices: v0 as u32..self.vertices.len() as u32,
+            indices: i0 as u32..self.indices.len() as u32,
+            batches: b0 as u32..self.batches.len() as u32,
+        });
+    }
+
+    /// `chunk_v0` is the vertex the chunk being filled starts at, so the
+    /// indices this writes are relative to it.
+    fn push_quad(&mut self, inst: &Instance, chunk_v0: usize) {
         // Unknown kinds are dropped rather than drawn as something else: the
         // contract says a backend may meet an instance from a newer libgui.
         let Some(kind) = PrimitiveKind::from_code(inst.params[3]) else { return };
@@ -164,7 +256,7 @@ impl Mesh {
         let center = [rx + half_size[0], ry + half_size[1]];
         let ext = [half_size[0] + pad, half_size[1] + pad];
 
-        let base = self.vertices.len() as u32;
+        let base = (self.vertices.len() - chunk_v0) as u32;
         // Corners in the order the indices below assume: top-left, top-right,
         // bottom-left, bottom-right.
         for (cx, cy) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {

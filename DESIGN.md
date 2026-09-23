@@ -199,6 +199,37 @@ vertex stage.
 
 ---
 
+### 7.1 One frame, several uploads, one atlas
+
+Two things a renderer that is not libgui's own runs into, and neither is
+visible from inside libgui.
+
+**A per-frame buffer has a ceiling.** bgfx's transient buffer is 6 MB by
+default — about thirteen thousand quads — and a frame that goes over it does
+not run slowly, it loses the draw call. So the mesh can be cut:
+`Mesh::build_limited` splits a frame into chunks that each fit a vertex and
+index budget, with indices counted from the chunk's own first vertex so a host
+uploads the two slices and draws them untouched. Cutting it changes nothing
+anyone can see, which is a test: every scene is rendered whole and in
+sixteen-quad chunks, and the images must be *identical*.
+
+**An atlas per window is an atlas per window.** Each `Ui` owns its font
+system, which is right for a single-window app and wrong for a docked one: a
+panel torn into a new window rasterised every glyph again and the host uploaded
+a second copy of the same image. `Fonts` is a handle now, and `Ui::sharing_fonts`
+gives a new window the old one's faces, caches and atlas.
+
+That needed the atlas to stop being *borrowed* from the font system. A finished
+frame used to hold a `&Atlas`, which with a shared font system would mean one
+window's frame output blocking another window from rasterising — a runtime
+borrow failure, in a library that does not otherwise have any. The image sits
+behind an `Rc` instead, so a frame carries a cheap *snapshot*: no borrow is
+held, nothing can fail, and writing while a snapshot is outstanding copies the
+image once rather than panicking. A host that uploads its frame output and
+drops it never causes even that.
+
+---
+
 ## 8. Identity is positional by default, and that is a footgun
 
 **Context.** Retained state needs a key. Making every call site pass one is

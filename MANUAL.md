@@ -828,6 +828,33 @@ check `libgui_mesh_fits_u16` if your index buffers are 16-bit.
 It costs about four and a half times the bytes, so it is off by default and a
 renderer that can instance should keep instancing.
 
+**If your renderer streams into a fixed per-frame buffer**, set a ceiling and
+the frame is cut to fit it. bgfx's transient buffer is 6 MB by default — about
+thirteen thousand quads — and a frame that goes over does not run slowly, it
+loses the draw call, which a dense table or a node graph reaches sooner than
+people expect.
+
+```c
+libgui_set_mesh_limits(ui, 65536, 98304);   /* 0 for either means no limit */
+uint64_t n = 0;
+const LibguiMeshChunk* chunks = libgui_mesh_chunks(ui, &n);
+for (uint64_t i = 0; i < n; i++) {
+    upload_vertices(vertices + chunks[i].vertex_first, chunks[i].vertex_count);
+    upload_indices(indices + chunks[i].index_first, chunks[i].index_count);
+    for (uint32_t b = 0; b < chunks[i].batch_count; b++) {
+        const LibguiBatch* d = &batches[chunks[i].batch_first + b];
+        draw(d->first, d->count);
+    }
+}
+```
+
+Indices count from their chunk's first vertex and a batch's range from its
+chunk's first index, so the two slices upload and draw untouched. A vertex
+limit of 65,536 or less also makes `libgui_mesh_fits_u16` true whatever the
+frame contains. Cutting the frame up changes nothing anyone can see:
+`mesh_parity.rs` renders every scene whole and in sixteen-quad chunks and
+requires the images to be identical, not merely close.
+
 ### 14.2 Checking your renderer against the reference
 
 A backend for an unusual RHI is ported by hand, and a hand port is *nearly*
@@ -914,7 +941,26 @@ ui.end_frame();
 C++17, header-only, and it adds nothing to the ABI — so `tests/smoke.cpp`
 compiles it against the same static library the C test uses.
 
-### 14.5 What crosses, and what does not yet
+### 14.5 One atlas for every window
+
+Each `Ui` carries a font system: the faces, the shaping caches and the glyph
+atlas. A docked application gives every window its own `Ui`, so a panel torn
+into a new window used to rasterise every glyph again and the host uploaded a
+second copy of the same image — for a CJK interface, thousands of glyphs and
+megabytes of texture per window.
+
+`libgui_ui_new_sharing_fonts(other)` (Rust: `Ui::sharing_fonts`) makes a second
+`Ui` that draws from the first one's font system. `libgui_frame_atlas` then
+reports the same pointer and the same version for every window sharing it, so
+the "has it changed?" check a host already does is all it needs to upload once.
+Only the font system is shared: theme, input, focus and widget state stay the
+window's own, and the handles can be freed in any order.
+
+Windows on displays of different scales share it too — a glyph is keyed by the
+size it is rasterised at, so 1x and 2x live in the same image without evicting
+each other.
+
+### 14.6 What crosses, and what does not yet
 
 Widgets (label, heading, button, checkbox, toggle, slider, drag value,
 progress, selectable, tree row, menu items, tooltip, context menu), text input
@@ -923,7 +969,8 @@ containers, scroll areas, the disabled scope, the collection cursor,
 multi-select, stable ids, custom painting, the full input set, the keymap, the
 viewport and painter image calls, docking, tables, drag and drop, themes from
 TOML, and the frame output — instances, batches, atlas, globals, platform
-requests, and the expanded mesh.
+requests, the expanded mesh and its chunks, the reference renderer and the
+conformance gallery, and a shared font system.
 
 Docking and tables both take callbacks that build through the host's own
 handle while libgui holds the borrow, which is a question about provenance that
@@ -945,7 +992,7 @@ boxes.
 **Every exported function is called by a test**, checked by extracting the
 symbols and grepping the test directory rather than by reading the list.
 
-### 14.6 Drawing your own widgets, and drawing them less often
+### 14.7 Drawing your own widgets, and drawing them less often
 
 The whole painter crosses — `measure`, `hairline`, `snap_rect`, `shadow`,
 `polyline`, `bezier`, `wire`, `chevron`, the four text placements, tinted
@@ -990,7 +1037,7 @@ That is the second of three ways to do less work. The first is
 last frame's batches with no UI frame at all, which is how a viewport animates
 while the UI around it costs nothing.
 
-### 14.7 Building it from CMake
+### 14.8 Building it from CMake
 
 ```cmake
 add_subdirectory(third_party/libgui/crates/libgui_c)
