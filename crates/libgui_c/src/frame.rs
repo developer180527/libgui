@@ -72,6 +72,14 @@ pub(crate) struct FrameData {
     pub clear: LibguiColor,
     pub platform: LibguiPlatformOutput,
     pub copied: Option<std::ffi::CString>,
+    /// Off unless the host asked for it: a renderer that can instance should
+    /// keep instancing, and expanding costs about four and a half times the
+    /// bytes.
+    pub want_mesh: bool,
+    /// Reused between frames, so a steady frame expands without allocating.
+    pub mesh: libgui::mesh::Mesh,
+    /// The mesh's batches, as index ranges rather than instance ranges.
+    pub mesh_batches: Vec<LibguiBatch>,
 }
 
 pub(crate) fn capture(out: &libgui::FrameOutput, into: &mut FrameData) {
@@ -98,6 +106,25 @@ pub(crate) fn capture(out: &libgui::FrameOutput, into: &mut FrameData) {
     };
     let c = out.clear_color;
     into.clear = LibguiColor { r: c.r, g: c.g, b: c.b, a: c.a };
+
+    // The triangle form, for a renderer with no per-instance attributes:
+    // bgfx, GLES2, WebGL1, and every RHI that exposes a vertex+index draw and
+    // nothing else. Built only when asked for.
+    into.mesh_batches.clear();
+    if into.want_mesh {
+        into.mesh.build(out.draw);
+        into.mesh_batches.extend(into.mesh.batches.iter().map(|b| {
+            let (kind, index) = match b.texture {
+                libgui::TextureId::Atlas => (0, 0),
+                libgui::TextureId::User(i) => (1, i),
+            };
+            LibguiBatch { texture_kind: kind, texture_index: index, first: b.indices.start, count: b.indices.end - b.indices.start }
+        }));
+    } else {
+        into.mesh.vertices.clear();
+        into.mesh.indices.clear();
+        into.mesh.batches.clear();
+    }
 
     let p = &out.platform;
     into.copied = p.copied_text.as_ref().and_then(|s| std::ffi::CString::new(s.as_str()).ok());
@@ -231,4 +258,121 @@ pub unsafe extern "C" fn libgui_frame_copied_text(ui: *mut LibguiUi) -> *const s
 #[no_mangle]
 pub unsafe extern "C" fn libgui_needs_frame(ui: *mut LibguiUi, elapsed: f32) -> u8 {
     with_ui(ui, 0, |ui| ui.needs_frame(elapsed) as u8)
+}
+
+// ---- the triangle form ---------------------------------------------------
+
+/// Ask for the mesh as well as the instances, from the next `libgui_end_frame`
+/// on. Off by default.
+///
+/// libgui's own output is one instance per primitive, 96 bytes with six vertex
+/// attributes, and not every renderer can draw that: bgfx carries at most five
+/// vec4s of instance data, GLES2 and WebGL1 have no per-instance attributes at
+/// all. With this on, every frame is also expanded into one quad per
+/// primitive — four vertices and six indices — which any vertex+index draw can
+/// take. It costs about four and a half times the bytes, so a renderer that
+/// can instance should keep instancing.
+///
+/// # Safety
+/// `ui` must be null or a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn libgui_enable_mesh(ui: *mut LibguiUi, on: u8) {
+    if let Some(h) = unsafe { ui.as_mut() } {
+        if !h.poisoned {
+            h.frame.want_mesh = on != 0;
+        }
+    }
+}
+
+/// The expanded vertices, and how many. Null unless `libgui_enable_mesh` was
+/// called before the frame. Valid until the next `libgui_begin_frame`.
+///
+/// Each is `libgui_vertex_stride` bytes; the fields are in the order
+/// `libgui_vertex_attribute` reports.
+///
+/// # Safety
+/// `ui` must be null or a live handle; `out_count` null or writable.
+#[no_mangle]
+pub unsafe extern "C" fn libgui_mesh_vertices(ui: *mut LibguiUi, out_count: *mut u64) -> *const std::ffi::c_void {
+    let (p, n) = crate::handle::with_frame(ui, (std::ptr::null(), 0), |f| {
+        (f.mesh.vertices.as_ptr() as *const _, f.mesh.vertices.len() as u64)
+    });
+    if let Some(slot) = unsafe { out_count.as_mut() } {
+        *slot = n;
+    }
+    p as *const std::ffi::c_void
+}
+
+/// The indices, and how many. Always 32-bit; see `libgui_mesh_fits_u16` for
+/// when they can be narrowed.
+///
+/// # Safety
+/// As above.
+#[no_mangle]
+pub unsafe extern "C" fn libgui_mesh_indices(ui: *mut LibguiUi, out_count: *mut u64) -> *const u32 {
+    let (p, n) = crate::handle::with_frame(ui, (std::ptr::null(), 0), |f| {
+        (f.mesh.indices.as_ptr(), f.mesh.indices.len() as u64)
+    });
+    if let Some(slot) = unsafe { out_count.as_mut() } {
+        *slot = n;
+    }
+    p
+}
+
+/// The mesh's batches: the same partition as `libgui_frame_batches`, but
+/// `first`/`count` are into the index buffer.
+///
+/// # Safety
+/// As above.
+#[no_mangle]
+pub unsafe extern "C" fn libgui_mesh_batches(ui: *mut LibguiUi, out_count: *mut u64) -> *const LibguiBatch {
+    let (p, n) = crate::handle::with_frame(ui, (std::ptr::null(), 0), |f| {
+        (f.mesh_batches.as_ptr(), f.mesh_batches.len() as u64)
+    });
+    if let Some(slot) = unsafe { out_count.as_mut() } {
+        *slot = n;
+    }
+    p
+}
+
+/// 1 when every index fits in a `uint16_t`, for a renderer whose index buffers
+/// are 16-bit (GLES2, WebGL1, bgfx's default).
+///
+/// # Safety
+/// `ui` must be null or a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn libgui_mesh_fits_u16(ui: *mut LibguiUi) -> u8 {
+    crate::handle::with_frame(ui, 0, |f| f.mesh.fits_u16() as u8)
+}
+
+/// Bytes per expanded vertex.
+#[no_mangle]
+pub extern "C" fn libgui_vertex_stride() -> u64 {
+    libgui::render_contract::VERTEX_STRIDE as u64
+}
+
+/// How many vertex attributes each one has.
+#[no_mangle]
+pub extern "C" fn libgui_vertex_attribute_count() -> u32 {
+    libgui::render_contract::VERTEX_ATTRIBUTES.len() as u32
+}
+
+/// One vertex attribute: how many floats it is, and its byte offset into the
+/// vertex. Returns 0 and writes nothing when `index` is out of range, so a
+/// host can describe its vertex layout without hard-coding this one.
+///
+/// # Safety
+/// `out_floats` and `out_offset` must be null or writable.
+#[no_mangle]
+pub unsafe extern "C" fn libgui_vertex_attribute(index: u32, out_floats: *mut u32, out_offset: *mut u32) -> u8 {
+    let Some(&(_loc, _name, offset, floats)) = libgui::render_contract::VERTEX_ATTRIBUTES.get(index as usize) else {
+        return 0;
+    };
+    if let Some(slot) = unsafe { out_floats.as_mut() } {
+        *slot = floats as u32;
+    }
+    if let Some(slot) = unsafe { out_offset.as_mut() } {
+        *slot = offset as u32;
+    }
+    1
 }

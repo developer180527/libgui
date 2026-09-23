@@ -167,19 +167,30 @@ unsafe {    let a = libgui_id_from_name(c("inspector").as_ptr());
 
 // --- custom painting -------------------------------------------------------
 
-static mut PAINTED: u32 = 0;
-static mut DROPPED: u32 = 0;
+static PAINTED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static DROPPED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
-unsafe extern "C" fn paint_cb(p: *mut LibguiPainter, r: LibguiRect, user: *mut c_void) {
-    unsafe {
-        PAINTED += 1;
-        assert_eq!(user as usize, 0xABCD, "the user pointer did not survive the trip");
-    }
-    libgui_painter_rect(p, r, LibguiColor { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }, 2.0);
+/// What the caller captured. A real allocation, not an invented integer: an
+/// address that is never dereferenced proves only that a number survived the
+/// trip, and Miri cannot tell a valid pointer from an invalid one it is never
+/// asked to read. Reading it here is what makes the round trip checked.
+struct Captured {
+    magic: u32,
 }
 
-unsafe extern "C" fn drop_cb(_user: *mut c_void) {
-    unsafe { DROPPED += 1 };
+unsafe extern "C" fn paint_cb(p: *mut LibguiPainter, r: LibguiRect, user: *mut c_void) {
+    let captured = unsafe { &*(user as *const Captured) };
+    assert_eq!(captured.magic, 0xC0FFEE, "the user pointer did not survive the trip");
+    PAINTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    unsafe { libgui_painter_rect(p, r, LibguiColor { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }, 2.0) };
+}
+
+unsafe extern "C" fn drop_cb(user: *mut c_void) {
+    // Exactly what a C caller's free() does, and the reason each frame gets
+    // its own allocation: handing the same pointer to two frames that both
+    // release it is a double free, which an invented address would hide.
+    drop(unsafe { Box::from_raw(user as *mut Captured) });
+    DROPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// **The piece that needed a callback.** A C caller draws its own widget, the
@@ -202,16 +213,19 @@ unsafe {    let u = ui();
         _pad2: [0; 2],
     };
     let id = libgui_id_from_name(c("custom").as_ptr());
-    let cb = LibguiPaintFn {
+    let cb = |user: *mut Captured| LibguiPaintFn {
         paint: Some(paint_cb),
         drop_user: Some(drop_cb),
-        user: 0xABCD as *mut c_void,
+        user: user as *mut c_void,
     };
-    frame(u, || libgui_add_leaf(u, id, layout, 1, cb));
-    frame(u, || libgui_add_leaf(u, id, layout, 1, cb));
+    for _ in 0..2 {
+        let captured = Box::into_raw(Box::new(Captured { magic: 0xC0FFEE }));
+        frame(u, || libgui_add_leaf(u, id, layout, 1, cb(captured)));
+    }
 
-    assert!(PAINTED >= 1, "the paint callback never ran");
-    assert!(DROPPED >= 1, "the user data was never released");
+    use std::sync::atomic::Ordering::Relaxed;
+    assert!(PAINTED.load(Relaxed) >= 1, "the paint callback never ran");
+    assert_eq!(DROPPED.load(Relaxed), 2, "every frame's user data must be released exactly once");
     libgui_ui_free(u);}
 }
 

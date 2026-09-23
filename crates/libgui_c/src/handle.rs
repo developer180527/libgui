@@ -159,18 +159,27 @@ pub unsafe extern "C" fn libgui_ui_new(font_bytes: *const u8, font_len: u64) -> 
     }
     let bytes = unsafe { std::slice::from_raw_parts(font_bytes, font_len as usize) };
     match Ui::new(Theme::dark(), bytes) {
-        Ok(ui) => Box::into_raw(Box::new(LibguiUi {
-            ui: Box::into_raw(Box::new(ui)),
-            owns_ui: true,
-            depth: 0,
-            frame: Default::default(),
-            poisoned: false,
-        })),
+        Ok(ui) => into_handle(ui),
         Err(e) => {
             set_error(&format!("libgui_ui_new: {e}"));
             std::ptr::null_mut()
         }
     }
+}
+
+/// Wrap a `Ui` in a handle the caller owns.
+///
+/// The raw pointer *is* the owner: a `Box<Ui>` beside it would be derived from
+/// a box that then moves into this struct, which invalidates the pointer. Miri
+/// caught that; a test cannot, because the address is the same either way.
+pub(crate) fn into_handle(ui: Ui) -> *mut LibguiUi {
+    Box::into_raw(Box::new(LibguiUi {
+        ui: Box::into_raw(Box::new(ui)),
+        owns_ui: true,
+        depth: 0,
+        frame: Default::default(),
+        poisoned: false,
+    }))
 }
 
 /// Free a handle. Null is fine and does nothing.

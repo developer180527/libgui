@@ -78,7 +78,7 @@ static uint8_t dock_scroll(uint64_t tab, void* user) {
 static void paint_cb(LibguiPainter* p, LibguiRect r, void* user) {
     LibguiColor red = { 1.0f, 0.0f, 0.0f, 1.0f };
     painted++;
-    CHECK(user == (void*)0x1234, "the user pointer did not survive the trip");
+    CHECK(user == &painted, "the user pointer did not survive the trip");
     libgui_painter_rect(p, r, red, 2.0f);
 }
 
@@ -168,7 +168,7 @@ int main(int argc, char** argv) {
     LibguiPaintFn cb;
     cb.paint = paint_cb;
     cb.drop_user = NULL;
-    cb.user = (void*)0x1234;
+    cb.user = &painted;
     libgui_add_leaf(ui, libgui_id_from_name("gizmo"), leaf, 1, cb);
 
     CHECK(libgui_open_depth(ui) == 1, "the container stack is not where it should be");
@@ -364,6 +364,60 @@ int main(int argc, char** argv) {
     CHECK(libgui_dragging(ui) == NULL, "something was dragging when nothing should be");
     libgui_cancel_drag(ui);
     CHECK(!libgui_ui_poisoned(ui), "drag and drop poisoned the Ui");
+
+    /* --- the 3D view, and the triangle form ------------------------------
+     *
+     * The two things an engine needs that a form-filling toolkit does not:
+     * somewhere to put its scene, and a mesh for a renderer that cannot carry
+     * six vec4s of per-instance data.
+     */
+    libgui_enable_mesh(ui, 1);
+    {
+        LibguiLayout col;
+        LibguiFrame none;
+        memset(&col, 0, sizeof(col));
+        col.axis = 1;
+        col.width.kind = 2;  /* Grow */
+        col.width.value = 1.0f;
+        col.height.kind = 2;
+        col.height.value = 1.0f;
+        memset(&none, 0, sizeof(none));
+        libgui_begin_frame(ui, 800.0f, 600.0f, 1.0f, 1.0f / 60.0f);
+        libgui_open_container(ui, libgui_id_from_name("body"), col, none);
+        LibguiResponse view = libgui_viewport(ui, "scene", 7);
+        (void)view;
+        libgui_close_container(ui);
+        libgui_end_frame(ui);
+    }
+    {
+        uint64_t batch_count = 0, vertex_count = 0, index_count = 0;
+        const LibguiBatch* batches = libgui_frame_batches(ui, &batch_count);
+        int found_texture = 0;
+        for (uint64_t i = 0; i < batch_count; i++) {
+            if (batches[i].texture_kind == 1 && batches[i].texture_index == 7) {
+                found_texture = 1;
+            }
+        }
+        CHECK(found_texture, "the viewport did not reach the host as a texture batch");
+
+        const void* vertices = libgui_mesh_vertices(ui, &vertex_count);
+        const uint32_t* indices = libgui_mesh_indices(ui, &index_count);
+        CHECK(vertices != NULL && vertex_count > 0, "the mesh has no vertices");
+        CHECK(indices != NULL && index_count == vertex_count / 4 * 6, "the mesh is not one quad per primitive");
+        CHECK(libgui_mesh_fits_u16(ui), "a frame this small should fit 16-bit indices");
+
+        /* A host describes its vertex layout from the library rather than
+         * hard-coding offsets that could move. */
+        uint64_t stride = libgui_vertex_stride();
+        uint32_t attrs = libgui_vertex_attribute_count(), at = 0;
+        for (uint32_t i = 0; i < attrs; i++) {
+            uint32_t floats = 0, offset = 0;
+            CHECK(libgui_vertex_attribute(i, &floats, &offset), "an attribute is missing");
+            CHECK(offset == at, "the attributes do not tile the vertex");
+            at += floats * 4;
+        }
+        CHECK((uint64_t)at == stride, "the attributes do not add up to the stride");
+    }
 
     libgui_ui_free(ui);
     libgui_ui_free(NULL);

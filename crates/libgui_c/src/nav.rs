@@ -5,7 +5,6 @@
 //! mirror and another size check, so instead the id comes back and the rest is
 //! read through accessors — the same pattern as the frame output.
 
-use crate::handle::{with_ui, LibguiUi};
 use libgui::NavResponse;
 use std::cell::Cell;
 
@@ -71,15 +70,4 @@ pub extern "C" fn libgui_nav_expand() -> u8 {
 #[no_mangle]
 pub extern "C" fn libgui_nav_collapse() -> u8 {
     get().collapse as u8
-}
-
-/// Scroll whatever area contains `id` until it is visible. Focus does this for
-/// itself; call it for a cursor libgui does not own — a collection's current
-/// row, a search hit, a selection made in code.
-///
-/// # Safety
-/// `ui` must be null or a live handle.
-#[no_mangle]
-pub unsafe extern "C" fn libgui_scroll_to_id(ui: *mut LibguiUi, id: u64) {
-    with_ui(ui, (), |ui| ui.scroll_to(libgui::Id(id)));
 }

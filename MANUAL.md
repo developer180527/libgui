@@ -788,7 +788,46 @@ libgui_end_frame(ui);
   not crash.
 - **Check the ABI version once at start-up.**
 
-### 14.1 How it stays in step with the library
+### 14.1 Putting your scene in it, and getting triangles out
+
+Two things an engine needs that a form-filling toolkit does not.
+
+**The 3D view.** `libgui_viewport(ui, key, texture)` takes an index you
+register with your own renderer and fills what its container gives it. The
+index comes back in `LibguiBatch::texture_index` with `texture_kind` 1, and
+drawing it is yours — libgui never learns what a texture is. The response is
+what a camera is driven from. It *grows*, so its container needs a height to
+give: inside one whose height is `Fit` it is zero pixels tall and draws
+nothing. `libgui_painter_image` is the same thing inside a custom leaf, for an
+icon or a thumbnail.
+
+**Triangles.** libgui's own output is one instance per primitive — 96 bytes,
+six vertex attributes — and not every renderer can draw that: bgfx carries at
+most five vec4s of instance data, GLES2 and WebGL1 have no per-instance
+attributes at all, and plenty of engine RHIs expose a vertex and index draw
+and nothing else. Call `libgui_enable_mesh(ui, 1)` and every frame is also
+expanded into one quad per primitive:
+
+```c
+libgui_enable_mesh(ui, 1);
+/* ... build and end the frame ... */
+uint64_t nv = 0, ni = 0, nb = 0;
+const void*        vertices = libgui_mesh_vertices(ui, &nv);
+const uint32_t*    indices  = libgui_mesh_indices(ui, &ni);
+const LibguiBatch* batches  = libgui_mesh_batches(ui, &nb);
+/* batches[i].first/count are into the index buffer. */
+```
+
+The vertex is what the shader's *varyings* are, already computed, so porting
+the shader is a vertex stage that moves `pos` into clip space and passes the
+rest through. Describe your vertex layout with `libgui_vertex_stride` and
+`libgui_vertex_attribute` rather than hard-coding offsets that could move, and
+check `libgui_mesh_fits_u16` if your index buffers are 16-bit.
+
+It costs about four and a half times the bytes, so it is off by default and a
+renderer that can instance should keep instancing.
+
+### 14.2 How it stays in step with the library
 
 The widget surface is declared **once**, in `src/table.rs`, and the macro emits
 the `extern "C"` functions, the header declarations and a symbol manifest from
@@ -808,7 +847,7 @@ bugs hide, and that test prints things like:
 FAIL: LibguiResponse is 88 bytes here and 96 in the library
 ```
 
-### 14.2 C++
+### 14.3 C++
 
 `libgui.hpp` sits on the same ABI and costs nothing at runtime. It exists
 because the three tedious things in C are the three you do constantly:
@@ -845,20 +884,61 @@ ui.end_frame();
 C++17, header-only, and it adds nothing to the ABI — so `tests/smoke.cpp`
 compiles it against the same static library the C test uses.
 
-### 14.3 What crosses, and what does not yet
+### 14.4 What crosses, and what does not yet
 
 Widgets (label, heading, button, checkbox, toggle, slider, drag value,
 progress, selectable, tree row, menu items, tooltip, context menu), text input
 and text area over a caller-owned buffer, combo and segmented pickers,
 containers, scroll areas, the disabled scope, the collection cursor,
-multi-select, stable ids, custom painting, the full input set, the keymap, and
-the frame output (instances, batches, atlas, globals, platform requests).
+multi-select, stable ids, custom painting, the full input set, the keymap, the
+viewport and painter image calls, docking, tables, drag and drop, themes from
+TOML, and the frame output — instances, batches, atlas, globals, platform
+requests, and the expanded mesh.
 
-**Not yet:** docking. `TabViewer` is a Rust trait and needs the same vtable
-treatment as painting; the design is settled — the callback reuses the host's
-own handle with the provenance swapped, plus a depth counter so `free`,
-`end_frame` and re-entrant `show` are refused rather than undefined. Also not
-crossing: tables, drag and drop, and loading a theme from TOML.
+Docking and tables both take callbacks that build through the host's own
+handle while libgui holds the borrow, which is a question about provenance that
+no ordinary run can answer: both the sound and the unsound version draw the
+same pixels. Miri is what tells them apart, so the dock panel, the table cell
+and the paint callback are each driven from a Rust test that CI runs under it.
+
+Popups and layers cross too. **Modals are built from layers, deliberately** —
+libgui has none, because what a modal *blocks* (whether the menu bar still
+works, whether Escape cancels, whether the 3D view keeps orbiting) is the app's
+question, not a layout one. A layer covering the window with a translucent fill
+is the scrim; a second at the dialog's rect is the dialog.
+
+`libgui_ui_new_with_fallbacks` takes a chain. Without one, scripts the first
+font lacks render as **nothing** — the bundled Inter has no CJK, Arabic, Indic
+or emoji glyphs, so a name typed in Japanese comes out blank rather than as
+boxes.
+
+**Every exported function is called by a test**, checked by extracting the
+symbols and grepping the test directory rather than by reading the list.
+
+### 14.5 Building it from CMake
+
+```cmake
+add_subdirectory(third_party/libgui/crates/libgui_c)
+target_link_libraries(vcad PRIVATE libgui::libgui)
+```
+
+That is the whole integration: the target carries the header directory, the
+platform system libraries, and a rule that rebuilds the Rust when any source in
+the workspace changes. The only prerequisite is `cargo` on PATH, which CMake
+checks at configure time rather than failing later with a linker error about a
+file that was never built.
+
+`Debug` maps to cargo's `debug` profile and everything else to `release`, each
+configuration with its own `IMPORTED_LOCATION_<CONFIG>` so Visual Studio and
+Ninja Multi-Config work as well as a single-config generator. **A debug build
+of libgui is an order of magnitude slower**; building it as `Release` inside a
+Debug application is a reasonable thing to do.
+
+No Corrosion dependency, because that would make every consumer vendor
+Corrosion too — set `LIBGUI_USE_CORROSION=ON` if you already have it. A vcpkg
+port is in `crates/libgui_c/packaging/vcpkg/` for consuming a *released*
+libgui, which is the wrong choice while you are changing libgui alongside your
+app. See `crates/libgui_c/packaging/README.md`.
 
 ## 15. Limitations
 

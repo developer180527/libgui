@@ -205,6 +205,36 @@ public:
         std::size_t n = size ? static_cast<std::size_t>(*size) * (*size) : 0;
         return {p, n};
     }
+    // --- the triangle form ---
+    //
+    // For a renderer with no per-instance attributes: bgfx, GLES2, WebGL1.
+    // Off unless asked for, and about four and a half times the bytes, so a
+    // renderer that can instance should keep instancing.
+    void enable_mesh(bool on = true) { libgui_enable_mesh(h_, on ? 1 : 0); }
+    span<const std::byte> mesh_vertices() const {
+        uint64_t n = 0;
+        auto* p = libgui_mesh_vertices(h_, &n);
+        return {static_cast<const std::byte*>(p), static_cast<std::size_t>(n) * libgui_vertex_stride()};
+    }
+    uint64_t mesh_vertex_count() const {
+        uint64_t n = 0;
+        libgui_mesh_vertices(h_, &n);
+        return n;
+    }
+    span<const uint32_t> mesh_indices() const {
+        uint64_t n = 0;
+        auto* p = libgui_mesh_indices(h_, &n);
+        return {p, static_cast<std::size_t>(n)};
+    }
+    span<const LibguiBatch> mesh_batches() const {
+        uint64_t n = 0;
+        auto* p = libgui_mesh_batches(h_, &n);
+        return {p, static_cast<std::size_t>(n)};
+    }
+    /// True when the indices fit a 16-bit buffer, which is all GLES2 and
+    /// WebGL1 have.
+    bool mesh_fits_u16() const { return libgui_mesh_fits_u16(h_) != 0; }
+
     LibguiGlobals globals() const { LibguiGlobals g{}; libgui_frame_globals(h_, &g); return g; }
     LibguiColor clear_color() const { LibguiColor c{}; libgui_frame_clear_color(h_, &c); return c; }
     LibguiPlatformOutput platform() const { LibguiPlatformOutput p{}; libgui_frame_platform(h_, &p); return p; }
@@ -285,6 +315,11 @@ public:
     }
     LibguiResponse slider(const char* l, float& v, float lo, float hi) { return libgui_slider(h_, l, &v, lo, hi); }
     LibguiResponse drag_value(const char* l, float& v, float speed) { return libgui_drag_value(h_, l, &v, speed); }
+    /// Your own texture, filling what the container has left: the 3D view, a
+    /// render target, a video frame. `texture` comes back in
+    /// `LibguiBatch::texture_index` with `texture_kind` 1; drawing it is
+    /// yours. Drive a camera from the response.
+    LibguiResponse viewport(const char* key, uint64_t texture) { return libgui_viewport(h_, key, texture); }
     LibguiResponse selectable(const char* l, bool sel) { return libgui_selectable(h_, l, sel ? 1 : 0); }
     LibguiResponse selectable(uint64_t key, const char* l, bool sel) {
         return libgui_selectable_keyed(h_, key, l, sel ? 1 : 0);
@@ -296,7 +331,7 @@ public:
     void menu_separator() { libgui_menu_separator(h_); }
     LibguiResponse interact(uint64_t wid) { return libgui_interact(h_, wid); }
     void tooltip(uint64_t wid, const char* t) { libgui_tooltip(h_, wid, t); }
-    void scroll_to(uint64_t wid) { libgui_scroll_to_id(h_, wid); }
+    void scroll_to(uint64_t wid) { libgui_scroll_to(h_, wid); }
     void set_cursor(uint64_t coll, uint64_t index) { libgui_set_cursor(h_, coll, index); }
 
     // A text field over a std::string, grown as needed. The C form wants a

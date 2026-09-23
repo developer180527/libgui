@@ -103,6 +103,32 @@ int main(int argc, char** argv) {
     CHECK(ui.open_depth() == 0, "the collection guard did not close");
     CHECK(!ui.poisoned(), "the collection poisoned the Ui");
 
+    // The engine case: a 3D view to put a scene in, and the triangle form for
+    // a renderer that cannot carry six vec4s of per-instance data.
+    ui.enable_mesh();
+    ui.begin_frame(800.0f, 600.0f, 1.0f, 1.0f / 60.0f);
+    {
+        // A viewport grows to fill what it is given, so its parent has to
+        // have a height to give: inside the `fit` panel above it would be
+        // zero pixels tall and draw nothing.
+        auto stage = libgui::Layout::column().width(libgui::grow()).height(libgui::grow());
+        auto _c = ui.container(libgui::id("body"), stage, bg);
+        ui.viewport("scene", 7);
+    }
+    ui.end_frame();
+
+    bool found = false;
+    for (auto& b : ui.batches()) {
+        if (b.texture_kind == 1 && b.texture_index == 7) found = true;
+    }
+    CHECK(found, "the viewport did not reach the host as a texture batch");
+    CHECK(ui.mesh_vertex_count() == ui.instance_count() * 4, "a primitive did not become one quad");
+    CHECK(ui.mesh_indices().size() == ui.instance_count() * 6, "the index count is wrong");
+    CHECK(ui.mesh_vertices().size() == ui.mesh_vertex_count() * libgui_vertex_stride(), "the vertex span is the wrong length");
+    CHECK(!ui.mesh_batches().empty(), "the mesh has no batches");
+    CHECK(ui.mesh_fits_u16(), "a frame this small should fit 16-bit indices");
+    CHECK(!ui.poisoned(), "the mesh poisoned the Ui");
+
     if (failures == 0) std::printf("ok: C++ wrapper test passed (%d paints)\n", painted);
     return failures == 0 ? 0 : 1;
 }

@@ -1,0 +1,8 @@
+{
+  "name": "libgui",
+  "version": "0.1.0",
+  "description": "Hybrid immediate/retained UI core for professional tools, with a C ABI.",
+  "homepage": "https://github.com/developer180527/libgui",
+  "license": "MIT OR Apache-2.0",
+  "supports": "windows | osx | linux"
+}

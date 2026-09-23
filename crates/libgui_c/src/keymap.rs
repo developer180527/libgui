@@ -15,12 +15,20 @@ pub const LIBGUI_PLATFORM_MAC: i32 = 0;
 pub const LIBGUI_PLATFORM_WINDOWS: i32 = 1;
 pub const LIBGUI_PLATFORM_LINUX: i32 = 2;
 
-fn platform(p: i32) -> Platform {
+/// `None` for a value that is not a platform.
+///
+/// Anything unrecognised used to mean "this one", which is the wrong default
+/// for the one API whose entire job is that libgui does not guess the
+/// platform: a stale constant from an older header, or a field nobody
+/// initialised, would silently install Cmd where the caller wanted Ctrl and
+/// say nothing. Only `LIBGUI_PLATFORM_CURRENT` asks for the current one.
+fn platform(p: i32) -> Option<Platform> {
     match p {
-        LIBGUI_PLATFORM_MAC => Platform::Mac,
-        LIBGUI_PLATFORM_WINDOWS => Platform::Windows,
-        LIBGUI_PLATFORM_LINUX => Platform::Linux,
-        _ => Platform::current(),
+        LIBGUI_PLATFORM_MAC => Some(Platform::Mac),
+        LIBGUI_PLATFORM_WINDOWS => Some(Platform::Windows),
+        LIBGUI_PLATFORM_LINUX => Some(Platform::Linux),
+        LIBGUI_PLATFORM_CURRENT => Some(Platform::current()),
+        _ => None,
     }
 }
 
@@ -31,16 +39,22 @@ fn platform(p: i32) -> Platform {
 /// only until Full Keyboard Access is on, while Windows and Linux visit every
 /// control.
 ///
-/// Returns 0. Call it once, after `libgui_ui_new`.
+/// Returns 0, or 1 if `plat` is not one of the `LIBGUI_PLATFORM_*` values —
+/// in which case nothing is installed and `libgui_last_error` says so. Call it
+/// once, after `libgui_ui_new`.
 ///
 /// # Safety
 /// `ui` must be null or a live handle.
 #[no_mangle]
 pub unsafe extern "C" fn libgui_install_keymap(ui: *mut LibguiUi, plat: i32) -> i32 {
+    let Some(p) = platform(plat) else {
+        crate::handle::set_error("unknown platform: pass a LIBGUI_PLATFORM_* value");
+        return 1;
+    };
     with_ui(ui, 1, |ui| {
         // `u8` is a stand-in app action: a C host routes its own commands
         // itself, so nothing here needs to know them.
-        Keymap::<u8>::new(platform(plat)).install(ui);
+        Keymap::<u8>::new(p).install(ui);
         0
     })
 }
@@ -63,7 +77,11 @@ pub unsafe extern "C" fn libgui_install_default_keymap(ui: *mut LibguiUi) -> i32
 #[no_mangle]
 pub extern "C" fn libgui_select_kind(plat: i32, m: LibguiModifiers) -> i32 {
     let m = Modifiers { shift: m.shift != 0, ctrl: m.ctrl != 0, alt: m.alt != 0, logo: m.logo != 0 };
-    match libgui_keymap::select_kind(platform(plat), &m) {
+    let Some(p) = platform(plat) else {
+        crate::handle::set_error("unknown platform: pass a LIBGUI_PLATFORM_* value");
+        return -1;
+    };
+    match libgui_keymap::select_kind(p, &m) {
         libgui::SelectKind::Replace => 0,
         libgui::SelectKind::Toggle => 1,
         libgui::SelectKind::Range => 2,

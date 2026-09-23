@@ -104,7 +104,7 @@ jobs:
   # a double drop or a misaligned read is an error rather than a segfault on
   # someone else's machine.
   miri:
-    name: miri · paint_arena
+    name: miri · paint_arena + C callbacks
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -118,6 +118,16 @@ jobs:
       # sound and the unsound version produce the same pixels. Miri is the only
       # thing that tells them apart, and it caught real UB here once already.
       - run: cargo miri test -p libgui_c --test abi a_panel_draws
+      # A table's cells reborrow the host's handle the same way a dock panel
+      # does, and nothing but a Rust test runs under Miri — so the table is
+      # driven from one, or that path is checked by reading only. The painter
+      # test comes along because its callback owns a real allocation and frees
+      # it, which is where a double free would show.
+      #
+      # These are minutes each, and almost all of it is rasterising glyphs
+      # under an interpreter. Keep the ones added here small for that reason.
+      - run: cargo miri test -p libgui_c --test coverage a_table_builds
+      - run: cargo miri test -p libgui_c --test coverage every_painter_call
 
   # Two floors, because the dependency graph differs by platform: wgpu-hal pulls
   # `ordered-float` (1.90) on Linux/Windows/Android but not on macOS. The
@@ -218,6 +228,31 @@ jobs:
              target\release\libgui_c.lib ^
              ws2_32.lib userenv.lib advapi32.lib ntdll.lib bcrypt.lib /Fe:smokepp.exe
           smokepp.exe assets\Inter.ttf
+
+  cmake:
+    name: cmake · a consumer builds and links it
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Exactly what a consuming project does: add_subdirectory, link
+      # libgui::libgui, build, run. An integration nobody exercises is one
+      # that has quietly drifted.
+      - name: Configure and build
+        run: |
+          cmake -S crates/libgui_c/packaging/check -B build-cmake -DCMAKE_BUILD_TYPE=Release -DLIBGUI_ROOT=$PWD
+          cmake --build build-cmake --config Release
+        shell: bash
+      - name: Run
+        run: |
+          find build-cmake -name 'smoke' -o -name 'smoke.exe' | head -1 | xargs -I{} {} assets/Inter.ttf
+          find build-cmake -name 'smokepp' -o -name 'smokepp.exe' | head -1 | xargs -I{} {} assets/Inter.ttf
+        shell: bash
 
   cross-build:
     name: builds for · ${{ matrix.target }}

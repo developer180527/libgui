@@ -2138,6 +2138,16 @@ impl Ui {
     }
 
     /// What the last completed frame cost. See [`crate::testing`].
+    /// This frame's draw list, after [`Ui::end_frame`].
+    ///
+    /// The same data [`FrameOutput::draw`] carries, reachable without holding
+    /// the output — which is what a renderer expanding the frame into
+    /// triangles needs, since [`crate::mesh::Mesh::build`] takes the list and
+    /// the output borrows the `Ui`.
+    pub fn draw_list(&self) -> &crate::DrawList {
+        &self.draw
+    }
+
     pub fn frame_cost(&self) -> crate::testing::FrameCost {
         self.cost
     }
@@ -2523,7 +2533,31 @@ impl Ui {
         self.layer_with(id, z, rect, Layout::column().shrink(), frame, body)
     }
 
+    /// [`Ui::layer_in`] without a closure, for a binding that cannot hold one.
+    /// Close it with [`Ui::close_layer`].
+    ///
+    /// This is the building block for a modal: a layer over the window at
+    /// [`Layer::Popup`] or above, with a scrim drawn under it. libgui has no
+    /// modal of its own — what a modal *blocks* is an app's question, not a
+    /// layout one.
+    pub fn open_layer(&mut self, id: Id, z: Layer, rect: Rect, frame: Frame) {
+        self.open_layer_with(id, z, rect, Layout::column().shrink(), frame);
+    }
+
+    pub fn close_layer(&mut self) {
+        self.close();
+    }
+
     fn layer_with<R>(&mut self, id: Id, z: Layer, rect: Rect, layout: Layout, frame: Frame, body: impl FnOnce(&mut Self) -> R) -> R {
+        self.open_layer_with(id, z, rect, layout, frame);
+        let r = body(self);
+        self.close();
+        r
+    }
+
+    /// The opening half of [`Ui::layer_with`], so the closure form and the
+    /// open/close pair cannot drift apart.
+    fn open_layer_with(&mut self, id: Id, z: Layer, rect: Rect, layout: Layout, frame: Frame) {
         self.mark_seen(id);
         let mut n = Node::new(id, layout);
         n.absolute = Some(rect);
@@ -2542,9 +2576,6 @@ impl Ui {
         self.nodes.push(n);
         self.root_kids.push(idx as u32);
         self.open(idx);
-        let r = body(self);
-        self.close();
-        r
     }
 
     /// A container at an explicit rect **inside the current container**, so it

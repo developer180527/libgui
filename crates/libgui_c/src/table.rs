@@ -340,6 +340,24 @@ widgets! { ui =>
     /// Close the collection opened by `libgui_open_collection`.
     fn libgui_close_collection() -> () { ui.close_collection() }
 
+    /// Your own texture, filling the space left in the container: the 3D
+    /// view, a render target, a video frame.
+    ///
+    /// `texture` is the index you register with your renderer; it comes back
+    /// in `LibguiBatch::texture_index` with `texture_kind` 1, and drawing it
+    /// is the host's job. The response is the one to drive a camera from:
+    /// `dragging` with `drag_dx`/`drag_dy` for a tumble, `scroll_y` for dolly.
+    ///
+    /// For an overlay — a gizmo, a HUD, a selection rectangle — build a
+    /// container over it, or use `libgui_add_leaf` and paint into it.
+    ///
+    /// It *grows* to fill what it is given, so its container must have a size
+    /// to give: inside one whose height is `Fit`, a viewport is zero pixels
+    /// tall and draws nothing at all.
+    fn libgui_viewport(key: str, texture: u64) -> LibguiResponse {
+        ui.viewport(key, libgui::TextureId::User(texture as u32), |_, _| {})
+    }
+
     /// Put the keyboard cursor on `index`, so clicking a row leaves it where
     /// the pointer left off.
     fn libgui_set_cursor(collection: u64, index: usize) -> () {

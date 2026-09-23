@@ -186,6 +186,13 @@ void libgui_painter_rect_bordered(LibguiPainter* p, LibguiRect r, LibguiColor fi
                                   float border_width, LibguiColor border);
 void libgui_painter_line(LibguiPainter* p, float x0, float y0, float x1, float y1, float width, LibguiColor c);
 void libgui_painter_text_left(LibguiPainter* p, LibguiRect r, float size, LibguiColor c, const char* text);
+/* One of your own textures: `texture` is the index that comes back in
+ * LibguiBatch::texture_index with texture_kind 1. For the 3D view itself,
+ * libgui_viewport is the widget. */
+void libgui_painter_image(LibguiPainter* p, LibguiRect r, uint64_t texture, float radius);
+void libgui_painter_image_uv(LibguiPainter* p, LibguiRect r, uint64_t texture,
+                             float u0, float v0, float u1, float v1,
+                             float radius, LibguiColor tint);
 
 /* --- Input -------------------------------------------------------------- */
 
@@ -263,7 +270,13 @@ void libgui_push_focus_lost(LibguiUi* ui);
  * produces one is a platform convention. Without this a text field ignores
  * Backspace. Call once, after libgui_ui_new. */
 int32_t libgui_install_default_keymap(LibguiUi* ui);
+/* 0, or 1 when `platform` is not a LIBGUI_PLATFORM_* value: nothing is
+ * installed and libgui_last_error says so. An unknown value is NOT quietly
+ * treated as the current platform — that would put Cmd where you asked for
+ * Ctrl and say nothing. */
 int32_t libgui_install_keymap(LibguiUi* ui, int32_t platform);
+/* Which gesture a click with these modifiers means: 0 replace, 1 toggle,
+ * 2 range, or -1 when `platform` is not a LIBGUI_PLATFORM_* value. */
 int32_t libgui_select_kind(int32_t platform, LibguiModifiers m);
 void    libgui_select(LibguiUi* ui, uint64_t collection, uint64_t index, int32_t kind,
                       int32_t* out_kind, uint64_t* out_lo, uint64_t* out_hi);
@@ -309,6 +322,31 @@ uint8_t            libgui_needs_frame(LibguiUi* ui, float elapsed);
 uint64_t           libgui_instance_stride(void);
 uint32_t           libgui_vertices_per_instance(void);
 
+/* --- The triangle form ---------------------------------------------------
+ *
+ * libgui's own output is one instance per primitive, and not every renderer
+ * can draw that: bgfx carries at most five vec4s of instance data and an
+ * instance needs six, GLES2 and WebGL1 have no per-instance attributes at all.
+ * Turn this on and every frame is also expanded into one quad per primitive —
+ * four vertices, six indices — which any vertex+index draw can take.
+ *
+ * It costs about four and a half times the bytes, so a renderer that can
+ * instance should keep instancing. Off by default.
+ *
+ * The vertex is what the shader's *varyings* are, already computed: porting
+ * the shader is a vertex stage that moves pos into clip space and passes the
+ * rest through, and a fragment stage over values that are all already there.
+ * Describe the layout with libgui_vertex_attribute rather than hard-coding it.
+ */
+void               libgui_enable_mesh(LibguiUi* ui, uint8_t on);
+const void*        libgui_mesh_vertices(LibguiUi* ui, uint64_t* out_count);
+const uint32_t*    libgui_mesh_indices(LibguiUi* ui, uint64_t* out_count);
+const LibguiBatch* libgui_mesh_batches(LibguiUi* ui, uint64_t* out_count);
+uint8_t            libgui_mesh_fits_u16(LibguiUi* ui);
+uint64_t           libgui_vertex_stride(void);
+uint32_t           libgui_vertex_attribute_count(void);
+uint8_t            libgui_vertex_attribute(uint32_t index, uint32_t* out_floats, uint32_t* out_offset);
+
 /* --- Text fields and pickers --------------------------------------------- */
 
 /* The caller owns the buffer. `cap` includes the NUL. `out_len` receives the
@@ -332,7 +370,6 @@ uint8_t  libgui_nav_focused(void);
 uint8_t  libgui_nav_activated(void);
 uint8_t  libgui_nav_expand(void);
 uint8_t  libgui_nav_collapse(void);
-void     libgui_scroll_to_id(LibguiUi* ui, uint64_t id);
 
 /* --- Docking ------------------------------------------------------------- */
 
@@ -454,6 +491,44 @@ uint8_t     libgui_drag_source(LibguiUi* ui, uint64_t id, const char* kind, uint
 void        libgui_drop_zone(LibguiUi* ui, const char* const* kinds, uint64_t count, LibguiDropZone* out);
 const char* libgui_dragging(LibguiUi* ui);   /* NULL when nothing is */
 void        libgui_cancel_drag(LibguiUi* ui);
+
+/* --- Popups, layers and modals -------------------------------------------- */
+
+#define LIBGUI_LAYER_WINDOW  0u
+#define LIBGUI_LAYER_POPUP   1u
+#define LIBGUI_LAYER_TOOLTIP 2u
+
+/* Open anchored to a widget's rect: the popup appears beneath it and flips up
+ * when there is no room. Then build the body on the frames where
+ * libgui_open_popup_body returns 1. */
+void    libgui_open_popup(LibguiUi* ui, uint64_t id, LibguiRect anchor);
+uint8_t libgui_open_popup_body(LibguiUi* ui, uint64_t id, float min_width);
+void    libgui_close_popup_body(LibguiUi* ui);
+uint8_t libgui_popup_open(LibguiUi* ui, uint64_t id);
+/* Check before acting on your own shortcuts, so a chord typed into an open
+ * menu does not also fire a command. */
+uint8_t libgui_any_popup_open(LibguiUi* ui);
+void    libgui_close_popup(LibguiUi* ui, uint64_t id);
+void    libgui_close_popups(LibguiUi* ui);
+
+/* A container at an explicit rect, above the window's flow content.
+ *
+ * THIS IS HOW YOU BUILD A MODAL, because libgui has none: a layer covering the
+ * window with a translucent fill as the scrim, then a second at the dialog's
+ * rect. What a modal *blocks* — whether the menu bar still works, whether
+ * Escape cancels — is your question, so libgui supplies the stacking and
+ * leaves the policy alone. */
+void libgui_open_layer(LibguiUi* ui, uint64_t id, uint32_t z, LibguiRect rect, LibguiFrame frame);
+void libgui_close_layer(LibguiUi* ui);
+
+/* --- Font fallback --------------------------------------------------------- */
+
+/* Without a chain, scripts the first font lacks render as NOTHING — the
+ * bundled Inter has no CJK, Arabic, Indic or emoji glyphs, so a name typed in
+ * Japanese comes out blank rather than as boxes. Line metrics come from the
+ * first face, so adding a CJK fallback does not change the height of a line of
+ * Latin. Which fonts go in the chain is yours: libgui reads no files. */
+LibguiUi* libgui_ui_new_with_fallbacks(const uint8_t* const* fonts, const uint64_t* lens, uint64_t count);
 
 /* Struct sizes, for the static_asserts below. */
 uint64_t libgui_sizeof_response(void);

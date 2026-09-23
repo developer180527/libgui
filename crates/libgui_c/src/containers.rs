@@ -334,10 +334,51 @@ pub unsafe extern "C" fn libgui_painter_line(
     }
 }
 
+/// Draw one of your own textures into `r`, with `radius` rounding its
+/// corners. `texture` is the index your renderer registered; it comes back in
+/// `LibguiBatch::texture_index` with `texture_kind` 1.
+///
+/// This is the painter form, for an icon or a thumbnail inside a custom leaf.
+/// For the 3D view itself, `libgui_viewport` is the widget.
+///
+/// # Safety
+/// `p` must be the painter handed to a paint callback, or null.
+#[no_mangle]
+pub unsafe extern "C" fn libgui_painter_image(p: *mut LibguiPainter, r: LibguiRect, texture: u64, radius: f32) {
+    if let Some(p) = painter(p) {
+        p.image(Rect::new(r.x, r.y, r.w, r.h), libgui::TextureId::User(texture as u32), radius);
+    }
+}
+
+/// Draw one of your own textures into `r`, taking only the part of it between
+/// `(u0, v0)` and `(u1, v1)` — one sprite out of a sheet — and tinting it by
+/// `tint`. Pass white for no tint.
+///
+/// # Safety
+/// As above.
+#[no_mangle]
+pub unsafe extern "C" fn libgui_painter_image_uv(
+    p: *mut LibguiPainter,
+    r: LibguiRect,
+    texture: u64,
+    u0: f32,
+    v0: f32,
+    u1: f32,
+    v1: f32,
+    radius: f32,
+    tint: LibguiColor,
+) {
+    if let Some(p) = painter(p) {
+        let tex = libgui::TextureId::User(texture as u32);
+        p.image_tinted(Rect::new(r.x, r.y, r.w, r.h), tex, [u0, v0, u1, v1], radius, color(tint));
+    }
+}
+
 /// Text at the left of `r`, vertically centred.
 ///
 /// # Safety
-/// `text` must be a NUL-terminated string.
+/// `p` must be null or the painter handed to a paint callback, and `text` a
+/// NUL-terminated string.
 #[no_mangle]
 pub unsafe extern "C" fn libgui_painter_text_left(
     p: *mut LibguiPainter,
