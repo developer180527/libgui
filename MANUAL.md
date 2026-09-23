@@ -9,8 +9,9 @@ if you change one, change the test with it.
 
 **This tracks a pre-1.0 library and will change.** Where something is not
 implemented, or is the app's job rather than the library's, it says so — the
-gaps are as much the point of this document as the features. `README.md` covers
-the design rationale; this covers the wiring.
+gaps are as much the point of this document as the features. [`DESIGN.md`](DESIGN.md) covers
+*why* the library is shaped this way, decision by decision; this covers the
+wiring.
 
 ---
 
@@ -915,7 +916,52 @@ boxes.
 **Every exported function is called by a test**, checked by extracting the
 symbols and grepping the test directory rather than by reading the list.
 
-### 14.5 Building it from CMake
+### 14.5 Drawing your own widgets, and drawing them less often
+
+The whole painter crosses — `measure`, `hairline`, `snap_rect`, `shadow`,
+`polyline`, `bezier`, `wire`, `chevron`, the four text placements, tinted
+images — so a custom widget written in C++ has the same palette as one written
+in Rust. `measure` is the one you cannot do without: everything else draws,
+that is how you decide where.
+
+`hairline` is worth knowing about for CAD specifically. A 1.0-wide rect on a
+1.5× display lands on a pixel and a half and renders as a grey smear; `hairline`
+gives you exactly N *physical* pixels, so rules, grid lines and witness lines
+stay crisp at any scale.
+
+Your widget also inherits things it does not ask for: the focus ring, keyboard
+reachability (if you use `libgui_interact`), clipping, and — because the fade
+happens in the draw list rather than per widget — **it greys out inside
+`libgui_open_enabled(ui, 0)` without knowing that scope exists.**
+
+#### Updating a section less often
+
+```c
+uint64_t tick = (uint64_t)(now * 10.0);          /* ten times a second */
+if (libgui_open_cached(ui, "telemetry", tick)) {
+    build_telemetry_panel(ui);
+    libgui_close_cached(ui);
+}
+```
+
+`libgui_open_cached` replays a subtree's recorded pixels instead of building
+it: no layout, no text measurement, no draw-list work. Profiling puts paint at
+about ninety per cent of a frame, so this is where a busy panel's cost actually
+is. `deps` is any number that changes when the pixels would — a revision, a
+hash, or a coarse tick as above, which is all "run this section at 10 Hz"
+amounts to.
+
+It refuses to replay when that would be wrong, and you manage none of it: the
+pointer over it, focus inside it, still animating, the DPI or canvas transform
+changed, the atlas repacked, or it moved while a pointer was inside it. A
+replay survives the subtree **moving** but not **resizing**.
+
+That is the second of three ways to do less work. The first is
+`libgui_needs_frame`, which lets the whole window sleep. The third is redrawing
+last frame's batches with no UI frame at all, which is how a viewport animates
+while the UI around it costs nothing.
+
+### 14.6 Building it from CMake
 
 ```cmake
 add_subdirectory(third_party/libgui/crates/libgui_c)

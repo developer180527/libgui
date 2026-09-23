@@ -153,11 +153,66 @@ void           libgui_close_enabled(LibguiUi* ui, uint8_t was);
 void           libgui_add_leaf(LibguiUi* ui, uint64_t id, LibguiLayout layout, uint8_t interactive, LibguiPaintFn paint);
 LibguiResponse libgui_interact(LibguiUi* ui, uint64_t id);
 
+/* --- Drawing your own widget ---------------------------------------------
+ *
+ * The same palette a Rust widget has. `measure` is the one you cannot do
+ * without: everything else draws, that is how you decide where. */
+
+void libgui_painter_measure(LibguiPainter* p, float size, const char* text, float* out_w, float* out_h);
+/* Exactly `px` PHYSICAL pixels wide, however the display is scaled: a 1.0-wide
+ * rect on a 1.5x display lands on a pixel and a half and renders as a smear.
+ * This is what keeps a rule or a witness line crisp. */
+void libgui_painter_hairline(LibguiPainter* p, float x, float y, float px, float height, LibguiRect* out);
+void libgui_painter_snap_rect(LibguiPainter* p, LibguiRect r, LibguiRect* out);
+
 void libgui_painter_rect(LibguiPainter* p, LibguiRect r, LibguiColor fill, float radius);
 void libgui_painter_rect_bordered(LibguiPainter* p, LibguiRect r, LibguiColor fill, float radius,
                                   float border_width, LibguiColor border);
 void libgui_painter_line(LibguiPainter* p, float x0, float y0, float x1, float y1, float width, LibguiColor c);
 void libgui_painter_text_left(LibguiPainter* p, LibguiRect r, float size, LibguiColor c, const char* text);
+void libgui_painter_text(LibguiPainter* p, float x, float y, float size, LibguiColor c, const char* text);
+void libgui_painter_text_right(LibguiPainter* p, LibguiRect r, float size, LibguiColor c, const char* text);
+void libgui_painter_text_centered(LibguiPainter* p, LibguiRect r, float size, LibguiColor c, const char* text);
+/* align: 0 left, 1 centre, 2 right */
+void libgui_painter_text_wrapped(LibguiPainter* p, LibguiRect r, float size, LibguiColor c, uint32_t align,
+                                 const char* text);
+
+void libgui_painter_shadow(LibguiPainter* p, LibguiRect r, float radius, float blur, LibguiColor c);
+void libgui_painter_image_tinted(LibguiPainter* p, LibguiRect r, uint32_t texture_index,
+                                 float u0, float v0, float u1, float v1, float radius, LibguiColor tint);
+/* `points` is `count` pairs of floats. */
+void libgui_painter_polyline(LibguiPainter* p, const float* points, uint64_t count, float width, LibguiColor c);
+void libgui_painter_bezier(LibguiPainter* p, float x0, float y0, float cx0, float cy0,
+                           float cx1, float cy1, float x1, float y1, float width, LibguiColor c);
+/* Leaves sideways and arrives sideways, the way a node graph draws a link. */
+void libgui_painter_wire(LibguiPainter* p, float from_x, float from_y, float to_x, float to_y,
+                         float width, LibguiColor c);
+/* dir: 0 up, 1 down, 2 left, 3 right. Two strokes, not a glyph, so it stays
+ * crisp and needs no font. */
+void libgui_painter_chevron(LibguiPainter* p, LibguiRect r, float size, uint32_t dir, LibguiColor c);
+
+/* --- Caching a subtree ----------------------------------------------------
+ *
+ * Replay a subtree's pixels instead of building it again. Returns 1 when it
+ * HAS to be built: build it, then close. Returns 0 when it was replayed —
+ * build nothing, close nothing.
+ *
+ * `deps` is a number you choose: a revision, a hash, anything that changes
+ * when the pixels would. A section that updates at its own rate is this and
+ * nothing else — put a coarse tick in `deps`:
+ *
+ *     uint64_t tick = (uint64_t)(now * 10.0);          // ten times a second
+ *     if (libgui_open_cached(ui, "telemetry", tick)) {
+ *         build_telemetry_panel(ui);
+ *         libgui_close_cached(ui);
+ *     }
+ *
+ * It refuses to replay when that would be wrong and you manage none of it: the
+ * pointer over it, focus inside it, still animating, the DPI or canvas
+ * transform changed, the atlas repacked, or it moved while a pointer was
+ * inside. A replay survives the subtree MOVING but not RESIZING. */
+uint8_t libgui_open_cached(LibguiUi* ui, const char* key, uint64_t deps);
+void    libgui_close_cached(LibguiUi* ui);
 /* One of your own textures: `texture` is the index that comes back in
  * LibguiBatch::texture_index with texture_kind 1. For the 3D view itself,
  * libgui_viewport is the widget. */

@@ -31,6 +31,24 @@ unsafe fn ui() -> *mut LibguiUi {
     p
 }
 
+/// A fixed-size leaf, which several tests want.
+fn leaf_layout(w: f32, h: f32) -> LibguiLayout {
+    LibguiLayout {
+        axis: 0,
+        _pad: [0; 3],
+        width: LibguiSize { kind: LibguiSizeKind::Fixed, value: w },
+        height: LibguiSize { kind: LibguiSizeKind::Fixed, value: h },
+        pad_left: 0.0,
+        pad_right: 0.0,
+        pad_top: 0.0,
+        pad_bottom: 0.0,
+        gap: 0.0,
+        align_main: 0,
+        align_cross: 0,
+        _pad2: [0; 2],
+    }
+}
+
 fn c(s: &str) -> CString {
     CString::new(s).unwrap()
 }
@@ -503,5 +521,101 @@ fn popups_layers_and_a_font_chain_all_work() {
         let badlen = [0u64];
         assert!(libgui_ui_new_with_fallbacks(bad.as_ptr(), badlen.as_ptr(), 1).is_null(),
                 "an empty font was accepted");
+    }
+}
+
+/// The rest of the painter, and subtree caching: the two places a C host had
+/// strictly less than a Rust one.
+#[test]
+fn the_whole_painter_and_the_subtree_cache_reach_c() {
+    unsafe extern "C" fn paint_everything(p: *mut LibguiPainter, r: LibguiRect, user: *mut c_void) {
+        let hit = unsafe { &mut *(user as *mut u32) };
+        *hit += 1;
+        let white = LibguiColor { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
+        let txt = CString::new("Extrude").unwrap();
+
+        // The one a custom widget cannot do without: how big is my text?
+        let (mut w, mut h) = (0.0f32, 0.0f32);
+        unsafe { libgui_painter_measure(p, 13.0, txt.as_ptr(), &mut w, &mut h) };
+        assert!(w > 0.0 && h > 0.0, "measure returned nothing: {w}x{h}");
+
+        // A crisp single-pixel rule, which is most of what a CAD drawing is.
+        let mut line = LibguiRect::default();
+        unsafe { libgui_painter_hairline(p, r.x, r.y, 1.0, r.h, &mut line) };
+        assert!(line.w > 0.0, "hairline returned an empty rect");
+        unsafe { libgui_painter_rect(p, line, white, 0.0) };
+
+        let mut snapped = LibguiRect::default();
+        unsafe { libgui_painter_snap_rect(p, r, &mut snapped) };
+        assert_eq!(snapped.x, snapped.x.round(), "snap_rect did not snap");
+
+        unsafe {
+            libgui_painter_shadow(p, r, 4.0, 12.0, white);
+            libgui_painter_text(p, r.x, r.y, 13.0, white, txt.as_ptr());
+            libgui_painter_text_right(p, r, 13.0, white, txt.as_ptr());
+            libgui_painter_text_centered(p, r, 13.0, white, txt.as_ptr());
+            libgui_painter_text_wrapped(p, r, 13.0, white, 1, txt.as_ptr());
+            let pts = [r.x, r.y, r.x + 10.0, r.y + 10.0, r.x + 20.0, r.y];
+            libgui_painter_polyline(p, pts.as_ptr(), 3, 2.0, white);
+            libgui_painter_bezier(p, r.x, r.y, r.x + 5.0, r.y + 5.0, r.x + 15.0, r.y + 5.0, r.x + 20.0, r.y, 2.0, white);
+            libgui_painter_wire(p, r.x, r.y, r.x + 30.0, r.y + 20.0, 2.0, white);
+            libgui_painter_chevron(p, r, 8.0, 1, white);
+            libgui_painter_image_tinted(p, r, 0, 0.0, 0.0, 1.0, 1.0, 0.0, white);
+            // Nulls, which a host will pass eventually.
+            libgui_painter_text(p, 0.0, 0.0, 13.0, white, std::ptr::null());
+            libgui_painter_polyline(p, std::ptr::null(), 0, 1.0, white);
+            libgui_painter_measure(p, 13.0, txt.as_ptr(), std::ptr::null_mut(), std::ptr::null_mut());
+        }
+    }
+
+    unsafe {
+        let u = ui();
+        let mut hits: u32 = 0;
+        let layout = leaf_layout(80.0, 30.0);
+        let id = libgui_id_from_name(c("gizmo").as_ptr());
+
+        for _ in 0..3 {
+            libgui_begin_frame(u, 400.0, 300.0, 1.0, 1.0 / 60.0);
+            let cb = LibguiPaintFn {
+                paint: Some(paint_everything),
+                drop_user: None,
+                user: &mut hits as *mut u32 as *mut c_void,
+            };
+            libgui_add_leaf(u, id, layout, 1, cb);
+            libgui_end_frame(u);
+        }
+        assert!(hits > 0, "the paint callback never ran");
+        assert_eq!(libgui_ui_poisoned(u), 0, "the painter calls poisoned the handle");
+
+        // --- the subtree cache -------------------------------------------
+        // Same deps: built once, replayed after. That is the whole point.
+        let key = c("panel");
+        let mut builds = 0;
+        for _ in 0..5 {
+            libgui_begin_frame(u, 400.0, 300.0, 1.0, 1.0 / 60.0);
+            if libgui_open_cached(u, key.as_ptr(), 7) != 0 {
+                builds += 1;
+                libgui_label(u, c("Fillet 2mm").as_ptr());
+                libgui_close_cached(u);
+            }
+            libgui_end_frame(u);
+        }
+        assert!(builds < 5, "the cache never replayed: built {builds} of 5 frames");
+        assert!(builds > 0, "the cache never built it at all");
+
+        // Changing deps rebuilds — which is how a section runs at its own rate.
+        let before = builds;
+        for tick in 0..3u64 {
+            libgui_begin_frame(u, 400.0, 300.0, 1.0, 1.0 / 60.0);
+            if libgui_open_cached(u, key.as_ptr(), 100 + tick) != 0 {
+                builds += 1;
+                libgui_label(u, c("Fillet 2mm").as_ptr());
+                libgui_close_cached(u);
+            }
+            libgui_end_frame(u);
+        }
+        assert_eq!(builds - before, 3, "a changed dep did not rebuild every time");
+        assert_eq!(libgui_ui_poisoned(u), 0, "caching poisoned the handle");
+        libgui_ui_free(u);
     }
 }

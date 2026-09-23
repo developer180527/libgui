@@ -545,6 +545,17 @@ pub struct NavResponse {
     pub collapse: bool,
 }
 
+/// What `close_cached` needs from `open_cached`. Held on a stack rather than
+/// in a field, so a cache inside a cache still closes the right one.
+struct CachedOpen {
+    id: Id,
+    deps: u64,
+    pointer: crate::subtree_cache::Pointer,
+    env: crate::subtree_cache::Env,
+    start: u32,
+    settled_before: u64,
+}
+
 pub struct Ui {
     pub theme: Theme,
     pub fonts: Fonts,
@@ -746,6 +757,8 @@ pub struct Ui {
     /// anything outside the subtree — an easing scroll, a spinner elsewhere —
     /// sets it first and hides the subtree's own.
     unsettled: u64,
+    /// Caches opened with `open_cached` and not yet closed, innermost last.
+    cached_open: Vec<CachedOpen>,
     /// Subtrees that were animating when they last built, so a replay cannot
     /// freeze a fade half way.
     cache_busy: FxSet<Id>,
@@ -915,6 +928,7 @@ impl Ui {
             cached_seen: FxSet::default(),
             cache_theme: Theme::dark(),
             unsettled: 0,
+            cached_open: Vec::new(),
             cache_busy: FxSet::default(),
             top_hits: Vec::new(),
             overlays: Vec::new(),
@@ -2347,6 +2361,28 @@ impl Ui {
     /// inside is only produced on a frame that built. Cache the parts of your
     /// UI that are display, not the parts you read answers from.
     pub fn cached(&mut self, key: impl Hash, deps: impl Hash, body: impl FnOnce(&mut Self)) {
+        if self.open_cached(key, deps) {
+            body(self);
+            self.close_cached();
+        }
+    }
+
+    /// [`Ui::cached`] without a closure, for a binding that cannot hold one.
+    ///
+    /// Returns **true when the subtree has to be built**: call the body, then
+    /// [`Ui::close_cached`]. Returns false when the recording was replayed —
+    /// build nothing, close nothing.
+    ///
+    /// ```no_run
+    /// # use libgui::*;
+    /// # fn f(ui: &mut Ui, revision: u64) {
+    /// if ui.open_cached("properties", revision) {
+    ///     // dozens of widgets
+    ///     ui.close_cached();
+    /// }
+    /// # }
+    /// ```
+    pub fn open_cached(&mut self, key: impl Hash, deps: impl Hash) -> bool {
         let id = self.make_id(("cached", &key));
         self.cached_seen.insert(id);
         let deps = Id::new(&deps).0;
@@ -2374,7 +2410,7 @@ impl Ui {
             let mut n = Node::new(id, Layout::leaf(Size::Fixed(min.x), Size::Fixed(min.y)));
             n.cached = true;
             self.attach(n);
-            return;
+            return false;
         }
 
         // Miss: build it, and record what it produces.
@@ -2385,16 +2421,26 @@ impl Ui {
         n.recording = true;
         let i = self.attach(n);
         self.open(i);
-        body(self);
+        self.cached_open.push(CachedOpen { id, deps, pointer, env, start, settled_before });
+        true
+    }
+
+    /// Close the subtree [`Ui::open_cached`] opened. Only call this when it
+    /// returned true.
+    pub fn close_cached(&mut self) {
+        let Some(o) = self.cached_open.pop() else {
+            debug_assert!(false, "libgui: close_cached without a matching open_cached");
+            return;
+        };
         self.close();
-        self.cache.close_ids(id, start);
-        self.cache.set_deps(id, deps, pointer, env);
+        self.cache.close_ids(o.id, o.start);
+        self.cache.set_deps(o.id, o.deps, o.pointer, o.env);
         // A subtree that is still animating cannot be replayed next frame: its
         // pixels are going to move on their own.
-        if self.unsettled != settled_before {
-            self.cache_busy.insert(id);
+        if self.unsettled != o.settled_before {
+            self.cache_busy.insert(o.id);
         } else {
-            self.cache_busy.remove(&id);
+            self.cache_busy.remove(&o.id);
         }
     }
 

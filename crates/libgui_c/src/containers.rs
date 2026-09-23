@@ -8,7 +8,7 @@
 
 use crate::handle::{with_ui, LibguiUi};
 use crate::types::{LibguiColor, LibguiRect};
-use libgui::{Align, Color, Frame, Id, Insets, Layout, Painter, Rect, Size, Vec2};
+use libgui::{Align, Chevron, Color, Frame, Id, Insets, Layout, Painter, Rect, Size, Vec2};
 use std::os::raw::c_void;
 
 /// How a size is expressed, flattened from libgui's `Size`.
@@ -394,4 +394,363 @@ pub unsafe extern "C" fn libgui_painter_text_left(
         // allocated to cross back.
         p.text_left(Rect::new(r.x, r.y, r.w, r.h), size, color(c), text);
     }
+}
+
+// ---------------------------------------------------------------------------
+// The rest of the painter
+// ---------------------------------------------------------------------------
+//
+// A custom widget drawn from C had a third of the palette a Rust one has,
+// which made "you can build your own widgets" true in principle and thin in
+// practice. These are the other thirteen. `measure` matters most — without it
+// a caller cannot size its own text, so it cannot lay anything out.
+
+/// Which way a chevron points: 0 up, 1 down, 2 left, 3 right.
+fn chevron_of(d: u32) -> Chevron {
+    match d {
+        1 => Chevron::Down,
+        2 => Chevron::Left,
+        _ if d == 3 => Chevron::Right,
+        _ => Chevron::Up,
+    }
+}
+
+/// How large `text` would be at `size`, in logical pixels.
+///
+/// The one call a custom widget cannot do without: everything else draws, this
+/// is how you decide *where*. Writes the size into `out_w`/`out_h`.
+///
+/// # Safety
+/// `p` must be the painter handed to a paint callback; `text` NUL-terminated.
+#[no_mangle]
+pub unsafe extern "C" fn libgui_painter_measure(
+    p: *mut LibguiPainter,
+    size: f32,
+    text: *const std::os::raw::c_char,
+    out_w: *mut f32,
+    out_h: *mut f32,
+) {
+    let text = unsafe { crate::convert::str_or_empty(text, "libgui_painter_measure") };
+    let v = match painter(p) {
+        Some(p) => p.measure(size, text),
+        None => Vec2::ZERO,
+    };
+    if let Some(s) = unsafe { out_w.as_mut() } {
+        *s = v.x;
+    }
+    if let Some(s) = unsafe { out_h.as_mut() } {
+        *s = v.y;
+    }
+}
+
+/// A rectangle exactly `px` physical pixels wide at `x`, however the display
+/// is scaled.
+///
+/// A 1.0-wide rect on a 1.5× display lands on a pixel and a half and renders
+/// as a grey smear. This is what keeps a rule, a grid line or a dimension
+/// witness line crisp — which a CAD drawing is mostly made of.
+///
+/// # Safety
+/// As [`libgui_painter_measure`]; `out` must be writable.
+#[no_mangle]
+pub unsafe extern "C" fn libgui_painter_hairline(
+    p: *mut LibguiPainter,
+    x: f32,
+    y: f32,
+    px: f32,
+    height: f32,
+    out: *mut LibguiRect,
+) {
+    let r = match painter(p) {
+        Some(p) => p.hairline(x, y, px, height),
+        None => Rect::default(),
+    };
+    if let Some(s) = unsafe { out.as_mut() } {
+        *s = r.into();
+    }
+}
+
+/// `r` snapped to whole physical pixels, so its edges are hard.
+///
+/// # Safety
+/// As [`libgui_painter_hairline`].
+#[no_mangle]
+pub unsafe extern "C" fn libgui_painter_snap_rect(p: *mut LibguiPainter, r: LibguiRect, out: *mut LibguiRect) {
+    let v = match painter(p) {
+        Some(p) => p.snap_rect(Rect::new(r.x, r.y, r.w, r.h)),
+        None => Rect::default(),
+    };
+    if let Some(s) = unsafe { out.as_mut() } {
+        *s = v.into();
+    }
+}
+
+/// A soft blurred rounded rect: a drop shadow or a glow.
+///
+/// # Safety
+/// As [`libgui_painter_measure`].
+#[no_mangle]
+pub unsafe extern "C" fn libgui_painter_shadow(
+    p: *mut LibguiPainter,
+    r: LibguiRect,
+    radius: f32,
+    blur: f32,
+    c: LibguiColor,
+) {
+    if let Some(p) = painter(p) {
+        p.shadow(Rect::new(r.x, r.y, r.w, r.h), radius, blur, color(c));
+    }
+}
+
+/// A texture multiplied by a tint, with explicit uv coordinates. For an icon
+/// sheet recoloured per state.
+///
+/// # Safety
+/// As [`libgui_painter_measure`].
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn libgui_painter_image_tinted(
+    p: *mut LibguiPainter,
+    r: LibguiRect,
+    texture_index: u32,
+    u0: f32,
+    v0: f32,
+    u1: f32,
+    v1: f32,
+    radius: f32,
+    tint: LibguiColor,
+) {
+    if let Some(p) = painter(p) {
+        p.image_tinted(
+            Rect::new(r.x, r.y, r.w, r.h),
+            libgui::TextureId::User(texture_index),
+            [u0, v0, u1, v1],
+            radius,
+            color(tint),
+        );
+    }
+}
+
+/// A connected run of line segments. `points` is `count` pairs of floats.
+///
+/// # Safety
+/// `points` must hold `count * 2` readable floats.
+#[no_mangle]
+pub unsafe extern "C" fn libgui_painter_polyline(
+    p: *mut LibguiPainter,
+    points: *const f32,
+    count: u64,
+    width: f32,
+    c: LibguiColor,
+) {
+    if points.is_null() || count == 0 {
+        return;
+    }
+    let xs = unsafe { std::slice::from_raw_parts(points, count as usize * 2) };
+    let pts: Vec<Vec2> = xs.chunks_exact(2).map(|q| Vec2::new(q[0], q[1])).collect();
+    if let Some(p) = painter(p) {
+        p.polyline(&pts, width, color(c));
+    }
+}
+
+/// A cubic Bézier from `p0` to `p1` with controls `c0` and `c1`. For a curve
+/// in a node graph, a spline in a sketch, an easing preview.
+///
+/// # Safety
+/// As [`libgui_painter_measure`].
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn libgui_painter_bezier(
+    p: *mut LibguiPainter,
+    x0: f32,
+    y0: f32,
+    cx0: f32,
+    cy0: f32,
+    cx1: f32,
+    cy1: f32,
+    x1: f32,
+    y1: f32,
+    width: f32,
+    c: LibguiColor,
+) {
+    if let Some(p) = painter(p) {
+        p.bezier(
+            Vec2::new(x0, y0),
+            Vec2::new(cx0, cy0),
+            Vec2::new(cx1, cy1),
+            Vec2::new(x1, y1),
+            width,
+            color(c),
+        );
+    }
+}
+
+/// A link that leaves its start sideways and arrives sideways, the way a node
+/// graph draws a connection.
+///
+/// # Safety
+/// As [`libgui_painter_measure`].
+#[no_mangle]
+pub unsafe extern "C" fn libgui_painter_wire(
+    p: *mut LibguiPainter,
+    from_x: f32,
+    from_y: f32,
+    to_x: f32,
+    to_y: f32,
+    width: f32,
+    c: LibguiColor,
+) {
+    if let Some(p) = painter(p) {
+        p.wire(Vec2::new(from_x, from_y), Vec2::new(to_x, to_y), width, color(c));
+    }
+}
+
+/// A disclosure arrow, drawn as two strokes rather than a glyph so it stays
+/// crisp and needs no font. `dir` is 0 up, 1 down, 2 left, 3 right.
+///
+/// # Safety
+/// As [`libgui_painter_measure`].
+#[no_mangle]
+pub unsafe extern "C" fn libgui_painter_chevron(
+    p: *mut LibguiPainter,
+    r: LibguiRect,
+    size: f32,
+    dir: u32,
+    c: LibguiColor,
+) {
+    if let Some(p) = painter(p) {
+        p.chevron(Rect::new(r.x, r.y, r.w, r.h), size, chevron_of(dir), color(c));
+    }
+}
+
+/// Text with its top-left at a point.
+///
+/// # Safety
+/// As [`libgui_painter_measure`].
+#[no_mangle]
+pub unsafe extern "C" fn libgui_painter_text(
+    p: *mut LibguiPainter,
+    x: f32,
+    y: f32,
+    size: f32,
+    c: LibguiColor,
+    text: *const std::os::raw::c_char,
+) {
+    let text = unsafe { crate::convert::str_or_empty(text, "libgui_painter_text") };
+    if let Some(p) = painter(p) {
+        p.text(Vec2::new(x, y), size, color(c), text);
+    }
+}
+
+/// Text against the right edge of `r`, vertically centred. What a numeric
+/// column wants.
+///
+/// # Safety
+/// As [`libgui_painter_measure`].
+#[no_mangle]
+pub unsafe extern "C" fn libgui_painter_text_right(
+    p: *mut LibguiPainter,
+    r: LibguiRect,
+    size: f32,
+    c: LibguiColor,
+    text: *const std::os::raw::c_char,
+) {
+    let text = unsafe { crate::convert::str_or_empty(text, "libgui_painter_text_right") };
+    if let Some(p) = painter(p) {
+        p.text_right(Rect::new(r.x, r.y, r.w, r.h), size, color(c), text);
+    }
+}
+
+/// Text centred in `r`, both ways.
+///
+/// # Safety
+/// As [`libgui_painter_measure`].
+#[no_mangle]
+pub unsafe extern "C" fn libgui_painter_text_centered(
+    p: *mut LibguiPainter,
+    r: LibguiRect,
+    size: f32,
+    c: LibguiColor,
+    text: *const std::os::raw::c_char,
+) {
+    let text = unsafe { crate::convert::str_or_empty(text, "libgui_painter_text_centered") };
+    if let Some(p) = painter(p) {
+        p.text_centered(Rect::new(r.x, r.y, r.w, r.h), size, color(c), text);
+    }
+}
+
+/// Text wrapped to `r`'s width. `align` is 0 left, 1 centre, 2 right.
+///
+/// # Safety
+/// As [`libgui_painter_measure`].
+#[no_mangle]
+pub unsafe extern "C" fn libgui_painter_text_wrapped(
+    p: *mut LibguiPainter,
+    r: LibguiRect,
+    size: f32,
+    c: LibguiColor,
+    align: u32,
+    text: *const std::os::raw::c_char,
+) {
+    let text = unsafe { crate::convert::str_or_empty(text, "libgui_painter_text_wrapped") };
+    let a = match align {
+        1 => Align::Center,
+        2 => Align::End,
+        _ => Align::Start,
+    };
+    if let Some(p) = painter(p) {
+        p.text_wrapped(Rect::new(r.x, r.y, r.w, r.h), size, color(c), a, text);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Subtree caching
+// ---------------------------------------------------------------------------
+
+/// Replay a subtree's pixels instead of building it again.
+///
+/// Returns **1 when the subtree has to be built**: build it, then call
+/// [`libgui_close_cached`]. Returns 0 when the recording was replayed — build
+/// nothing and close nothing.
+///
+/// `deps` is a number you choose: a revision counter, a hash of the data the
+/// subtree draws, anything that changes when the pixels would. Rebuild happens
+/// when it changes, and only then — profiling puts paint at about ninety per
+/// cent of a frame, so this is where a busy panel's cost actually is.
+///
+/// **A section that updates at its own rate** is this and nothing else: put a
+/// coarse tick in `deps` and it rebuilds at that rate and replays in between.
+///
+/// ```c
+/// uint64_t tick = (uint64_t)(now * 10.0);      /* ten times a second */
+/// if (libgui_open_cached(ui, "telemetry", tick)) {
+///     build_telemetry_panel(ui);
+///     libgui_close_cached(ui);
+/// }
+/// ```
+///
+/// It refuses to replay when that would be wrong, and you do not manage any of
+/// it: the pointer is over it, focus is inside it, it is still animating, the
+/// DPI scale or canvas transform changed, the glyph atlas was repacked, or it
+/// moved while a pointer was inside it — a different widget is under that
+/// pointer now.
+///
+/// A replay survives the subtree *moving* but not *resizing*; a resize rebuilds.
+///
+/// # Safety
+/// `ui` must be null or live; `key` null or NUL-terminated.
+#[no_mangle]
+pub unsafe extern "C" fn libgui_open_cached(ui: *mut LibguiUi, key: *const std::os::raw::c_char, deps: u64) -> u8 {
+    let key = unsafe { crate::convert::str_or_empty(key, "libgui_open_cached") };
+    with_ui(ui, 0, |u| u.open_cached(key, deps) as u8)
+}
+
+/// Close the subtree [`libgui_open_cached`] opened. Only call this when it
+/// returned 1.
+///
+/// # Safety
+/// `ui` must be null or live.
+#[no_mangle]
+pub unsafe extern "C" fn libgui_close_cached(ui: *mut LibguiUi) {
+    with_ui(ui, (), |u| u.close_cached());
 }
