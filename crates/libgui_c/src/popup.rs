@@ -35,6 +35,26 @@ pub unsafe extern "C" fn libgui_open_popup(ui: *mut LibguiUi, id: u64, anchor: L
     });
 }
 
+/// Open `id` as a child of `parent`, keeping `parent` open: a submenu.
+///
+/// [`libgui_open_popup`] closes whatever was open first, because a second
+/// root popup replaces the first. A submenu is the case where it must not,
+/// so it has its own call. Nothing happens if `parent` is not open.
+///
+/// # Safety
+/// `ui` must be null or live.
+#[no_mangle]
+pub unsafe extern "C" fn libgui_open_child_popup(
+    ui: *mut LibguiUi,
+    parent: u64,
+    id: u64,
+    anchor: LibguiRect,
+) {
+    with_ui(ui, (), |u| {
+        u.open_child_popup(Id(parent), Id(id), Rect::new(anchor.x, anchor.y, anchor.w, anchor.h));
+    });
+}
+
 /// Begin a popup's contents. Returns 1 when it is open — build the body only
 /// then, and call [`libgui_close_popup_body`] after.
 ///

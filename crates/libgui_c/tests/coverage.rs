@@ -472,6 +472,21 @@ fn popups_layers_and_a_font_chain_all_work() {
         assert_eq!(libgui_popup_open(u, pid), 1, "the popup closed by itself");
         assert_eq!(libgui_any_popup_open(u), 1, "any_popup_open disagrees with popup_open");
 
+        // A submenu, which is the only way the chain is ever deeper than one
+        // and so the only thing that tells close_popup from close_popups.
+        let sub = libgui_id_from_name(c("props_submenu").as_ptr());
+        libgui_begin_frame(u, 400.0, 300.0, 1.0, 1.0 / 60.0);
+        libgui_open_child_popup(u, pid, sub, anchor);
+        libgui_end_frame(u);
+        assert_eq!(libgui_popup_open(u, sub), 1, "the submenu never opened");
+        assert_eq!(libgui_popup_open(u, pid), 1, "the submenu replaced its parent");
+
+        libgui_begin_frame(u, 400.0, 300.0, 1.0, 1.0 / 60.0);
+        libgui_close_popup(u, sub);
+        libgui_end_frame(u);
+        assert_eq!(libgui_popup_open(u, sub), 0, "close_popup left the submenu open");
+        assert_eq!(libgui_popup_open(u, pid), 1, "close_popup closed the parent too");
+
         // Escape's job.
         libgui_begin_frame(u, 400.0, 300.0, 1.0, 1.0 / 60.0);
         libgui_close_popups(u);

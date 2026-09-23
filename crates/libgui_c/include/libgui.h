@@ -652,6 +652,9 @@ void        libgui_cancel_drag(LibguiUi* ui);
  * when there is no room. Then build the body on the frames where
  * libgui_open_popup_body returns 1. */
 void    libgui_open_popup(LibguiUi* ui, uint64_t id, LibguiRect anchor);
+/* A submenu: opens id while keeping parent open, where libgui_open_popup
+ * would replace it. Does nothing if parent is not open. */
+void    libgui_open_child_popup(LibguiUi* ui, uint64_t parent, uint64_t id, LibguiRect anchor);
 uint8_t libgui_open_popup_body(LibguiUi* ui, uint64_t id, float min_width);
 void    libgui_close_popup_body(LibguiUi* ui);
 uint8_t libgui_popup_open(LibguiUi* ui, uint64_t id);
