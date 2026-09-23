@@ -808,15 +808,57 @@ bugs hide, and that test prints things like:
 FAIL: LibguiResponse is 88 bytes here and 96 in the library
 ```
 
-### 14.2 What crosses, and what does not yet
+### 14.2 C++
 
-Widgets, containers, scroll areas, the disabled scope, stable ids, custom
-painting (`LibguiPaintFn` — a `paint` callback, a `drop_user` to release what
-it captured, and a `void* user`) and `libgui_interact`.
+`libgui.hpp` sits on the same ABI and costs nothing at runtime. It exists
+because the three tedious things in C are the three you do constantly:
+
+```cpp
+libgui::Ui ui(font.data(), font.size());
+ui.install_default_keymap();
+
+ui.begin_frame(w, h, scale, dt);
+{
+    auto _c = ui.container(libgui::id("panel"),
+                           libgui::Layout::column().padding(8).gap(4),
+                           libgui::Frame::none().fill(bg).radius(4).clip());
+    ui.heading("Model");
+    ui.checkbox("Visible", visible);        // bool&, not uint8_t*
+    ui.text_input("name", name);            // std::string&, grown as needed
+
+    { auto _e = ui.enabled(has_selection);
+      if (ui.button("Join").clicked) join(); }
+
+    ui.add_leaf(libgui::id("gizmo"), leaf, true,
+                [&](LibguiPainter* p, LibguiRect r) { draw_gizmo(p, r); });
+}
+ui.end_frame();
+```
+
+- **RAII guards** close every `open_`/`close_` pair, including on an early
+  return or a throw — which is exactly where a hand-written close is forgotten.
+- **Lambdas as paint callbacks.** The lambda is copied to the heap and deleted
+  through `drop_user` when libgui drops the closure, so it may capture freely.
+- **Views** over the frame output: `ui.instances()`, `ui.batches()`,
+  `ui.atlas()`.
+
+C++17, header-only, and it adds nothing to the ABI — so `tests/smoke.cpp`
+compiles it against the same static library the C test uses.
+
+### 14.3 What crosses, and what does not yet
+
+Widgets (label, heading, button, checkbox, toggle, slider, drag value,
+progress, selectable, tree row, menu items, tooltip, context menu), text input
+and text area over a caller-owned buffer, combo and segmented pickers,
+containers, scroll areas, the disabled scope, the collection cursor,
+multi-select, stable ids, custom painting, the full input set, the keymap, and
+the frame output (instances, batches, atlas, globals, platform requests).
 
 **Not yet:** docking. `TabViewer` is a Rust trait and needs the same vtable
-treatment as painting — four function pointers and a `void* user`. Nor text
-fields, tables, trees, menus beyond the basics, or drag and drop.
+treatment as painting; the design is settled — the callback reuses the host's
+own handle with the provenance swapped, plus a depth counter so `free`,
+`end_frame` and re-entrant `show` are refused rather than undefined. Also not
+crossing: tables, drag and drop, and loading a theme from TOML.
 
 ## 15. Limitations
 

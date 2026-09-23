@@ -112,6 +112,12 @@ jobs:
         with: { components: miri }
       - uses: Swatinem/rust-cache@v2
       - run: cargo miri test -p libgui --lib paint_arena
+      # The C ABI's re-entrancy: a dock panel draws through the host's own
+      # handle while libgui holds the borrow. Whether that is *sound* is a
+      # question about provenance, which no ordinary run can answer — both the
+      # sound and the unsound version produce the same pixels. Miri is the only
+      # thing that tells them apart, and it caught real UB here once already.
+      - run: cargo miri test -p libgui_c --test abi a_panel_draws
 
   # Two floors, because the dependency graph differs by platform: wgpu-hal pulls
   # `ordered-float` (1.90) on Linux/Windows/Android but not on macOS. The
@@ -184,6 +190,18 @@ jobs:
              $([ "$RUNNER_OS" = "macOS" ] && echo "-framework CoreFoundation" || echo "-lm -lpthread -ldl") \
              -o smoke
           ./smoke assets/Inter.ttf
+      # The header-only C++ wrapper: RAII guards, lambdas as paint callbacks,
+      # views over the frame output. It adds nothing to the ABI, so it is
+      # tested the same way — compiled against the same static library.
+      - name: C++ wrapper test (unix)
+        if: runner.os != 'Windows'
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Icrates/libgui_c/include \
+              crates/libgui_c/tests/smoke.cpp \
+              target/release/liblibgui_c.a \
+              $([ "$RUNNER_OS" = "macOS" ] && echo "-framework CoreFoundation" || echo "-lm -lpthread -ldl") \
+              -o smokepp
+          ./smokepp assets/Inter.ttf
       - name: C smoke test (windows)
         if: runner.os == 'Windows'
         shell: cmd
@@ -192,6 +210,14 @@ jobs:
              target\release\libgui_c.lib ^
              ws2_32.lib userenv.lib advapi32.lib ntdll.lib bcrypt.lib /Fe:smoke.exe
           smoke.exe assets\Inter.ttf
+      - name: C++ wrapper test (windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          cl /nologo /std:c++17 /EHsc /I crates\libgui_c\include crates\libgui_c\tests\smoke.cpp ^
+             target\release\libgui_c.lib ^
+             ws2_32.lib userenv.lib advapi32.lib ntdll.lib bcrypt.lib /Fe:smokepp.exe
+          smokepp.exe assets\Inter.ttf
 
   cross-build:
     name: builds for · ${{ matrix.target }}

@@ -112,6 +112,9 @@ macro_rules! c_ret {
     (bool) => {
         "uint8_t"
     };
+    (u64) => {
+        "uint64_t"
+    };
 }
 
 /// Declare the widget surface.
@@ -168,6 +171,7 @@ macro_rules! widgets {
 macro_rules! ret_type {
     (()) => { () };
     (bool) => { u8 };
+    (u64) => { u64 };
     ($t:ty) => { $t };
 }
 
@@ -289,6 +293,58 @@ widgets! { ui =>
 
     /// Whether widgets built now can be used. See `libgui_open_enabled`.
     fn libgui_is_enabled() -> bool { ui.is_enabled() }
+
+    /// One row of a tree. `depth` is the indentation level; `branch` is 0 for a
+    /// leaf, 1 for a collapsed branch, 2 for an expanded one.
+    ///
+    /// `toggled` on the response means the disclosure arrow was hit rather than
+    /// the row, and the two are mutually exclusive: a toggle never also selects.
+    fn libgui_tree_row(key: u64, depth: usize, branch: usize, label: str, selected: bool) -> LibguiTreeResponse {
+        let branch = match branch {
+            1 => libgui::Branch::Collapsed,
+            2 => libgui::Branch::Expanded,
+            _ => libgui::Branch::Leaf,
+        };
+        ui.tree_row(key, depth, branch, label, selected)
+    }
+
+    /// A tooltip on the widget `id`, shown after a hover settles.
+    fn libgui_tooltip(id: u64, text: str) -> () {
+        let resp = ui.interact(libgui::Id(id));
+        ui.tooltip(&resp, text);
+    }
+
+    /// Open a context menu for the widget `id`, if it was right-clicked.
+    /// Build items only when this returns 1, then call `libgui_close_menu`.
+    fn libgui_open_context_menu(id: u64) -> bool {
+        let resp = ui.interact(libgui::Id(id));
+        ui.open_context_menu(&resp)
+    }
+
+    /// A menu row that can be greyed out, with the chord that performs it.
+    /// Pass an empty `hint` for none.
+    fn libgui_menu_item_ex(label: str, hint: str, enabled: bool) -> LibguiResponse {
+        let hint = (!hint.is_empty()).then_some(hint);
+        ui.menu_item_ex(label, hint, enabled)
+    }
+
+    /// Give a list or tree a keyboard cursor and make it one focus stop
+    /// instead of one per row. Close it with `libgui_close_collection`.
+    ///
+    /// Returns the collection's id; read the cursor with `libgui_nav_*`.
+    fn libgui_open_collection(key: str, len: usize) -> u64 {
+        let nav = ui.open_collection(key, len);
+        crate::nav::store(nav)
+    }
+
+    /// Close the collection opened by `libgui_open_collection`.
+    fn libgui_close_collection() -> () { ui.close_collection() }
+
+    /// Put the keyboard cursor on `index`, so clicking a row leaves it where
+    /// the pointer left off.
+    fn libgui_set_cursor(collection: u64, index: usize) -> () {
+        ui.set_cursor(libgui::Id(collection), index)
+    }
 }
 
 fn read_bool(p: *mut u8) -> bool {

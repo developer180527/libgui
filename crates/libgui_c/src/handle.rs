@@ -9,7 +9,30 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 
 /// An opaque `Ui` plus the state the boundary needs.
 pub struct LibguiUi {
-    pub(crate) ui: Ui,
+    /// What every call derives its borrow from.
+    ///
+    /// Normally this points into `owner`. During a callback — a dock panel
+    /// drawing itself — it points at the `&mut Ui` libgui handed us, so nested
+    /// calls **reborrow through that one live borrow** instead of starting a
+    /// second one. Two `&mut` to the same `Ui` would be undefined behaviour;
+    /// this is the difference between a callback that works and one that works
+    /// until the optimiser notices.
+    pub(crate) ui: *mut Ui,
+    /// This handle allocated the `Ui` and frees it.
+    ///
+    /// A `Box<Ui>` beside the pointer would be the obvious way to own it, and
+    /// it is wrong: the pointer is derived from the box, the box is then moved
+    /// into this struct, and moving it invalidates everything derived from it.
+    /// Miri catches that; a test cannot, because the address is the same
+    /// either way. So the raw pointer *is* the owner.
+    owns_ui: bool,
+    /// How deep inside libgui callbacks we are. Frame-level operations are
+    /// refused above zero: freeing the handle or ending the frame from inside
+    /// a panel would pull the ground out from under the walk in progress.
+    pub(crate) depth: u32,
+    /// Captured at `end_frame`, because `FrameOutput` borrows the `Ui` and
+    /// cannot itself cross. Valid until the next `begin_frame`.
+    pub(crate) frame: crate::frame::FrameData,
     /// A panic crossed this handle. Every call after it does nothing.
     ///
     /// Continuing into half a built frame would corrupt the node tree — the
@@ -46,14 +69,24 @@ pub(crate) fn last_error() -> *const c_char {
 /// process, which is not a library's decision to make about someone else's
 /// application.
 pub(crate) fn with_ui<R>(ui: *mut LibguiUi, fallback: R, body: impl FnOnce(&mut Ui) -> R) -> R {
-    let Some(handle) = (unsafe { ui.as_mut() }) else {
-        set_error("null Ui handle");
-        return fallback;
+    // The pointer is copied out and the borrow of the handle ends here, so
+    // nothing holds a `&mut LibguiUi` across `body` — which could re-enter
+    // through this same handle.
+    let uip = {
+        let Some(handle) = (unsafe { ui.as_mut() }) else {
+            set_error("null Ui handle");
+            return fallback;
+        };
+        if handle.poisoned {
+            return fallback;
+        }
+        handle.ui
     };
-    if handle.poisoned {
+    if uip.is_null() {
+        set_error("Ui handle has no Ui");
         return fallback;
     }
-    match catch_unwind(AssertUnwindSafe(|| body(&mut handle.ui))) {
+    match catch_unwind(AssertUnwindSafe(|| body(unsafe { &mut *uip }))) {
         Ok(v) => v,
         Err(e) => {
             let msg = e
@@ -62,8 +95,50 @@ pub(crate) fn with_ui<R>(ui: *mut LibguiUi, fallback: R, body: impl FnOnce(&mut 
                 .or_else(|| e.downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| "panic".into());
             set_error(&format!("libgui panicked: {msg}"));
-            handle.poisoned = true;
+            if let Some(h) = unsafe { ui.as_mut() } {
+                h.poisoned = true;
+            }
             fallback
+        }
+    }
+}
+
+/// Is this handle inside a libgui callback? Frame-level calls are refused
+/// there, because unwinding the frame from inside a panel would corrupt the
+/// walk that is drawing it.
+pub(crate) fn inside_callback(ui: *mut LibguiUi, what: &str) -> bool {
+    match unsafe { ui.as_ref() } {
+        Some(h) if h.depth > 0 => {
+            set_error(&format!("{what}: not allowed inside a panel callback"));
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Point a handle at a borrowed `Ui` for the duration of a callback, then put
+/// it back. See the note on [`LibguiUi::ui`].
+pub(crate) struct Borrowed {
+    handle: *mut LibguiUi,
+    saved: *mut Ui,
+}
+
+impl Borrowed {
+    pub(crate) fn new(handle: *mut LibguiUi, ui: &mut Ui) -> Self {
+        let saved = unsafe { (*handle).ui };
+        unsafe {
+            (*handle).ui = ui as *mut Ui;
+            (*handle).depth += 1;
+        }
+        Self { handle, saved }
+    }
+}
+
+impl Drop for Borrowed {
+    fn drop(&mut self) {
+        unsafe {
+            (*self.handle).ui = self.saved;
+            (*self.handle).depth -= 1;
         }
     }
 }
@@ -84,7 +159,13 @@ pub unsafe extern "C" fn libgui_ui_new(font_bytes: *const u8, font_len: u64) -> 
     }
     let bytes = unsafe { std::slice::from_raw_parts(font_bytes, font_len as usize) };
     match Ui::new(Theme::dark(), bytes) {
-        Ok(ui) => Box::into_raw(Box::new(LibguiUi { ui, poisoned: false })),
+        Ok(ui) => Box::into_raw(Box::new(LibguiUi {
+            ui: Box::into_raw(Box::new(ui)),
+            owns_ui: true,
+            depth: 0,
+            frame: Default::default(),
+            poisoned: false,
+        })),
         Err(e) => {
             set_error(&format!("libgui_ui_new: {e}"));
             std::ptr::null_mut()
@@ -98,9 +179,14 @@ pub unsafe extern "C" fn libgui_ui_new(font_bytes: *const u8, font_len: u64) -> 
 /// `ui` must have come from [`libgui_ui_new`] and must not be used again.
 #[no_mangle]
 pub unsafe extern "C" fn libgui_ui_free(ui: *mut LibguiUi) {
-    if !ui.is_null() {
-        drop(unsafe { Box::from_raw(ui) });
+    if ui.is_null() || inside_callback(ui, "libgui_ui_free") {
+        return;
     }
+    let handle = unsafe { Box::from_raw(ui) };
+    if handle.owns_ui && !handle.ui.is_null() {
+        drop(unsafe { Box::from_raw(handle.ui) });
+    }
+    drop(handle);
 }
 
 /// Did a panic cross this handle? Everything after one does nothing, so a host
@@ -126,6 +212,9 @@ pub unsafe extern "C" fn libgui_ui_poisoned(ui: *mut LibguiUi) -> u8 {
 /// a non-null pointer that is not valid is the caller's responsibility.
 #[no_mangle]
 pub unsafe extern "C" fn libgui_begin_frame(ui: *mut LibguiUi, width: f32, height: f32, scale: f32, dt: f32) {
+    if inside_callback(ui, "libgui_begin_frame") {
+        return;
+    }
     with_ui(ui, (), |ui| {
         ui.begin_frame(FrameInfo { screen_size: Vec2::new(width, height), scale, dt });
     });
@@ -139,9 +228,41 @@ pub unsafe extern "C" fn libgui_begin_frame(ui: *mut LibguiUi, width: f32, heigh
 /// a non-null pointer that is not valid is the caller's responsibility.
 #[no_mangle]
 pub unsafe extern "C" fn libgui_end_frame(ui: *mut LibguiUi) {
-    with_ui(ui, (), |ui| {
-        let _ = ui.end_frame();
-    });
+    if inside_callback(ui, "libgui_end_frame") {
+        return;
+    }
+    let Some(handle) = (unsafe { ui.as_mut() }) else {
+        set_error("null Ui handle");
+        return;
+    };
+    if handle.poisoned {
+        return;
+    }
+    // A split borrow, not `with_ui`: `end_frame` borrows the `Ui` while the
+    // capture writes into a sibling field of the same handle.
+    let uip = handle.ui;
+    let LibguiUi { frame, poisoned, .. } = handle;
+    if uip.is_null() {
+        return;
+    }
+    if catch_unwind(AssertUnwindSafe(|| {
+        let out = unsafe { &mut *uip }.end_frame();
+        crate::frame::capture(&out, frame);
+    }))
+    .is_err()
+    {
+        set_error("libgui panicked in end_frame");
+        *poisoned = true;
+    }
+}
+
+/// Read this frame's captured output. Nothing is computed here — the data was
+/// taken at `end_frame` and is valid until the next `begin_frame`.
+pub(crate) fn with_frame<R>(ui: *mut LibguiUi, fallback: R, body: impl FnOnce(&crate::frame::FrameData) -> R) -> R {
+    match unsafe { ui.as_ref() } {
+        Some(h) if !h.poisoned => body(&h.frame),
+        _ => fallback,
+    }
 }
 
 /// Set the theme by name: `"dark"`, `"midnight"` or `"light"`. Returns 0 on

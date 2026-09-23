@@ -193,4 +193,11 @@ sizeof_fns! {
     libgui_sizeof_rect => LibguiRect,
     libgui_sizeof_color => LibguiColor,
     libgui_sizeof_modifiers => LibguiModifiers,
+    libgui_sizeof_batch => crate::frame::LibguiBatch,
+    libgui_sizeof_globals => crate::frame::LibguiGlobals,
+    libgui_sizeof_platform_output => crate::frame::LibguiPlatformOutput,
+    libgui_sizeof_surface => crate::dock::LibguiSurface,
+    libgui_sizeof_insets => crate::dock::LibguiInsets,
+    libgui_sizeof_table_response => crate::table_c::LibguiTableResponse,
+    libgui_sizeof_drop_zone => crate::theme_dnd::LibguiDropZone,
 }

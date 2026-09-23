@@ -255,3 +255,60 @@ unsafe {    let u = ui();
     });
     libgui_ui_free(u);}
 }
+
+// --- docking ---------------------------------------------------------------
+
+static mut PANELS: u32 = 0;
+
+unsafe extern "C" fn dock_title(_tab: u64, buf: *mut std::os::raw::c_char, cap: u64, _u: *mut c_void) {
+    let name = b"Panel\0";
+    let n = (name.len() as u64).min(cap) as usize;
+    unsafe { std::ptr::copy_nonoverlapping(name.as_ptr() as *const std::os::raw::c_char, buf, n) };
+}
+
+unsafe extern "C" fn dock_panel(ui: *mut LibguiUi, _tab: u64, _u: *mut c_void) {
+    unsafe { PANELS += 1 };
+    // Drawing through the handle we were handed, while libgui holds the
+    // borrow. This is the re-entrancy the design exists for, and it is what
+    // Miri checks: a second independent `&mut Ui` would be caught here.
+    let label = CString::new("inside a panel").unwrap();
+    unsafe { libgui_label(ui, label.as_ptr()) };
+    unsafe { libgui_button(ui, label.as_ptr()) };
+}
+
+/// A dock panel drawing itself through the caller's own handle.
+///
+/// Run this under Miri to check the *provenance*: the handle is re-pointed at
+/// the borrow libgui handed us, so nested calls reborrow through that one live
+/// borrow rather than starting a second. An ordinary run cannot tell the
+/// difference — both produce the same pixels — which is why this test exists
+/// separately from the C smoke test.
+#[test]
+fn a_panel_draws_through_the_hosts_own_handle() {
+    unsafe {
+        let u = ui();
+        let dock = libgui_dock_new();
+        libgui_dock_set_in_app_floating(dock, 1);
+        let leaf = libgui_dock_leaf(dock, 7);
+        assert_eq!(libgui_dock_set_root(dock, 0, leaf), 0);
+
+        let viewer = LibguiTabViewer {
+            title: Some(dock_title),
+            ui: Some(dock_panel),
+            scroll: None,
+            padding: None,
+            user: std::ptr::null_mut(),
+        };
+        for _ in 0..3 {
+            libgui_dock_set_surface_frame(dock, 0, 0.0, 0.0, 1.0);
+            libgui_dock_update(dock);
+            libgui_begin_frame(u, 800.0, 600.0, 1.0, 1.0 / 60.0);
+            libgui_dock_show(dock, u, 0, &viewer);
+            libgui_end_frame(u);
+        }
+        assert!(PANELS > 0, "the panel callback never ran");
+        assert_eq!(libgui_ui_poisoned(u), 0, "docking poisoned the handle");
+        libgui_dock_free(dock);
+        libgui_ui_free(u);
+    }
+}

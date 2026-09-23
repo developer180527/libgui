@@ -33,12 +33,29 @@ use std::os::raw::c_char;
 mod containers;
 mod convert;
 mod handle;
+mod dock;
+mod dock_build;
+mod frame;
 pub mod header;
+mod input;
+mod keymap;
+mod nav;
+mod table_c;
+mod text;
+mod theme_dnd;
 pub mod table;
 mod types;
 
 pub use containers::*;
 pub use handle::*;
+pub use dock::*;
+pub use frame::*;
+pub use input::*;
+pub use keymap::*;
+pub use nav::*;
+pub use table_c::*;
+pub use text::*;
+pub use theme_dnd::*;
 // The generated widget entry points. Exported for Rust callers and tests; a C
 // caller reaches them through the header, which comes from the same table.
 pub use table::*;

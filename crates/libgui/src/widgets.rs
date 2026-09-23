@@ -869,6 +869,18 @@ impl Ui {
         self.popup(id, 160.0, body)
     }
 
+    /// [`Ui::context_menu`] without a closure, for a binding that cannot hold
+    /// one. Build the items only when this returns true, then call
+    /// [`Ui::close_menu`].
+    pub fn open_context_menu(&mut self, resp: &Response) -> bool {
+        let id = resp.id.with("context_menu");
+        if resp.secondary_pressed {
+            let p = self.xform().point(resp.mouse_pos);
+            self.open_popup(id, Rect::new(p.x, p.y, 0.0, 0.0));
+        }
+        self.open_popup_body(id, 160.0)
+    }
+
     /// One-of-N picker (density, tool modes, view modes).
     pub fn segmented(&mut self, key: &str, selected: &mut usize, options: &[&str]) -> Response {
         let s = self.theme.segmented;

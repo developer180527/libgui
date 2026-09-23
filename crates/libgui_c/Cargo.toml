@@ -19,3 +19,6 @@ crate-type = ["lib", "staticlib", "cdylib"]
 
 [dependencies]
 libgui = { path = "../libgui" }
+# The per-platform key bindings and focus policy. libgui binds no keys itself,
+# so without this a text field ignores Backspace.
+libgui_keymap = { path = "../libgui_keymap" }
