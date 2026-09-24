@@ -40,6 +40,11 @@ pub struct LibguiUi {
     /// bug is worse than either. So the handle stops, says so, and the app
     /// decides what to do.
     pub(crate) poisoned: bool,
+    /// A validator callback is running. libgui holds `&mut Ui` across it, so
+    /// any call through this handle would make a second one: refused, rather
+    /// than undefined behaviour. A validator answers a question about text;
+    /// it has no reason to build UI.
+    pub(crate) validating: bool,
 }
 
 thread_local! {
@@ -78,6 +83,10 @@ pub(crate) fn with_ui<R>(ui: *mut LibguiUi, fallback: R, body: impl FnOnce(&mut 
             return fallback;
         };
         if handle.poisoned {
+            return fallback;
+        }
+        if handle.validating {
+            set_error("libgui called from inside a validator, which must only answer about the text");
             return fallback;
         }
         handle.ui
@@ -215,6 +224,7 @@ pub(crate) fn into_handle(ui: Ui) -> *mut LibguiUi {
         depth: 0,
         frame: Default::default(),
         poisoned: false,
+        validating: false,
     }))
 }
 

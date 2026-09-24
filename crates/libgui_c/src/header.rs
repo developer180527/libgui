@@ -686,11 +686,73 @@ void        libgui_drop_zone(LibguiUi* ui, const char* const* kinds, uint64_t co
 const char* libgui_dragging(LibguiUi* ui);   /* NULL when nothing is */
 void        libgui_cancel_drag(LibguiUi* ui);
 
-/* --- Numbers typed in units --------------------------------------------------- */
+/* --- Fields the app validates -------------------------------------------------- */
 
-/* A units table: every unit is a factor to one BASE unit, and values leave in
- * base units whatever the user typed. Keep one for as long as the fields that
- * use it; it is yours to free. */
+/* Asked, on commit, whether `text` is acceptable. Return 1 to accept. To
+ * refuse, return 0, write the reason into `error` (truncation is fine) and, if
+ * you know it, the byte offset of the problem into *error_at -- it arrives as
+ * UINT64_MAX, meaning none. `text` is NUL-terminated, `len` bytes, and valid
+ * only for the call. DO NOT call libgui from here with the same handle:
+ * libgui is mid-widget, and such calls are refused. */
+typedef uint8_t (*LibguiValidateFn)(void* user, const char* text, uint64_t len,
+                                    char* error, uint64_t error_cap, uint64_t* error_at);
+
+typedef struct {
+    const char* display;          /* shown while nobody edits: "40 mm" for "width * 2". NULL: the source */
+    const char* placeholder;
+    uint8_t     select_on_focus;  /* 1 by default: typing replaces the entry */
+    uint8_t     _pad[7];
+    char*       error;            /* the current refusal's reason, "" when none. May be NULL. */
+    uint64_t    error_cap;
+} LibguiValidatedOptions;
+
+void libgui_validated_options_default(LibguiValidatedOptions* out);
+
+typedef struct {
+    LibguiResponse response;
+    uint8_t        committed;     /* accepted new text was written to buf: act on this one */
+    uint8_t        changed;       /* the field was edited; buf was not */
+    uint8_t        cancelled;     /* Escape threw the edit away */
+    uint8_t        focused;
+    uint8_t        has_error;     /* the field holds refused text; buf is untouched */
+    uint8_t        _pad[3];
+    uint64_t       error_at;      /* the validator's byte offset, or UINT64_MAX */
+} LibguiValidatedResponse;
+
+/* A text field whose buffer changes only when YOUR validator accepts the edit.
+ * libgui owns the behaviour; you own the question -- your grammar, your names
+ * resolved however you like, your units.
+ *
+ * `buf` is your SOURCE text, written only on an accepted commit: Enter, Tab or
+ * a click elsewhere. Escape throws the edit away. Refused text stays in the
+ * field with the reason beneath it; a refused Enter keeps focus, with the
+ * caret at error_at. Editing always starts from the source, never the
+ * display, so a parametric link survives an edit. A NULL validator accepts
+ * everything. A committed text longer than `cap` is fetched with
+ * libgui_text_overflow, as for libgui_text_input.
+ *
+ *     static uint8_t check(void* doc, const char* t, uint64_t n,
+ *                          char* err, uint64_t cap, uint64_t* at) {
+ *         return my_expr_parse((Doc*)doc, t, err, cap, at);
+ *     }
+ *     LibguiValidatedOptions o;
+ *     libgui_validated_options_default(&o);
+ *     o.display = value_text;                  // "40 mm"
+ *     if (libgui_validated_input(ui, "height", src, sizeof src, &o, check, doc, NULL).committed)
+ *         set_parameter(doc, "height", src);   // the expression, not the number
+ */
+LibguiValidatedResponse libgui_validated_input(LibguiUi* ui, const char* key, char* buf, uint64_t cap,
+                                               const LibguiValidatedOptions* opts,
+                                               LibguiValidateFn validate, void* user,
+                                               uint64_t* out_len);
+
+/* --- An evaluator with units, for an app with no grammar of its own ----------- */
+
+/* NOT libgui: the libgui_units companion, bundled so a C host need not link a
+ * second library. What an expression means is an application's decision; this
+ * is one answer, usable as a validator above. An app with its own evaluator
+ * ignores all of it. Every unit is a factor to one BASE unit, and values leave
+ * in base units. */
 typedef struct LibguiUnits LibguiUnits;
 
 LibguiUnits* libgui_units_none(void);           /* arithmetic only */
@@ -704,7 +766,7 @@ void         libgui_units_set_display(LibguiUnits* units, const char* name);
 void         libgui_units_free(LibguiUnits* units);
 
 /* A name an expression may use. value is in base units; dim is 1 for a
- * quantity of the field's kind (a length) and 0 for a count or a ratio. */
+ * quantity of the table's kind (a length) and 0 for a count or a ratio. */
 typedef struct {
     const char* name;
     double      value;
@@ -712,58 +774,20 @@ typedef struct {
     uint32_t    _pad;
 } LibguiVar;
 
-/* The evaluator on its own, for a command line or a table cell. Returns 1 and
- * writes *out_value on success; 0 with the reason in err and its byte offset
- * in *out_err_at otherwise. Any output may be NULL.
+/* Returns 1 and writes *out_value on success; 0 with the reason in err and its
+ * byte offset in *out_err_at otherwise. Any output may be NULL. The signature
+ * after `text` is shaped so it can sit inside a LibguiValidateFn.
  *
- * What an expression may contain: numbers, + - * / and parentheses, units
- * after a number, the names in `vars`, and pi. A bare number is in the display
- * unit. 3/8" is three eighths of an inch. w*h in a length field is refused as
- * an area. No functions, and no implicit multiplication: 2w is an error. */
+ * Numbers, + - * / and parentheses, units after a number, the names in
+ * `vars`, and pi. A bare number is in the display unit. 3/8" is three eighths
+ * of an inch. w*h in a length table is refused as an area. No functions and
+ * no implicit multiplication: 2w is an error. */
 uint8_t  libgui_units_eval(const LibguiUnits* units, const char* text,
                            const LibguiVar* vars, uint64_t var_count,
                            double* out_value, char* err, uint64_t err_cap, uint64_t* out_err_at);
 /* snprintf contract: returns the length needed, writes what fits. */
 uint64_t libgui_units_format(const LibguiUnits* units, double value, uint32_t decimals,
                              char* buf, uint64_t cap);
-
-typedef struct {
-    uint32_t         decimals;       /* shown when not editing; zeros trimmed */
-    uint32_t         _pad;
-    double           min, max;       /* base units; outside is REFUSED, not clamped */
-    const LibguiVar* vars;
-    uint64_t         var_count;
-    const char*      placeholder;
-    char*            error;          /* the reason, when the text does not evaluate */
-    uint64_t         error_cap;
-} LibguiNumberOptions;
-
-void libgui_number_options_default(LibguiNumberOptions* out);
-
-typedef struct {
-    LibguiResponse response;
-    uint8_t        committed;        /* *value changed this frame: act on this one */
-    uint8_t        changed;          /* the text was edited; *value was not */
-    uint8_t        focused;
-    uint8_t        has_error;        /* text did not evaluate; *value untouched */
-    uint32_t       error_at;         /* byte offset of the problem */
-} LibguiNumberResponse;
-
-/* A CAD dimension box. *value is in base units and changes only on commit --
- * Enter, Tab or a click elsewhere. Escape puts back what was there. Focus
- * selects everything, so typing replaces the value. Text that does not
- * evaluate stays, with a red border and the reason beneath it.
- *
- *     char why[128];
- *     LibguiNumberOptions o;
- *     libgui_number_options_default(&o);
- *     o.min = 0.0; o.error = why; o.error_cap = sizeof why;
- *     if (libgui_number_input(ui, "depth", &depth_mm, mm, &o).committed)
- *         push_undo();
- */
-LibguiNumberResponse libgui_number_input(LibguiUi* ui, const char* key, double* value,
-                                         const LibguiUnits* units,
-                                         const LibguiNumberOptions* opts);
 
 /* --- Canvas, transforms and animation -------------------------------------- */
 
@@ -905,8 +929,8 @@ uint64_t libgui_sizeof_insets(void);
 uint64_t libgui_sizeof_table_response(void);
 uint64_t libgui_sizeof_drop_zone(void);
 uint64_t libgui_sizeof_var(void);
-uint64_t libgui_sizeof_number_options(void);
-uint64_t libgui_sizeof_number_response(void);
+uint64_t libgui_sizeof_validated_options(void);
+uint64_t libgui_sizeof_validated_response(void);
 "##;
 
 const FOOTER: &str = r##"

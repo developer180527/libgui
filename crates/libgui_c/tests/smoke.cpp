@@ -138,7 +138,6 @@ int main(int argc, char** argv) {
         libgui_canvas_state_default(&view);
         libgui::Units mm = libgui::Units::length_mm();
         CHECK(mm.format(25.4) == "25.4 mm", "Units::format");
-        double depth = 12.0;
         std::string why;
         for (int pass = 0; pass < 2; pass++) {
             ui.begin_frame(400.0f, 300.0f, 1.0f, 1.0f / 60.0f);
@@ -153,13 +152,11 @@ int main(int argc, char** argv) {
             }
             float hot = ui.animate(libgui::id("w"), 0, true);
             (void)hot;
-            ui.number_input("depth", depth, mm, &why);
             ui.end_frame();
             CHECK(ui.open_depth() == 0, "the canvas or transform guard did not close");
         }
         CHECK(view.visible.w > 0.0f, "the canvas state was not written back");
-        CHECK(depth == 12.0 && why.empty(), "an untouched dimension box changed");
-        CHECK(!ui.poisoned(), "the canvas or number box poisoned the Ui");
+        CHECK(!ui.poisoned(), "the canvas poisoned the Ui");
     }
 
     // A paste longer than the wrapper's spare room must arrive whole, in one
@@ -187,6 +184,62 @@ int main(int argc, char** argv) {
         field();
         field();
         CHECK(name == big, "a long paste into a C++ text field was lost or cut");
+    }
+
+    // A validated field over a std::string, with a lambda as the grammar: the
+    // source keeps the expression, a refusal carries its reason and position,
+    // and a validator that throws is a refusal, not a crash.
+    {
+        std::string src = "width * 2";
+        std::string why;
+        int asked = 0;
+        auto check = [&](std::string_view t, std::string& reason, uint64_t& at) {
+            asked++;
+            if (t.find("width") == 0) return true;
+            reason = "a height is written in terms of width";
+            at = 0;
+            return false;
+        };
+        LibguiRect r{};
+        auto field = [&](auto&& v) {
+            ui.begin_frame(400.0f, 300.0f, 1.0f, 1.0f / 60.0f);
+            auto out = ui.validated_input("height", src, v, "40 mm", &why);
+            ui.end_frame();
+            r = out.response.rect;
+            return out;
+        };
+        for (int i = 0; i < 3; i++) field(check);
+        auto commit_text = [&](const char* t, auto&& v) {
+            ui.pointer_moved(r.x + 4.0f, r.y + 4.0f);
+            ui.pointer_button(0, true);
+            field(v);
+            ui.pointer_button(0, false);
+            field(v);
+            ui.text(t);
+            field(v);
+            ui.key(LIBGUI_KEY_ENTER, true);
+            auto out = field(v);
+            ui.key(LIBGUI_KEY_ENTER, false);
+            field(v);
+            return out;
+        };
+        auto ok = commit_text("width + 5", check);
+        CHECK(ok.committed && src == "width + 5", "the accepted expression is not the source");
+        auto bad = commit_text("height", check);
+        CHECK(bad.has_error && bad.error_at == 0, "the refusal or its position did not arrive");
+        CHECK(why == "a height is written in terms of width", "the reason did not reach the std::string");
+        CHECK(src == "width + 5", "a refused edit reached the source");
+        ui.key(LIBGUI_KEY_ESCAPE, true);
+        field(check);
+        ui.key(LIBGUI_KEY_ESCAPE, false);
+        field(check);
+
+        auto throws = [](std::string_view, std::string&, uint64_t&) -> bool { throw 42; };
+        auto thrown = commit_text("width * 9", throws);
+        CHECK(thrown.has_error && why == "the validator threw", "a throwing validator was not a refusal");
+        CHECK(src == "width + 5", "a throwing validator's text reached the source");
+        CHECK(!ui.poisoned(), "the validated field poisoned the Ui");
+        CHECK(asked >= 2, "the lambda was never asked");
     }
 
     if (failures == 0) std::printf("ok: C++ wrapper test passed (%d paints)\n", painted);

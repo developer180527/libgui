@@ -31,7 +31,7 @@ is not, and the order the gaps are worth closing in.
 | Also builds for | wasm32, Android (aarch64), iOS + simulator, 32-bit x86 |
 | Portability | `Id` values verified under emulation on 32-bit **and big-endian** targets |
 | Not tested | Android and iOS run on device, physical iPad, mixed-DPI multi-monitor docking |
-| Rust | **1.90** for the GPU crates (`wgpu-hal` on Linux/Windows/Android), **1.87** for `libgui`, `libgui_nodes`, `libgui_soft` and `libgui_keymap` |
+| Rust | **1.90** for the GPU crates (`wgpu-hal` on Linux/Windows/Android), **1.87** for `libgui`, `libgui_nodes`, `libgui_soft`, `libgui_keymap` and `libgui_units` |
 | Licence | **MIT OR Apache-2.0**, at your option |
 | Version | 0.1.0, pre-1.0: the API still changes between releases |
 
@@ -47,6 +47,7 @@ an image or a glyph cannot be turned, only vector paths the app rotates itself. 
 | `crates/libgui_shaders` | The one UI shader. Authored in WGSL, validated + cross-compiled by naga at build time to HLSL (SM 5.1), MSL 2.0, GLSL 4.50, SPIR-V. |
 | `crates/libgui_wgpu` | `Backend` implementation for wgpu. Also the reference for writing your own. |
 | `crates/libgui_keymap` | Cross-platform keymaps: each platform's bindings for libgui's widget actions, rebindable app actions, menu spelling (`⇧⌘S` / `Ctrl+Shift+S`). Optional. |
+| `crates/libgui_units` | An expression evaluator with units (`25.4mm`, `3/8"`, `w/2 + 1cm`) and a `number_input` built on `validated_input`, for an app with no grammar of its own. Optional; libgui itself interprets no values. |
 | `crates/libgui_soft` | CPU reference `Backend`: renders a frame to an RGBA8 image, the same bytes on every machine. Golden-image tests live here. |
 | `crates/libgui_nodes` | Node-graph editing: nodes, ports, links, selection, routing. Built *on* libgui, not in it. |
 | `crates/libgui_demo` | winit host + editor layout + an "engine" scene rendered offscreen and shown via `ui.viewport`. |

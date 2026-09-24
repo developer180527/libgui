@@ -236,3 +236,180 @@ pub unsafe extern "C" fn libgui_segmented(
     }
     r
 }
+
+/// Asked, on commit, whether `text` is acceptable. Return 1 to accept. To
+/// refuse, return 0 and write the reason into `error` (at most `error_cap`
+/// bytes including the NUL; truncation is fine) and, if you know it, the byte
+/// offset of the problem into `*error_at`. Leave `*error_at` alone when you do
+/// not; it arrives as `UINT64_MAX`.
+///
+/// `text` is NUL-terminated and also `len` bytes long, and valid only for the
+/// call. **Do not call libgui from here** with the same handle: libgui is
+/// mid-widget, and such calls are refused.
+pub type LibguiValidateFn = Option<
+    unsafe extern "C" fn(
+        user: *mut std::ffi::c_void,
+        text: *const c_char,
+        len: u64,
+        error: *mut c_char,
+        error_cap: u64,
+        error_at: *mut u64,
+    ) -> u8,
+>;
+
+/// How a [`libgui_validated_input`] looks and behaves. Start from
+/// [`libgui_validated_options_default`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct LibguiValidatedOptions {
+    /// Shown while nobody is editing, in place of the source — the `40 mm`
+    /// beside a source of `width * 2`. Null shows the source.
+    pub display: *const c_char,
+    pub placeholder: *const c_char,
+    /// Select everything when focus arrives. On by default.
+    pub select_on_focus: u8,
+    pub _pad: [u8; 7],
+    /// Where the field's current refusal is reported, if anywhere. Empty when
+    /// there is none.
+    pub error: *mut c_char,
+    pub error_cap: u64,
+}
+
+impl Default for LibguiValidatedOptions {
+    fn default() -> Self {
+        Self {
+            display: std::ptr::null(),
+            placeholder: std::ptr::null(),
+            select_on_focus: 1,
+            _pad: [0; 7],
+            error: std::ptr::null_mut(),
+            error_cap: 0,
+        }
+    }
+}
+
+/// # Safety
+/// `out` must be null or writable.
+#[no_mangle]
+pub unsafe extern "C" fn libgui_validated_options_default(out: *mut LibguiValidatedOptions) {
+    if let Some(o) = unsafe { out.as_mut() } {
+        *o = LibguiValidatedOptions::default();
+    }
+}
+
+/// Mirrors [`libgui::ValidatedResponse`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct LibguiValidatedResponse {
+    pub response: crate::types::LibguiResponse,
+    /// New text was accepted and written to the buffer this frame.
+    pub committed: u8,
+    /// The text in the field was edited; the buffer was not.
+    pub changed: u8,
+    pub cancelled: u8,
+    pub focused: u8,
+    /// The field holds text the validator refused.
+    pub has_error: u8,
+    pub _pad: [u8; 3],
+    /// Byte offset the validator gave, or `UINT64_MAX` for none.
+    pub error_at: u64,
+}
+
+impl Default for LibguiValidatedResponse {
+    fn default() -> Self {
+        Self {
+            response: Default::default(),
+            committed: 0,
+            changed: 0,
+            cancelled: 0,
+            focused: 0,
+            has_error: 0,
+            _pad: [0; 3],
+            error_at: u64::MAX,
+        }
+    }
+}
+
+/// A text field whose buffer changes only when `validate` accepts the edit.
+///
+/// `buf` holds the app's **source** text and is written only on an accepted
+/// commit — Enter, Tab or a click elsewhere. Escape throws the edit away.
+/// Refused text stays in the field with the reason beneath it, and a refused
+/// Enter keeps focus with the caret at `error_at`. The grammar, the names and
+/// the units are the validator's, which is to say the app's.
+///
+/// A null `validate` accepts everything, which leaves commit-and-cancel
+/// behaviour on its own. `libgui_units_eval` makes a ready-made validator for
+/// an app with no grammar of its own.
+///
+/// `out_len` and a buffer too small for the committed text work exactly as
+/// for [`libgui_text_input`]: fetch the rest with [`libgui_text_overflow`].
+///
+/// # Safety
+/// As [`libgui_text_input`]; `opts` null or valid with its pointers as
+/// documented; `validate` null or a function honouring
+/// [`LibguiValidateFn`]'s contract.
+#[no_mangle]
+pub unsafe extern "C" fn libgui_validated_input(
+    ui: *mut LibguiUi,
+    key: *const c_char,
+    buf: *mut c_char,
+    cap: u64,
+    opts: *const LibguiValidatedOptions,
+    validate: LibguiValidateFn,
+    user: *mut std::ffi::c_void,
+    out_len: *mut u64,
+) -> LibguiValidatedResponse {
+    let what = "libgui_validated_input";
+    let key = unsafe { str_or_empty(key, what) };
+    let o = unsafe { opts.as_ref() }.copied().unwrap_or_default();
+    let display = unsafe { crate::convert::str_from(o.display) };
+    let placeholder = unsafe { crate::convert::str_from(o.placeholder) }.unwrap_or("");
+    let mut text = unsafe { str_or_empty(buf as *const c_char, what) }.to_string();
+    let mut owner = 0usize;
+    let r = with_ui(ui, LibguiValidatedResponse::default(), |u| {
+        owner = u as *mut Ui as usize;
+        let opts = libgui::ValidatedOptions { display, placeholder, select_on_focus: o.select_on_focus != 0 };
+        let r = u.validated_input_with(key, &mut text, &opts, |t| {
+            let Some(f) = validate else { return Ok(()) };
+            let mut cstr = t.as_bytes().to_vec();
+            cstr.push(0);
+            let mut why = [0 as c_char; 256];
+            let mut at = u64::MAX;
+            // Everything through this handle is refused while the validator
+            // runs: libgui holds `&mut Ui` across the call.
+            unsafe { (*ui).validating = true };
+            let ok = unsafe { f(user, cstr.as_ptr() as *const c_char, t.len() as u64, why.as_mut_ptr(), why.len() as u64, &mut at) };
+            unsafe { (*ui).validating = false };
+            if ok != 0 {
+                return Ok(());
+            }
+            *why.last_mut().unwrap() = 0;
+            let msg = unsafe { std::ffi::CStr::from_ptr(why.as_ptr()) }.to_string_lossy().into_owned();
+            let e = libgui::FieldError::new(if msg.is_empty() { "not accepted".to_string() } else { msg });
+            Err(if at == u64::MAX { e } else { e.at(at as usize) })
+        });
+        write_back(r.error.as_ref().map(|e| e.message.as_str()).unwrap_or(""), o.error, o.error_cap);
+        LibguiValidatedResponse {
+            response: r.response.into(),
+            committed: r.committed as u8,
+            changed: r.changed as u8,
+            cancelled: r.cancelled as u8,
+            focused: r.focused as u8,
+            has_error: r.error.is_some() as u8,
+            _pad: [0; 3],
+            error_at: r.error.as_ref().and_then(|e| e.at).map(|a| a as u64).unwrap_or(u64::MAX),
+        }
+    });
+    let needed = write_back(&text, buf, cap);
+    if let Some(slot) = unsafe { out_len.as_mut() } {
+        *slot = needed;
+    }
+    if needed > cap.saturating_sub(1) && owner != 0 {
+        let _ = OVERFLOW.try_with(|m| m.borrow_mut().insert((owner, r.response.id), text));
+        if !buf.is_null() {
+            set_error("libgui_validated_input: buffer too small; fetch the whole text with libgui_text_overflow");
+        }
+    }
+    r
+}

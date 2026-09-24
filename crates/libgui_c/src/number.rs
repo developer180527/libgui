@@ -1,15 +1,19 @@
-//! Numbers typed as expressions in units: a CAD dimension box from C.
+//! `libgui_units` from C: an expression evaluator with units, for an app that
+//! has no grammar of its own to give `libgui_validated_input`.
+//!
+//! Not libgui. What an expression means is an application's policy, so the
+//! evaluator is a companion crate the way key bindings are, and the field
+//! libgui owns asks the app rather than deciding. These are here so a C host
+//! can use this answer without linking a second library.
 
 use crate::convert::{str_from, str_or_empty};
-use crate::handle::{set_error, with_ui, LibguiUi};
+use crate::handle::set_error;
 use crate::text::write_back;
-use crate::types::LibguiResponse;
-use libgui::{NumberOptions, Units, Var};
+use libgui_units::{Units, Var};
 use std::os::raw::c_char;
 
 /// A units table. Opaque: build one with [`libgui_units_length_mm`] or
-/// [`libgui_units_new`], keep it for as long as the fields that use it, and
-/// release it with [`libgui_units_free`].
+/// [`libgui_units_new`], and release it with [`libgui_units_free`].
 pub struct LibguiUnits(Units);
 
 fn boxed(u: Units) -> *mut LibguiUnits {
@@ -166,121 +170,4 @@ pub unsafe extern "C" fn libgui_units_format(
 ) -> u64 {
     let Some(u) = (unsafe { units.as_ref() }) else { return 0 };
     write_back(&u.0.format(value, decimals), buf, cap)
-}
-
-/// How a [`libgui_number_input`] behaves. Null means the defaults: 3 decimals,
-/// no range, no variables. Start from [`libgui_number_options_default`].
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct LibguiNumberOptions {
-    pub decimals: u32,
-    pub _pad: u32,
-    /// Base units. Outside the range is refused with a message, not clamped.
-    pub min: f64,
-    pub max: f64,
-    pub vars: *const LibguiVar,
-    pub var_count: u64,
-    pub placeholder: *const c_char,
-    /// Where the reason goes when the text does not evaluate. May be null.
-    pub error: *mut c_char,
-    pub error_cap: u64,
-}
-
-impl Default for LibguiNumberOptions {
-    fn default() -> Self {
-        Self {
-            decimals: 3,
-            _pad: 0,
-            min: f64::NEG_INFINITY,
-            max: f64::INFINITY,
-            vars: std::ptr::null(),
-            var_count: 0,
-            placeholder: std::ptr::null(),
-            error: std::ptr::null_mut(),
-            error_cap: 0,
-        }
-    }
-}
-
-/// # Safety
-/// `out` must be null or writable.
-#[no_mangle]
-pub unsafe extern "C" fn libgui_number_options_default(out: *mut LibguiNumberOptions) {
-    if let Some(o) = unsafe { out.as_mut() } {
-        *o = LibguiNumberOptions::default();
-    }
-}
-
-/// Mirrors [`libgui::NumberResponse`]. The message is in the caller's buffer
-/// named by the options, not here, so nothing is handed back to free.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default)]
-pub struct LibguiNumberResponse {
-    pub response: LibguiResponse,
-    /// A new value was written this frame: push an undo step, re-solve.
-    pub committed: u8,
-    /// The text was edited. The value was not: it changes on commit.
-    pub changed: u8,
-    pub focused: u8,
-    /// The field holds text that did not evaluate; the value is untouched.
-    pub has_error: u8,
-    /// Byte offset of the problem in what was typed.
-    pub error_at: u32,
-}
-
-/// A number typed as an expression in units: `25.4mm`, `3/8"`, `w/2 + 1cm`.
-/// A CAD dimension box.
-///
-/// `*value` is held in the table's base unit and changes only on commit —
-/// Enter, Tab or a click elsewhere. Escape puts back what was there. Text that
-/// does not evaluate stays in the field with a red border and the reason
-/// beneath it, and `*value` is left alone.
-///
-/// ```c
-/// static LibguiUnits* mm;                 /* libgui_units_length_mm(), once */
-/// char why[128];
-/// LibguiNumberOptions o;
-/// libgui_number_options_default(&o);
-/// o.min = 0.0; o.error = why; o.error_cap = sizeof why;
-/// if (libgui_number_input(ui, "depth", &depth_mm, mm, &o).committed)
-///     push_undo();
-/// ```
-///
-/// # Safety
-/// `ui` null or live; `key` a string; `value` null or writable; `units` null or
-/// from `libgui_units_*`; `opts` null or valid, with its pointers as documented.
-#[no_mangle]
-pub unsafe extern "C" fn libgui_number_input(
-    ui: *mut LibguiUi,
-    key: *const c_char,
-    value: *mut f64,
-    units: *const LibguiUnits,
-    opts: *const LibguiNumberOptions,
-) -> LibguiNumberResponse {
-    let key = unsafe { str_or_empty(key, "libgui_number_input: key") };
-    let Some(value) = (unsafe { value.as_mut() }) else {
-        set_error("libgui_number_input: value is null");
-        return LibguiNumberResponse::default();
-    };
-    let none = Units::none();
-    let units = unsafe { units.as_ref() }.map(|u| &u.0).unwrap_or(&none);
-    let o = unsafe { opts.as_ref() }.copied().unwrap_or_default();
-    let vars = unsafe { vars_from(o.vars, o.var_count) };
-    let placeholder = unsafe { str_from(o.placeholder) }.unwrap_or("");
-    with_ui(ui, LibguiNumberResponse::default(), |u| {
-        let opts = NumberOptions { decimals: o.decimals, min: o.min, max: o.max, vars: &vars, placeholder };
-        let r = u.number_input_with(key, value, units, &opts);
-        match &r.error {
-            Some(e) => error_out(&e.message, o.error, o.error_cap),
-            None => error_out("", o.error, o.error_cap),
-        }
-        LibguiNumberResponse {
-            response: r.response.into(),
-            committed: r.committed as u8,
-            changed: r.changed as u8,
-            focused: r.focused as u8,
-            has_error: r.error.is_some() as u8,
-            error_at: r.error.as_ref().map(|e| e.at as u32).unwrap_or(0),
-        }
-    })
 }

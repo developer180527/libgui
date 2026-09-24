@@ -808,6 +808,7 @@ dependencies = [
  "libgui",
  "libgui_keymap",
  "libgui_soft",
+ "libgui_units",
 ]
 
 [[package]]
@@ -901,6 +902,13 @@ dependencies = [
  "pollster",
  "wgpu",
  "winit",
+]
+
+[[package]]
+name = "libgui_units"
+version = "0.1.0"
+dependencies = [
+ "libgui",
 ]
 
 [[package]]

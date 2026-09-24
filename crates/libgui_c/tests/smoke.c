@@ -9,6 +9,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* A validator backed by the bundled evaluator: the shape an app's own takes. */
+static uint8_t validate_len(void* user, const char* text, uint64_t len,
+                            char* err, uint64_t cap, uint64_t* at) {
+    (void)len;
+    LibguiVar w = { "w", 40.0, 1, 0 };
+    double v = 0.0;
+    return libgui_units_eval((const LibguiUnits*)user, text, &w, 1, &v, err, cap, at);
+}
+
 static int failures = 0;
 
 #define CHECK(cond, msg)                                            \
@@ -106,8 +115,8 @@ int main(int argc, char** argv) {
     CHECK_SIZE(LibguiTableResponse, libgui_sizeof_table_response);
     CHECK_SIZE(LibguiDropZone, libgui_sizeof_drop_zone);
     CHECK_SIZE(LibguiVar, libgui_sizeof_var);
-    CHECK_SIZE(LibguiNumberOptions, libgui_sizeof_number_options);
-    CHECK_SIZE(LibguiNumberResponse, libgui_sizeof_number_response);
+    CHECK_SIZE(LibguiValidatedOptions, libgui_sizeof_validated_options);
+    CHECK_SIZE(LibguiValidatedResponse, libgui_sizeof_validated_response);
 
     /* Load the font the tests use. */
     FILE* f = fopen(argv[1], "rb");
@@ -518,18 +527,21 @@ int main(int argc, char** argv) {
         libgui_units_format(mm, 25.4, 3, shown, sizeof shown);
         CHECK(strcmp(shown, "25.4 mm") == 0, "format did not read 25.4 mm");
 
-        LibguiVar w = { "w", 40.0, 1, 0 };
-        LibguiNumberOptions o;
-        libgui_number_options_default(&o);
-        o.vars = &w; o.var_count = 1; o.error = why; o.error_cap = sizeof why;
-        double depth = 12.0;
+        char src[64] = "w / 2";
+        char err[64];
+        LibguiValidatedOptions o;
+        libgui_validated_options_default(&o);
+        o.display = "20 mm";
+        o.error = err; o.error_cap = sizeof err;
         for (int pass = 0; pass < 2; pass++) {
             libgui_begin_frame(ui, 400.0f, 300.0f, 1.0f, 1.0f / 60.0f);
-            libgui_number_input(ui, "depth", &depth, mm, &o);
+            LibguiValidatedResponse r = libgui_validated_input(ui, "height", src, sizeof src, &o,
+                                                               validate_len, mm, NULL);
+            CHECK(r.error_at == UINT64_MAX, "an untouched field reported an error position");
             libgui_end_frame(ui);
         }
-        CHECK(depth == 12.0, "an untouched field changed its value");
-        CHECK(libgui_ui_poisoned(ui) == 0, "the number field poisoned the handle");
+        CHECK(strcmp(src, "w / 2") == 0, "an untouched field changed its source");
+        CHECK(libgui_ui_poisoned(ui) == 0, "the validated field poisoned the handle");
         libgui_units_free(mm);
     }
 

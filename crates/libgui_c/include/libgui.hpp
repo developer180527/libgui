@@ -20,6 +20,8 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <string_view>
+#include <type_traits>
 #include <utility>
 
 namespace libgui {
@@ -127,6 +129,33 @@ void paint_trampoline(LibguiPainter* p, LibguiRect r, void* user) {
 template <class F>
 void paint_delete(void* user) {
     delete static_cast<F*>(user);
+}
+
+// A lambda validator reaches C as a function pointer plus a pointer to the
+// lambda, which lives on the caller's stack for the whole call. Nothing
+// escapes: an exception is a refusal, because unwinding through libgui's
+// frames is undefined behaviour.
+template <class F>
+uint8_t validate_trampoline(void* user, const char* text, uint64_t len,
+                            char* error, uint64_t cap, uint64_t* at) {
+    std::string why;
+    uint64_t pos = UINT64_MAX;
+    bool ok = false;
+    try {
+        ok = (*static_cast<F*>(user))(std::string_view(text, static_cast<std::size_t>(len)), why, pos);
+    } catch (...) {
+        ok = false;
+        why = "the validator threw";
+        pos = UINT64_MAX;
+    }
+    if (ok) return 1;
+    if (error && cap > 0) {
+        std::size_t n = why.size() < cap - 1 ? why.size() : static_cast<std::size_t>(cap - 1);
+        std::memcpy(error, why.data(), n);
+        error[n] = '\0';
+    }
+    if (at) *at = pos;
+    return 0;
 }
 }  // namespace detail
 
@@ -410,23 +439,38 @@ public:
             return libgui_text_input(h_, key, buf, cap, placeholder, need);
         });
     }
-    // A CAD dimension box. `value` is in the table's base unit and changes
-    // only on commit. `error`, if given, receives the reason text that did
-    // not evaluate was refused, and is cleared when it is fixed.
-    LibguiNumberResponse number_input(const char* key, double& value, const Units& units,
-                                      LibguiNumberOptions opts, std::string* error = nullptr) {
-        char why[160];
-        opts.error = why;
-        opts.error_cap = sizeof why;
-        auto r = libgui_number_input(h_, key, &value, units.raw(), &opts);
+    // A field whose `source` changes only when `validate` accepts the edit.
+    // `validate(text, reason, at)` returns true to accept; to refuse, it fills
+    // `reason` and, if it knows, the byte offset `at`. The grammar is yours --
+    // an exception it throws is a refusal, never an unwind through libgui.
+    // `display`, if given, is shown while nobody edits ("40 mm" beside
+    // "width * 2"); editing always starts from the source.
+    template <class F>
+    LibguiValidatedResponse validated_input(const char* key, std::string& source, F&& validate,
+                                            const char* display = nullptr, std::string* error = nullptr,
+                                            bool select_on_focus = true) {
+        using Fn = std::remove_reference_t<F>;
+        LibguiValidatedOptions o;
+        libgui_validated_options_default(&o);
+        o.display = display;
+        o.select_on_focus = select_on_focus ? 1 : 0;
+        char why[256];
+        o.error = why;
+        o.error_cap = sizeof why;
+        std::size_t cap = source.size() + 64;
+        std::string buf(cap, '\0');
+        std::memcpy(buf.data(), source.data(), source.size());
+        uint64_t need = 0;
+        auto r = libgui_validated_input(h_, key, buf.data(), static_cast<uint64_t>(cap), &o,
+                                        &detail::validate_trampoline<Fn>,
+                                        const_cast<void*>(static_cast<const void*>(&validate)), &need);
+        if (need >= cap) {
+            buf.assign(need + 1, '\0');
+            libgui_text_overflow(h_, r.response.id, buf.data(), static_cast<uint64_t>(need + 1));
+        }
+        source.assign(buf.c_str());
         if (error) error->assign(why);
         return r;
-    }
-    LibguiNumberResponse number_input(const char* key, double& value, const Units& units,
-                                      std::string* error = nullptr) {
-        LibguiNumberOptions o;
-        libgui_number_options_default(&o);
-        return number_input(key, value, units, o, error);
     }
 
     LibguiTextResponse text_area(const char* key, std::string& s, uint64_t rows = 6) {

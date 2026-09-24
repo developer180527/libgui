@@ -78,6 +78,13 @@ impl TextState {
         self.anchor = 0;
         self.cursor = len;
     }
+
+    /// Put the caret at byte `at` of `text`, pulled back to a character
+    /// boundary, with nothing selected: where a validator said the problem is.
+    pub(crate) fn place_caret(&mut self, text: &str, at: usize) {
+        self.cursor = floor_boundary(text, at);
+        self.anchor = self.cursor;
+    }
 }
 
 /// Pure editing operations on a `String` + caret/selection.

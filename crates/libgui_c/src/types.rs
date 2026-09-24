@@ -205,6 +205,6 @@ sizeof_fns! {
     libgui_sizeof_table_response => crate::table_c::LibguiTableResponse,
     libgui_sizeof_drop_zone => crate::theme_dnd::LibguiDropZone,
     libgui_sizeof_var => crate::number::LibguiVar,
-    libgui_sizeof_number_options => crate::number::LibguiNumberOptions,
-    libgui_sizeof_number_response => crate::number::LibguiNumberResponse,
+    libgui_sizeof_validated_options => crate::text::LibguiValidatedOptions,
+    libgui_sizeof_validated_response => crate::text::LibguiValidatedResponse,
 }

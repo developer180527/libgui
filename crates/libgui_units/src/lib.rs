@@ -1,8 +1,15 @@
 //! Numbers typed as text: `25.4mm`, `3/8"`, `w/2 + 1cm`.
 //!
+//! **Not part of libgui.** An expression language is an application's policy
+//! — which functions exist, what a bare number means, how names resolve, and
+//! whether the text or the number is the truth — so it lives here, beside
+//! libgui, the way key bindings live in `libgui_keymap`. libgui's own field is
+//! [`Ui::validated_input`], which asks the app. This crate is one answer to
+//! give it, for an app that has none of its own.
+//!
 //! A dimension box in a CAD tool is a text field, not a slider, and what goes
 //! into it is an expression in units. This is the evaluator behind
-//! [`Ui::number_input`](crate::Ui::number_input), kept separate and pure so it
+//! [`number_input`], kept separate and pure so it
 //! can be tested without a frame and used by an app on its own — a command
 //! line, a table cell, a script.
 //!
@@ -29,7 +36,7 @@
 //! No functions (`sin`, `sqrt`) and no implicit multiplication: `2w` is an
 //! error, not twice `w`. Both are easy to add and hard to take back.
 
-use crate::{Response, Ui};
+use libgui::{FieldError, Ui, ValidatedResponse};
 use std::fmt;
 
 /// A named quantity an expression may refer to: `w`, `thickness`, `pitch`.
@@ -477,177 +484,68 @@ impl Parser<'_> {
     }
 }
 
-/// How a [`Ui::number_input`] field behaves beyond its units.
+/// How [`number_input`] behaves beyond its units.
 #[derive(Clone, Copy, Debug)]
 pub struct NumberOptions<'a> {
     /// Places shown when the field is not being edited. Trailing zeros are
     /// trimmed, so this is a maximum.
     pub decimals: u32,
-    /// Smallest acceptable value, in base units. A value outside the range is
-    /// **refused with a message**, not clamped: a dimension quietly changed to
-    /// something the user did not type is worse than one they are told to fix.
+    /// Smallest acceptable value, in base units. Outside the range is
+    /// **refused with a message**, not clamped.
     pub min: f64,
     pub max: f64,
     /// Names an expression may use.
     pub vars: &'a [Var<'a>],
-    /// Shown while the field is empty.
-    pub placeholder: &'a str,
 }
 
 impl Default for NumberOptions<'_> {
     fn default() -> Self {
-        Self { decimals: 3, min: f64::NEG_INFINITY, max: f64::INFINITY, vars: &[], placeholder: "" }
+        Self { decimals: 3, min: f64::NEG_INFINITY, max: f64::INFINITY, vars: &[] }
     }
 }
 
-/// What a [`Ui::number_input`] did this frame.
+/// What [`number_input`] did this frame.
 #[derive(Clone, Debug, Default)]
 pub struct NumberResponse {
-    pub response: Response,
-    /// A new value was written to the caller's variable this frame. This is
-    /// the one to act on — push an undo step, re-solve the sketch.
+    pub field: ValidatedResponse,
+    /// A new value was written this frame.
     pub committed: bool,
-    /// The text was edited this frame. The value was *not* changed: it changes
-    /// on commit, not per keystroke, so a half-typed `2` on its way to `25`
-    /// never reaches the model.
-    pub changed: bool,
-    /// The field holds text that did not evaluate, and why. It stays until the
-    /// user fixes it or presses Escape; the caller's value is untouched.
-    pub error: Option<ExprError>,
-    pub focused: bool,
 }
 
-/// Retained per field. Not `Copy`, so it lives beside `text_states` rather
-/// than in it.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct NumberEdit {
-    text: String,
-    /// The text is the user's — being typed, or failed to evaluate — rather
-    /// than the formatted value.
-    active: bool,
-    focused: bool,
-    error: Option<ExprError>,
-    /// What `text` was formatted from while inactive, so a steady frame does
-    /// not format and allocate a string it already has.
-    shown: Option<(u64, u32, u64)>,
-}
-
-impl Ui {
-    /// A number typed as an expression in units: `25.4mm`, `3/8"`, `w/2 + 1cm`.
-    ///
-    /// This is a CAD dimension box. It shows `value` (held in `units`' base
-    /// unit) formatted in the display unit; focusing it selects everything so
-    /// typing replaces it; Enter, Tab or a click elsewhere **commits**, and
-    /// Escape puts back what was there. See [`crate::Units`] for what an
-    /// expression may contain.
-    ///
-    /// `value` changes only on commit — [`NumberResponse::committed`] says when.
-    /// Text that does not evaluate, or evaluates outside the range, is kept in
-    /// the field with a red border and the reason beneath it, and `value` is
-    /// left alone.
-    ///
-    /// ```no_run
-    /// # use libgui::*;
-    /// # fn f(ui: &mut Ui, depth_mm: &mut f64) {
-    /// let units = Units::length_mm();
-    /// if ui.number_input("depth", depth_mm, &units).committed {
-    ///     // push an undo step, re-solve
-    /// }
-    /// # }
-    /// ```
-    pub fn number_input(&mut self, key: &str, value: &mut f64, units: &Units) -> NumberResponse {
-        self.number_input_with(key, value, units, &NumberOptions::default())
-    }
-
-    /// [`Ui::number_input`] with a range, variables and a placeholder.
-    pub fn number_input_with(&mut self, key: &str, value: &mut f64, units: &Units, opts: &NumberOptions) -> NumberResponse {
-        let id = self.make_id(("number_input", key));
-        self.mark_seen(id);
-        let mut ed = self.number_edits.remove(&id).unwrap_or_default();
-
-        // While the text is not the user's, it is the value, reformatted only
-        // when something it depends on changed.
-        if !ed.active {
-            let stamp = (value.to_bits(), opts.decimals, units.display_factor().to_bits());
-            if ed.shown != Some(stamp) {
-                ed.text = units.format(*value, opts.decimals);
-                ed.shown = Some(stamp);
-            }
-        }
-
-        let error_style = ed.error.is_some();
-        let r = if error_style {
-            let danger = self.theme.palette.danger;
-            self.with_style(
-                |t| {
-                    t.text_input.border = danger;
-                    t.text_input.border_hover = danger;
-                    t.text_input.border_focus = danger;
-                    t.text_input.focus_ring = danger.with_alpha(0.35);
-                },
-                |ui| ui.text_input(key, &mut ed.text, opts.placeholder),
-            )
-        } else {
-            self.text_input(key, &mut ed.text, opts.placeholder)
-        };
-
-        let mut out = NumberResponse { response: r.response, changed: r.changed, focused: r.focused, ..Default::default() };
-
-        if r.focused && !ed.focused {
-            // Focus arrived: the text becomes the user's, all of it selected,
-            // so the first key replaces the value rather than inserting into it.
-            ed.active = true;
-            if let Some(st) = self.text_states.get_mut(&r.response.id) {
-                st.select_all(ed.text.len());
-            }
-        }
-        if r.changed {
-            // Editing is how a user acknowledges an error.
-            ed.error = None;
-        }
-
-        if ed.focused && !r.focused {
-            if r.cancelled {
-                ed.active = false;
-                ed.error = None;
-                ed.shown = None;
-            } else {
-                // Enter, Tab, a click elsewhere: all commit.
-                match units.eval(&ed.text, opts.vars).and_then(|v| in_range(v, units, opts)) {
-                    Ok(v) => {
-                        out.committed = v != *value;
-                        *value = v;
-                        ed.active = false;
-                        ed.error = None;
-                        ed.shown = None;
-                    }
-                    Err(e) => ed.error = Some(e),
-                }
-            }
-        }
-        ed.focused = r.focused;
-
-        if let Some(e) = &ed.error {
-            let size = self.theme.metrics.font_size * 0.9;
-            let danger = self.theme.palette.danger;
-            self.text_with(&e.message, size, danger);
-        }
-        out.error = ed.error.clone();
-        self.number_edits.insert(id, ed);
-        out
+impl From<ExprError> for FieldError {
+    fn from(e: ExprError) -> Self {
+        FieldError::new(e.message).at(e.at)
     }
 }
 
-fn in_range(v: f64, units: &Units, opts: &NumberOptions) -> Result<f64, ExprError> {
-    if v < opts.min {
-        let m = units.format(opts.min, opts.decimals);
-        return Err(ExprError { at: 0, message: format!("must be at least {m}") });
+/// A number typed as an expression in these units, for an app that has no
+/// grammar of its own. `value` is in base units and changes only on commit.
+///
+/// This is [`Ui::validated_input`] with [`Units::eval`] as the validator, and
+/// nothing more. It keeps a **number**; an app whose source of truth is the
+/// expression text — a parametric model — uses `validated_input` directly with
+/// its own evaluator, and keeps the text.
+pub fn number_input(ui: &mut Ui, key: &str, value: &mut f64, units: &Units, opts: &NumberOptions) -> NumberResponse {
+    let mut text = units.format(*value, opts.decimals);
+    let mut parsed = None;
+    let field = ui.validated_input(key, &mut text, |t| {
+        let v = units.eval(t, opts.vars)?;
+        if v < opts.min {
+            return Err(FieldError::new(format!("must be at least {}", units.format(opts.min, opts.decimals))));
+        }
+        if v > opts.max {
+            return Err(FieldError::new(format!("must be at most {}", units.format(opts.max, opts.decimals))));
+        }
+        parsed = Some(v);
+        Ok(())
+    });
+    // Accepted text may be new while the number is not (`25.4mm` for
+    // `25.4 mm`); only a new number is a change.
+    let committed = matches!(parsed, Some(v) if v != *value);
+    if let Some(v) = parsed {
+        *value = v;
     }
-    if v > opts.max {
-        let m = units.format(opts.max, opts.decimals);
-        return Err(ExprError { at: 0, message: format!("must be at most {m}") });
-    }
-    Ok(v)
+    NumberResponse { field, committed }
 }
 
 #[cfg(test)]

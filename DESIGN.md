@@ -372,6 +372,18 @@ Some things look like gaps and are deliberate.
   and another in English cannot be served by a process-wide answer.
 - **Sorting.** A table reports that a column header was clicked. It does not
   sort your data.
+- **What a typed value means.** `validated_input` owns commit, cancel, the
+  refused text and the caret at the problem; the app's validator owns the
+  answer. This one was learned the hard way. A `number_input` with its own
+  expression evaluator shipped in core for one commit, and the first
+  parametric CAD to use it could not: it kept the number where the app needed
+  the text (`width * 2` must survive so one edit propagates), its grammar
+  disagreed with the app's own — no functions, different bare-number rules —
+  so two boxes in one window gave different answers, and it wanted variables
+  listed up front where the app resolves them from its document on demand.
+  Every one of those was a decision the library had no standing to make. The
+  evaluator now lives beside libgui in `libgui_units`, as the key bindings live
+  in `libgui_keymap`: one answer, for an app that has none of its own.
 
 The test for all of these: *could two reasonable applications want different
 answers?* If yes, libgui reports and the app decides.

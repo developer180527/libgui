@@ -1297,133 +1297,185 @@ fn a_c_caller_can_animate_its_own_widget() {
 const KEY_ENTER: u32 = 11;
 const KEY_ESCAPE: u32 = 14;
 
-/// A dimension box from C: the value arrives in base units on commit, the
-/// reason for a failure arrives in the caller's buffer, and nothing is handed
-/// back to free.
+/// The app's side of a validated field, behind `user`: its grammar (here
+/// libgui_units, standing in for vCAD's own) and a parameter table it may
+/// change between frames, resolved when asked.
+struct App {
+    units: *mut LibguiUnits,
+    width: f64,
+    asked: Vec<String>,
+    /// Set to make the validator do what it must not: call libgui.
+    misbehave: *mut LibguiUi,
+}
+
+unsafe extern "C" fn app_validate(
+    user: *mut c_void,
+    text: *const std::os::raw::c_char,
+    len: u64,
+    error: *mut std::os::raw::c_char,
+    error_cap: u64,
+    error_at: *mut u64,
+) -> u8 {
+    unsafe {
+        let app = &mut *(user as *mut App);
+        let t = std::ffi::CStr::from_ptr(text).to_str().unwrap();
+        assert_eq!(t.len() as u64, len, "the length and the NUL disagree");
+        app.asked.push(t.to_string());
+        if !app.misbehave.is_null() {
+            libgui_label(app.misbehave, c("from inside a validator").as_ptr());
+        }
+        let w = c("w");
+        let vars = [LibguiVar { name: w.as_ptr(), value: app.width, dim: 1, _pad: 0 }];
+        let mut v = 0.0;
+        libgui_units_eval(app.units, text, vars.as_ptr(), 1, &mut v, error, error_cap, error_at)
+    }
+}
+
+/// A validated field from C, used the way a parametric CAD uses it: the
+/// buffer keeps the **expression**, the grammar is the app's, names resolve
+/// when asked, and nothing is handed back to free.
 #[test]
-fn a_c_caller_gets_a_dimension_box() {
+fn a_c_caller_keeps_the_expression_and_its_own_grammar() {
     unsafe {
         let u = ui();
         assert_eq!(libgui_install_keymap(u, PLATFORM_MAC), 0);
-        let mm = libgui_units_length_mm();
-        assert!(!mm.is_null());
+        let mut app = App { units: libgui_units_length_mm(), width: 40.0, asked: Vec::new(), misbehave: std::ptr::null_mut() };
+        let user = &mut app as *mut App as *mut c_void;
 
-        let w = c("w");
-        let vars = [LibguiVar { name: w.as_ptr(), value: 40.0, dim: 1, _pad: 0 }];
+        let mut source = [0 as std::os::raw::c_char; 64];
+        let src = c("w / 2");
+        std::ptr::copy_nonoverlapping(src.as_ptr(), source.as_mut_ptr(), src.as_bytes().len() + 1);
+        let shown = c("20 mm");
         let mut why = [0 as std::os::raw::c_char; 96];
-        let mut opts = std::mem::zeroed::<LibguiNumberOptions>();
-        libgui_number_options_default(&mut opts);
-        assert_eq!(opts.decimals, 3, "the defaults did not arrive");
-        assert!(opts.max.is_infinite());
-        opts.min = 0.0;
-        opts.vars = vars.as_ptr();
-        opts.var_count = vars.len() as u64;
+        let mut opts = std::mem::zeroed::<LibguiValidatedOptions>();
+        libgui_validated_options_default(&mut opts);
+        assert_eq!(opts.select_on_focus, 1, "the defaults did not arrive");
+        opts.display = shown.as_ptr();
         opts.error = why.as_mut_ptr();
         opts.error_cap = why.len() as u64;
 
-        let value = std::cell::Cell::new(25.4f64);
-        let last = std::cell::Cell::new(LibguiNumberResponse::default());
+        let last = std::cell::Cell::new(LibguiValidatedResponse::default());
         let commits = std::cell::Cell::new(0usize);
+        let src_ptr = source.as_mut_ptr();
         let step = || {
             frame(u, || {
-                let mut v = value.get();
-                let r = libgui_number_input(u, c("depth").as_ptr(), &mut v, mm, &opts);
-                value.set(v);
+                let r = libgui_validated_input(u, c("height").as_ptr(), src_ptr, 64, &opts, Some(app_validate), user, std::ptr::null_mut());
                 last.set(r);
                 commits.set(commits.get() + r.committed as usize);
             });
         };
+        let read = |p: *const std::os::raw::c_char| std::ffi::CStr::from_ptr(p).to_str().unwrap().to_string();
         for _ in 0..3 {
             step();
         }
         let rect = last.get().response.rect;
         assert!(rect.w > 0.0, "the field's own rect did not reach C");
-
-        // Click it, type an expression, press Enter.
         let (x, y) = (rect.x + rect.w * 0.5, rect.y + rect.h * 0.5);
-        let enter = |text: &str| {
+        let focus = || {
             libgui_push_pointer_moved(u, x, y);
             libgui_push_pointer_button(u, 0, 1);
             step();
             libgui_push_pointer_button(u, 0, 0);
             step();
-            libgui_push_text(u, c(text).as_ptr());
+        };
+        let key = |k: u32| {
+            libgui_push_key(u, k, 1, 0);
             step();
-            libgui_push_key(u, KEY_ENTER, 1, 0);
-            step();
-            libgui_push_key(u, KEY_ENTER, 0, 0);
+            libgui_push_key(u, k, 0, 0);
             step();
         };
 
-        enter("w/2 + 3/8\"");
-        let v = value.get();
-        assert!((v - (20.0 + 9.525)).abs() < 1e-9, "got {v}");
+        // Editing starts from the source, not the display.
+        focus();
+        key(KEY_ENTER);
+        assert_eq!((*(user as *mut App)).asked.last().map(String::as_str), Some("w / 2"), "the validator was handed the display");
+        assert_eq!(read(source.as_ptr()), "w / 2");
+        assert_eq!(commits.get(), 0, "an unchanged commit was reported");
+
+        // A new expression is kept as text: the parametric link survives.
+        focus();
+        libgui_push_text(u, c("w/2 + 3/8\"").as_ptr());
+        step();
+        key(KEY_ENTER);
+        assert_eq!(read(source.as_ptr()), "w/2 + 3/8\"", "the expression was not what the buffer received");
         assert_eq!(commits.get(), 1);
-        let msg = std::ffi::CStr::from_ptr(why.as_ptr()).to_str().unwrap();
-        assert_eq!(msg, "", "a successful commit left a reason in the buffer");
+        assert_eq!(read(why.as_ptr()), "");
 
-        // Refused, with the reason in the caller's buffer.
-        let before = value.get();
-        enter("-1");
-        assert_eq!(value.get(), before, "an out-of-range value was written");
-        assert_eq!(last.get().has_error, 1);
-        let msg = std::ffi::CStr::from_ptr(why.as_ptr()).to_str().unwrap();
-        assert!(msg.contains("at least 0 mm"), "the reason did not arrive: {msg:?}");
+        // Refused: the source is untouched, the reason and position arrive,
+        // and focus stays for the fix.
+        focus();
+        libgui_push_text(u, c("2w").as_ptr());
+        step();
+        key(KEY_ENTER);
+        let r = last.get();
+        assert_eq!(r.has_error, 1);
+        assert_eq!(r.error_at, 1, "the validator's position did not arrive");
+        assert_eq!(r.focused, 1, "a refused Enter threw the user out");
+        assert!(read(why.as_ptr()).contains("use *"), "the reason did not arrive: {}", read(why.as_ptr()));
+        assert_eq!(read(source.as_ptr()), "w/2 + 3/8\"", "a refused edit reached the buffer");
 
-        // Escape from a fresh edit reverts and is reported on a text field too.
-        enter("5");
-        assert_eq!(value.get(), 5.0);
-        // After a failure, a success must clear the buffer, or the app shows
-        // the last error under a value that is now correct.
-        let msg = std::ffi::CStr::from_ptr(why.as_ptr()).to_str().unwrap();
-        assert_eq!(msg, "", "the previous failure's reason was left in the buffer");
-        let mut text = [0 as std::os::raw::c_char; 32];
-        let mut cancelled = 0;
-        let mut trect = LibguiRect::default();
-        for _ in 0..3 {
-            frame(u, || trect = libgui_text_input(u, c("name").as_ptr(), text.as_mut_ptr(), 32, std::ptr::null(), std::ptr::null_mut()).response.rect);
-        }
-        assert!(trect.w > 0.0, "a text field's rect did not reach C");
-        libgui_push_pointer_moved(u, trect.x + 4.0, trect.y + 4.0);
-        libgui_push_pointer_button(u, 0, 1);
-        frame(u, || { libgui_text_input(u, c("name").as_ptr(), text.as_mut_ptr(), 32, std::ptr::null(), std::ptr::null_mut()); });
-        libgui_push_pointer_button(u, 0, 0);
-        frame(u, || { libgui_text_input(u, c("name").as_ptr(), text.as_mut_ptr(), 32, std::ptr::null(), std::ptr::null_mut()); });
+        // Fixed, the stale reason goes.
+        libgui_push_text(u, c("*").as_ptr());
+        step();
+        key(KEY_ENTER);
+        assert_eq!(read(source.as_ptr()), "2*w");
+        assert_eq!(read(why.as_ptr()), "", "the previous refusal's reason was left in the buffer");
+
+        // Escape reports itself and leaves the buffer alone.
+        focus();
+        libgui_push_text(u, c("999").as_ptr());
+        step();
         libgui_push_key(u, KEY_ESCAPE, 1, 0);
-        frame(u, || cancelled = libgui_text_input(u, c("name").as_ptr(), text.as_mut_ptr(), 32, std::ptr::null(), std::ptr::null_mut()).cancelled);
-        assert_eq!(cancelled, 1, "Escape did not reach C as a cancel");
+        step();
+        assert_eq!(last.get().cancelled, 1);
+        libgui_push_key(u, KEY_ESCAPE, 0, 0);
+        step();
+        assert_eq!(read(source.as_ptr()), "2*w");
+
+        // A validator that calls libgui is refused, not undefined behaviour.
+        (*(user as *mut App)).misbehave = u;
+        focus();
+        libgui_push_text(u, c("w").as_ptr());
+        step();
+        key(KEY_ENTER);
+        let err = std::ffi::CStr::from_ptr(libgui_last_error()).to_str().unwrap();
+        assert!(err.contains("validator"), "the re-entrant call was not refused: {err}");
+        assert_eq!(libgui_ui_poisoned(u), 0);
+        assert_eq!(read(source.as_ptr()), "w", "the refusal of the call spoiled the commit");
+        (*(user as *mut App)).misbehave = std::ptr::null_mut();
+        step();
+
+        // No validator: commit-and-cancel with nothing refused.
+        let mut free = [0 as std::os::raw::c_char; 16];
+        frame(u, || { libgui_validated_input(u, c("free").as_ptr(), free.as_mut_ptr(), 16, std::ptr::null(), None, std::ptr::null_mut(), std::ptr::null_mut()); });
 
         // The evaluator on its own, and the formatter.
+        let mm = (*(user as *mut App)).units;
         let mut out = 0.0;
         let mut at = 0u64;
         assert_eq!(libgui_units_eval(mm, c("1ft + 1in").as_ptr(), std::ptr::null(), 0, &mut out, why.as_mut_ptr(), 96, &mut at), 1);
         assert!((out - 330.2).abs() < 1e-9);
         assert_eq!(libgui_units_eval(mm, c("12 +").as_ptr(), std::ptr::null(), 0, &mut out, why.as_mut_ptr(), 96, &mut at), 0);
         assert_eq!(at, 4, "the error's position did not arrive");
-        let mut buf = [0 as std::os::raw::c_char; 4];
-        let need = libgui_units_format(mm, 25.4, 3, buf.as_mut_ptr(), buf.len() as u64);
-        assert_eq!(need, "25.4 mm".len() as u64, "format did not report the length it needed");
-        assert_eq!(std::ffi::CStr::from_ptr(buf.as_ptr()).to_str().unwrap(), "25.", "format overran or misplaced its NUL");
+        let mut small = [0 as std::os::raw::c_char; 4];
+        let need = libgui_units_format(mm, 25.4, 3, small.as_mut_ptr(), small.len() as u64);
+        assert_eq!(need, "25.4 mm".len() as u64);
+        assert_eq!(read(small.as_ptr()), "25.");
 
         // A table of the app's own.
         let own = libgui_units_new(c("m").as_ptr());
         libgui_units_add(own, c("km").as_ptr(), 1000.0);
         libgui_units_set_display(own, c("km").as_ptr());
         assert_eq!(libgui_units_eval(own, c("2").as_ptr(), std::ptr::null(), 0, &mut out, std::ptr::null_mut(), 0, std::ptr::null_mut()), 1);
-        assert_eq!(out, 2000.0, "a bare number was not read in the display unit");
+        assert_eq!(out, 2000.0);
         assert!(libgui_units_new(std::ptr::null()).is_null());
         let deg = libgui_units_angle_deg();
         let none = libgui_units_none();
         assert_eq!(libgui_units_eval(none, c("6*7").as_ptr(), std::ptr::null(), 0, &mut out, std::ptr::null_mut(), 0, std::ptr::null_mut()), 1);
         assert_eq!(out, 42.0);
-
-        // Nulls, everywhere, are harmless.
-        let r = libgui_number_input(u, c("x").as_ptr(), std::ptr::null_mut(), mm, std::ptr::null());
-        assert_eq!(r.committed, 0);
         assert_eq!(libgui_units_eval(std::ptr::null(), c("1").as_ptr(), std::ptr::null(), 0, &mut out, std::ptr::null_mut(), 0, std::ptr::null_mut()), 0);
         libgui_units_add(std::ptr::null_mut(), c("x").as_ptr(), 1.0);
         libgui_units_free(std::ptr::null_mut());
-
         for t in [mm, own, deg, none] {
             libgui_units_free(t);
         }

@@ -376,7 +376,7 @@ Text: `label`, `label_muted`, `heading`, `section`, `paragraph`, `text_with`.
 
 Input: `button`, `button_primary`, `button_styled`, `toggle`, `checkbox`,
 `radio`, `slider`, `slider_vertical`, `drag_value`, `drag_value_range`, `combo`,
-`segmented`, `text_input`, `text_area`, `number_input`.
+`segmented`, `text_input`, `text_area`, `validated_input`.
 
 Collections: `selectable`, `tree_row`, `table`, `virtual_list`, `virtual_rows`.
 
@@ -394,35 +394,36 @@ if ui.button("Save").clicked { save(); }
 A `*_keyed` variant exists wherever labels repeat (list rows, tree nodes) —
 use it, or two rows with the same text will share state.
 
-**Numbers typed in units.** `number_input` is a dimension box: the user types
-`25.4mm`, `3/8"` or `w/2 + 1cm`, and your `f64` receives the result in the
-table's base unit.
+**Fields the app validates.** `validated_input` is a text field whose value
+changes only when *your* validator accepts it — a dimension, an email address,
+a colour in hex. libgui owns the behaviour; you own the question.
 
 ```rust
-let units = Units::length_mm();                    // or Units::new("in").with(…)
-let vars = [Var::quantity("w", width_mm)];
-let opts = NumberOptions { min: 0.0, vars: &vars, ..Default::default() };
-if ui.number_input_with("depth", &mut depth_mm, &units, &opts).committed {
-    push_undo();
-}
+let r = ui.validated_input_with("height", &mut param.source, &ValidatedOptions {
+    display: Some(&shown),        // "40 mm" while nobody edits; the source is "width * 2"
+    ..Default::default()
+}, |text| doc.check_expression(text).map(|_| ()).map_err(|e| FieldError::new(e.to_string())));
+if r.committed { doc.reevaluate(); }
 ```
 
-The value changes **on commit** — Enter, Tab, a click elsewhere — never per
-keystroke, so a half-typed `2` on its way to `25` never reaches your model.
-Escape puts back what was there. Focus selects the whole value, so typing
-replaces it. Text that does not evaluate stays in the field, red, with the
-reason beneath it, and your value is untouched; so is a value outside the
-range, which is **refused rather than clamped**.
+- Your string is the **source** and is written only on an accepted commit —
+  Enter, Tab, a click elsewhere. A half-typed entry never reaches your model.
+- Editing starts from the source, never the display, so a parametric link
+  (`width * 2`) survives being edited.
+- The validator is asked once, on commit, with the whole text. Its grammar,
+  its names — resolved however and whenever you like — and its units are
+  yours.
+- Refused text stays in the field with the reason beneath it. A refused Enter
+  keeps focus, and puts the caret at `FieldError::at` if you gave one; a
+  refused click-away does not pull focus back. Escape throws the edit away.
 
-The rules are a machinist's, not a type checker's: a bare number is in the
-display unit, `10mm + 2` is 12 mm, `3/8"` is three eighths of an inch, and
-`w * h` in a length field is refused as an area. There are no functions and no
-implicit multiplication — `2w` is an error. `Units::eval` is the evaluator on
-its own, for a command line or a table cell.
-
-Units are yours. `length_mm` and `angle_deg` are conveniences, because a table
-of factors is data rather than policy; nothing in libgui assumes a unit
-system.
+libgui ships **no expression language**, deliberately: which functions exist,
+what a bare number means, and whether the text or the number is the truth are
+an application's decisions, and a second grammar that disagrees with the app's
+would give users different answers in different boxes. An app with no grammar
+of its own can use the **`libgui_units`** companion crate — an evaluator with
+units (`25.4mm`, `3/8"`, `w/2 + 1cm`) and a `number_input` helper built on this
+field — the way key bindings come from `libgui_keymap`.
 
 ### 5.3 Disabled widgets
 
@@ -1020,7 +1021,7 @@ and text area over a caller-owned buffer, combo and segmented pickers,
 containers, scroll areas, the disabled scope, the collection cursor,
 multi-select, stable ids, custom painting, the full input set, the keymap, the
 viewport and painter image calls, the pan/zoom canvas and raw transforms,
-animation, numeric fields with units, docking, tables, drag and drop, themes from
+animation, validated fields (and the `libgui_units` evaluator), docking, tables, drag and drop, themes from
 TOML, and the frame output — instances, batches, atlas, globals, platform
 requests, the expanded mesh and its chunks, the reference renderer and the
 conformance gallery, and a shared font system.
@@ -1089,6 +1090,13 @@ when; grow the buffer and fetch the rest with `libgui_text_overflow` and the
 field's `response.id`. Do not call the field again instead — in the same frame
 that is a second, unfocused widget, and the paste is lost. The C++ wrapper does
 this for you.
+
+`libgui_validated_input` takes the validator as a function pointer and a
+`void*`, called synchronously on commit, so nothing is retained and nothing
+needs freeing. It must not call libgui with the same handle: libgui is
+mid-widget, and the call is refused — without that refusal it is a segfault.
+In C++ it is a lambda, and an exception it throws is a refusal rather than an
+unwind through libgui.
 
 Motion is `libgui_animate_bool(ui, id, slot, on)` and friends, returning a 0..1
 you blend with. Unlike the Rust calls these mark `id` alive for the frame

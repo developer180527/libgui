@@ -1,10 +1,21 @@
-//! A CAD dimension box, driven the way a user drives one.
+//! A dimension box, driven the way a user drives one.
 //!
-//! The evaluator has its own tests in `number.rs`. These are about the field:
+//! The evaluator has its own tests in `lib.rs`. These are about the field:
 //! when the caller's value changes, and — more often the question — when it
 //! must not.
 
 use libgui::*;
+use libgui_units::{number_input, NumberOptions, Units, Var};
+
+/// The field's response, flattened the way these tests read it.
+#[derive(Clone, Default)]
+struct NumberResponse {
+    response: Response,
+    committed: bool,
+    changed: bool,
+    focused: bool,
+    error: Option<FieldError>,
+}
 
 const FONT: &[u8] = include_bytes!("../../../assets/Inter.ttf");
 
@@ -57,7 +68,14 @@ impl World {
         self.ui.begin_frame(FrameInfo { screen_size: Vec2::new(400.0, 300.0), scale: 1.0, dt: 1.0 / 60.0 });
         let vars: Vec<Var> = self.vars.iter().map(|(n, v, d)| Var { name: n, value: *v, dim: *d }).collect();
         let opts = NumberOptions { min: self.min, vars: &vars, ..NumberOptions::default() };
-        let r = self.ui.number_input_with("depth", &mut self.value, &self.units, &opts);
+        let n = number_input(&mut self.ui, "depth", &mut self.value, &self.units, &opts);
+        let r = NumberResponse {
+            response: n.field.response,
+            committed: n.committed,
+            changed: n.field.changed,
+            focused: n.field.focused,
+            error: n.field.error,
+        };
         let other = self.ui.button("elsewhere");
         let _ = self.ui.end_frame();
         self.field = r.response.rect;
@@ -174,11 +192,14 @@ fn clicking_elsewhere_commits() {
 #[test]
 fn text_that_does_not_evaluate_stays_and_says_why() {
     let mut w = World::new(25.4);
+    w.vars = vec![("w".into(), 40.0, 1)];
     let r = w.enter("2w");
     let e = r.error.expect("no error for 2w");
     assert!(e.message.contains("use *"), "{e}");
     assert_eq!(w.value, 25.4, "a failed expression changed the value");
     assert!(!r.committed);
+    // Refused on Enter: the user stays in the field, at the problem.
+    assert!(r.focused, "a refused Enter threw the user out of the field");
 
     // It stays, frame after frame, without the user doing anything.
     for _ in 0..5 {
@@ -186,10 +207,11 @@ fn text_that_does_not_evaluate_stays_and_says_why() {
     }
     assert!(w.last.error.is_some(), "the error disappeared on its own");
 
-    // Fixing it is the way out, and it commits normally.
-    let r = w.enter("3");
+    // The caret is between the 2 and the w, so one keystroke fixes it.
+    w.type_text("*");
+    let r = w.key(Key::Enter);
     assert!(r.error.is_none(), "{:?}", r.error);
-    assert_eq!(w.value, 3.0);
+    assert_eq!(w.value, 80.0, "the fix did not land where the error was");
 }
 
 #[test]

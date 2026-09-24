@@ -41,14 +41,20 @@ fn nav(ui: &mut Ui, rows: &[String], selected: &mut usize) {
     ui.close_collection();
 }
 
+struct Param { source: String }
+struct Doc;
+impl Doc {
+    fn check_expression(&self, _t: &str) -> Result<f64, String> { Ok(0.0) }
+    fn reevaluate(&mut self) {}
+}
+
 #[allow(dead_code)]
-fn numbers(ui: &mut Ui, depth_mm: &mut f64, width_mm: f64, push_undo: impl FnOnce()) {
-    let units = Units::length_mm();
-    let vars = [Var::quantity("w", width_mm)];
-    let opts = NumberOptions { min: 0.0, vars: &vars, ..Default::default() };
-    if ui.number_input_with("depth", depth_mm, &units, &opts).committed {
-        push_undo();
-    }
+fn validated(ui: &mut Ui, param: &mut Param, doc: &mut Doc, shown: String) {
+    let r = ui.validated_input_with("height", &mut param.source, &ValidatedOptions {
+        display: Some(&shown),
+        ..Default::default()
+    }, |text| doc.check_expression(text).map(|_| ()).map_err(|e| FieldError::new(e.to_string())));
+    if r.committed { doc.reevaluate(); }
 }
 
 #[allow(dead_code)]
