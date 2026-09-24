@@ -46,6 +46,11 @@ pub struct TextResponse {
     pub changed: bool,
     /// Enter was pressed (focus is released).
     pub submitted: bool,
+    /// The cancel action (Escape, in the default keymap) was pressed: focus
+    /// is released and the app should put back what the field held before.
+    /// Losing focus any *other* way — a click elsewhere, Tab — is neither this
+    /// nor `submitted`, and a field that commits on blur treats it as commit.
+    pub cancelled: bool,
     pub focused: bool,
     /// Where the caret is, as `(line, column)`, both zero-based. The column is
     /// in **characters**, because that is what a status bar means by "Col 4";
@@ -64,6 +69,15 @@ pub struct TextResponse {
     /// instead of guessing from focus.
     pub can_undo: bool,
     pub can_redo: bool,
+}
+
+impl TextState {
+    /// Select everything in a field holding `len` bytes, caret at the end: a
+    /// numeric field does this on focus, so typing replaces the value.
+    pub(crate) fn select_all(&mut self, len: usize) {
+        self.anchor = 0;
+        self.cursor = len;
+    }
 }
 
 /// Pure editing operations on a `String` + caret/selection.
@@ -377,6 +391,7 @@ fn edited(e: &mut Edit, hist: &mut History, kind: Edited, now: f64, pause: f64, 
 struct Edited2 {
     changed: bool,
     submitted: bool,
+    cancelled: bool,
     can_undo: bool,
     can_redo: bool,
 }
@@ -387,7 +402,7 @@ struct Edited2 {
 /// newlines, and in treating Enter as "commit" because it has nowhere to put
 /// a line break.
 fn apply_events(ui: &mut Ui, id: Id, text: &mut String, st: &mut TextState, multiline: bool) -> Edited2 {
-    let mut out = Edited2 { changed: false, submitted: false, can_undo: false, can_redo: false };
+    let mut out = Edited2 { changed: false, submitted: false, cancelled: false, can_undo: false, can_redo: false };
     let mut hist = ui.text_history.remove(&id).unwrap_or_default();
     // No whole-document comparison here to spot the app writing the string
     // behind the field's back: a step is checked against the buffer when it is
@@ -433,7 +448,10 @@ fn apply_events(ui: &mut Ui, id: Id, text: &mut String, st: &mut TextState, mult
                 out.submitted = true;
                 ui.focused = None;
             }
-            Event::Action(UiAction::Cancel) => ui.focused = None,
+            Event::Action(UiAction::Cancel) => {
+                out.cancelled = true;
+                ui.focused = None;
+            }
             // Undo and redo the field cannot serve are *released*: the action
             // is reported as unclaimed, so `consume_shortcut` lets the chord
             // through to the app. A caret resting in a search box must not
@@ -524,11 +542,13 @@ impl Ui {
 
         let mut changed = false;
         let mut submitted = false;
+        let mut cancelled = false;
         let (mut can_undo, mut can_redo) = (false, false);
         if self.focused == Some(id) {
             let out = apply_events(self, id, text, &mut st, false);
             changed = out.changed;
             submitted = out.submitted;
+            cancelled = out.cancelled;
             (can_undo, can_redo) = (out.can_undo, out.can_redo);
         }
         let focused = self.focused == Some(id);
@@ -630,7 +650,7 @@ impl Ui {
             p.draw.pop_clip();
         });
 
-        TextResponse { response: resp, changed, submitted, focused, caret: (0, st.cursor), selection: (sa, sb), can_undo, can_redo }
+        TextResponse { response: resp, changed, submitted, cancelled, focused, caret: (0, st.cursor), selection: (sa, sb), can_undo, can_redo }
     }
 }
 
@@ -976,11 +996,13 @@ impl Ui {
         // ---- keyboard ------------------------------------------------------
         let mut changed = false;
         let mut submitted = false;
+        let mut cancelled = false;
         let (mut can_undo, mut can_redo) = (false, false);
         if self.focused == Some(id) {
             let out = apply_events(self, id, text, &mut st, true);
             changed = out.changed;
             submitted = out.submitted;
+            cancelled = out.cancelled;
             (can_undo, can_redo) = (out.can_undo, out.can_redo);
         }
         let focused = self.focused == Some(id);
@@ -1129,6 +1151,6 @@ impl Ui {
             let y = resp.rect.y + pad + caret_pos.y;
             self.ime_rect = Some(Rect::new(x, y, 1.0, lh));
         }
-        TextResponse { response: resp, changed, submitted, focused, caret: (row, col), selection: (sel_a, sel_b), can_undo, can_redo }
+        TextResponse { response: resp, changed, submitted, cancelled, focused, caret: (row, col), selection: (sel_a, sel_b), can_undo, can_redo }
     }
 }

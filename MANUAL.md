@@ -376,7 +376,7 @@ Text: `label`, `label_muted`, `heading`, `section`, `paragraph`, `text_with`.
 
 Input: `button`, `button_primary`, `button_styled`, `toggle`, `checkbox`,
 `radio`, `slider`, `slider_vertical`, `drag_value`, `drag_value_range`, `combo`,
-`segmented`, `text_input`, `text_area`.
+`segmented`, `text_input`, `text_area`, `number_input`.
 
 Collections: `selectable`, `tree_row`, `table`, `virtual_list`, `virtual_rows`.
 
@@ -393,6 +393,36 @@ if ui.button("Save").clicked { save(); }
 
 A `*_keyed` variant exists wherever labels repeat (list rows, tree nodes) —
 use it, or two rows with the same text will share state.
+
+**Numbers typed in units.** `number_input` is a dimension box: the user types
+`25.4mm`, `3/8"` or `w/2 + 1cm`, and your `f64` receives the result in the
+table's base unit.
+
+```rust
+let units = Units::length_mm();                    // or Units::new("in").with(…)
+let vars = [Var::quantity("w", width_mm)];
+let opts = NumberOptions { min: 0.0, vars: &vars, ..Default::default() };
+if ui.number_input_with("depth", &mut depth_mm, &units, &opts).committed {
+    push_undo();
+}
+```
+
+The value changes **on commit** — Enter, Tab, a click elsewhere — never per
+keystroke, so a half-typed `2` on its way to `25` never reaches your model.
+Escape puts back what was there. Focus selects the whole value, so typing
+replaces it. Text that does not evaluate stays in the field, red, with the
+reason beneath it, and your value is untouched; so is a value outside the
+range, which is **refused rather than clamped**.
+
+The rules are a machinist's, not a type checker's: a bare number is in the
+display unit, `10mm + 2` is 12 mm, `3/8"` is three eighths of an inch, and
+`w * h` in a length field is refused as an area. There are no functions and no
+implicit multiplication — `2w` is an error. `Units::eval` is the evaluator on
+its own, for a command line or a table cell.
+
+Units are yours. `length_mm` and `angle_deg` are conveniences, because a table
+of factors is data rather than policy; nothing in libgui assumes a unit
+system.
 
 ### 5.3 Disabled widgets
 
@@ -990,7 +1020,7 @@ and text area over a caller-owned buffer, combo and segmented pickers,
 containers, scroll areas, the disabled scope, the collection cursor,
 multi-select, stable ids, custom painting, the full input set, the keymap, the
 viewport and painter image calls, the pan/zoom canvas and raw transforms,
-animation, docking, tables, drag and drop, themes from
+animation, numeric fields with units, docking, tables, drag and drop, themes from
 TOML, and the frame output — instances, batches, atlas, globals, platform
 requests, the expanded mesh and its chunks, the reference renderer and the
 conformance gallery, and a shared font system.
@@ -1053,6 +1083,12 @@ your own arithmetic: the snapping is written once and is right at every zoom.
 and `libgui_transform_inv_point` converts it.
 
 `libgui_open_transform` is the raw form, for a camera you drive yourself.
+
+A text field's buffer is yours, and a paste can outgrow it. `out_len` says
+when; grow the buffer and fetch the rest with `libgui_text_overflow` and the
+field's `response.id`. Do not call the field again instead — in the same frame
+that is a second, unfocused widget, and the paste is lost. The C++ wrapper does
+this for you.
 
 Motion is `libgui_animate_bool(ui, id, slot, on)` and friends, returning a 0..1
 you blend with. Unlike the Rust calls these mark `id` alive for the frame

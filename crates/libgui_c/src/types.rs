@@ -93,7 +93,10 @@ pub struct LibguiTextResponse {
     pub submitted: u8,
     pub can_undo: u8,
     pub can_redo: u8,
-    pub _pad: [u8; 4],
+    /// Escape (the cancel action) released focus. Taken from what was
+    /// padding, so the struct's size and every other offset are unchanged.
+    pub cancelled: u8,
+    pub _pad: [u8; 3],
     pub caret_line: u64,
     pub caret_column: u64,
     pub selection_start: u64,
@@ -156,12 +159,13 @@ impl From<TreeResponse> for LibguiTreeResponse {
 impl From<TextResponse> for LibguiTextResponse {
     fn from(r: TextResponse) -> Self {
         Self {
-            response: Default::default(),
+            response: r.response.into(),
             changed: b(r.changed),
             submitted: b(r.submitted),
             can_undo: b(r.can_undo),
             can_redo: b(r.can_redo),
-            _pad: [0; 4],
+            cancelled: b(r.cancelled),
+            _pad: [0; 3],
             caret_line: r.caret.0 as u64,
             caret_column: r.caret.1 as u64,
             selection_start: r.selection.0 as u64,
@@ -200,4 +204,7 @@ sizeof_fns! {
     libgui_sizeof_insets => crate::dock::LibguiInsets,
     libgui_sizeof_table_response => crate::table_c::LibguiTableResponse,
     libgui_sizeof_drop_zone => crate::theme_dnd::LibguiDropZone,
+    libgui_sizeof_var => crate::number::LibguiVar,
+    libgui_sizeof_number_options => crate::number::LibguiNumberOptions,
+    libgui_sizeof_number_response => crate::number::LibguiNumberResponse,
 }

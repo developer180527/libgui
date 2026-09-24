@@ -228,6 +228,7 @@ pub unsafe extern "C" fn libgui_ui_free(ui: *mut LibguiUi) {
         return;
     }
     let handle = unsafe { Box::from_raw(ui) };
+    crate::text::clear_overflow(handle.ui);
     if handle.owns_ui && !handle.ui.is_null() {
         drop(unsafe { Box::from_raw(handle.ui) });
     }
@@ -261,6 +262,7 @@ pub unsafe extern "C" fn libgui_begin_frame(ui: *mut LibguiUi, width: f32, heigh
         return;
     }
     with_ui(ui, (), |ui| {
+        crate::text::clear_overflow(ui);
         ui.begin_frame(FrameInfo { screen_size: Vec2::new(width, height), scale, dt });
     });
 }

@@ -63,7 +63,7 @@ apps do with it. `no` = absent.
 | Checkbox, radio, toggle | 14 | yes |
 | Slider (h and v) | 12 | yes |
 | Drag-to-change number field | 9 | yes (`drag_value`) |
-| **Numeric field with units and expressions** | 9 | **no** |
+| Numeric field with units and expressions | 9 | yes (`number_input`) |
 | Single-line text field | 14 | yes |
 | Multi-line text area | 12 | yes |
 | Dropdown / combo | 14 | yes |
@@ -112,7 +112,7 @@ apps do with it. `no` = absent.
 | Popup / dropdown surface | 14 | yes |
 | Modal dialog | 14 | part — **deliberately**: built from layers, see DESIGN §13 |
 | **Toast / notification** | 12 | **no** |
-| Inline validation error on a field | 11 | **no** |
+| Inline validation error on a field | 11 | part — `number_input` has it; `text_input` does not |
 | Empty state | 12 | part — containers and a label; no widget needed |
 | Drag and drop with a drag preview | 11 | yes |
 
@@ -192,9 +192,9 @@ application actually being built.
 
 | # | Item | Why now | Rough size |
 |---|---|---|---|
-| 1 | Numeric field with units and expressions | Every CAD dimension box. `drag_value` covers the mouse; nothing covers typing `25.4mm` or `3/8"` or `w/2`. | 3–4 d |
+| 1 | ~~Numeric field with units and expressions~~ | **Done** — `number_input`, with `Units`, variables, range refusal and inline errors. | — |
 | 2 | Colour picker | Layer and appearance colour. Ten of fourteen apps; `to_hex`/`parse_hex` already exist, so the model is half-built. | 4–5 d |
-| 3 | Inline field validation | The other half of data entry: a field that rejects input silently is worse than one that has no validation. | 1–2 d |
+| 3 | Inline field validation | The other half of data entry. `number_input` has it; the general form, for any `text_input`, is still missing. | 1 d |
 | 4 | Toast / notification | The standard way to report a non-modal failure. Twelve of fourteen. | 2 d |
 | 5 | **Decide on rotation** | Not build — decide. The cost falls on backend authors, and it gets worse the longer it waits. | — |
 | 6 | Virtualised tree | A CAD assembly browser is a tree with tens of thousands of nodes. Today it is a tree or it is virtual, not both. | 3 d |

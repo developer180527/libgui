@@ -129,6 +129,66 @@ int main(int argc, char** argv) {
     CHECK(ui.mesh_fits_u16(), "a frame this small should fit 16-bit indices");
     CHECK(!ui.poisoned(), "the mesh poisoned the Ui");
 
+    ui.enable_mesh(false);
+
+    // The canvas and transform close themselves, and a dimension box reads
+    // an expression into base units.
+    {
+        LibguiCanvasState view;
+        libgui_canvas_state_default(&view);
+        libgui::Units mm = libgui::Units::length_mm();
+        CHECK(mm.format(25.4) == "25.4 mm", "Units::format");
+        double depth = 12.0;
+        std::string why;
+        for (int pass = 0; pass < 2; pass++) {
+            ui.begin_frame(400.0f, 300.0f, 1.0f, 1.0f / 60.0f);
+            {
+                auto cv = ui.canvas("sketch", view);
+                ui.label("an entity");
+                {
+                    auto _t = ui.transform(libgui::id("cam"), LibguiVec2{0.0f, 0.0f}, 2.0f);
+                    ui.label("under my camera");
+                }
+                (void)cv;
+            }
+            float hot = ui.animate(libgui::id("w"), 0, true);
+            (void)hot;
+            ui.number_input("depth", depth, mm, &why);
+            ui.end_frame();
+            CHECK(ui.open_depth() == 0, "the canvas or transform guard did not close");
+        }
+        CHECK(view.visible.w > 0.0f, "the canvas state was not written back");
+        CHECK(depth == 12.0 && why.empty(), "an untouched dimension box changed");
+        CHECK(!ui.poisoned(), "the canvas or number box poisoned the Ui");
+    }
+
+    // A paste longer than the wrapper's spare room must arrive whole, in one
+    // field. The wrapper offers the text plus 64 bytes and retries when the
+    // field outgrows that.
+    {
+        ui.install_default_keymap();
+        std::string name;
+        LibguiRect r{};
+        auto field = [&] {
+            ui.begin_frame(400.0f, 300.0f, 1.0f, 1.0f / 60.0f);
+            auto t = ui.text_input("name", name);
+            ui.end_frame();
+            r = t.response.rect;
+            return t;
+        };
+        for (int i = 0; i < 3; i++) field();
+        ui.pointer_moved(r.x + 4.0f, r.y + 4.0f);
+        ui.pointer_button(0, true);
+        field();
+        ui.pointer_button(0, false);
+        field();
+        std::string big(200, 'x');
+        ui.paste(big.c_str());
+        field();
+        field();
+        CHECK(name == big, "a long paste into a C++ text field was lost or cut");
+    }
+
     if (failures == 0) std::printf("ok: C++ wrapper test passed (%d paints)\n", painted);
     return failures == 0 ? 0 : 1;
 }

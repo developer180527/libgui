@@ -691,6 +691,9 @@ pub struct Ui {
     /// of text state that is not `Copy`, and because it is pruned on the same
     /// rule: a field that stops being built forgets what was typed into it.
     pub(crate) text_history: FxMap<Id, crate::text_history::History>,
+    /// What a numeric field shows while it is being typed in, or while it
+    /// holds text that did not evaluate. See `number.rs`.
+    pub(crate) number_edits: FxMap<Id, crate::number::NumberEdit>,
     pub(crate) copied: Option<String>,
     pub(crate) ime_rect: Option<Rect>,
     // Scrolling
@@ -923,6 +926,7 @@ impl Ui {
             focus_visible: false,
             text_states: FxMap::default(),
             text_history: FxMap::default(),
+            number_edits: FxMap::default(),
             copied: None,
             ime_rect: None,
             scroll_states: FxMap::default(),
@@ -1746,6 +1750,7 @@ impl Ui {
         self.anims.retain(|(id, _), _| seen.contains(id));
         self.text_states.retain(|id, _| seen.contains(id));
         self.text_history.retain(|id, _| seen.contains(id));
+        self.number_edits.retain(|id, _| seen.contains(id));
         self.scroll_states.retain(|id, _| seen.contains(id));
         self.in_scroll.retain(|id, _| seen.contains(id));
         self.nav_states.retain(|id, _| seen.contains(id));

@@ -114,6 +114,8 @@ inline void close_container(LibguiUi* ui) { libgui_close_container(ui); }
 inline void close_scroll(LibguiUi* ui) { libgui_close_scroll_area(ui); }
 inline void close_collection(LibguiUi* ui) { libgui_close_collection(ui); }
 inline void close_menu(LibguiUi* ui) { libgui_close_menu(ui); }
+inline void close_canvas(LibguiUi* ui) { libgui_close_canvas(ui); }
+inline void close_transform(LibguiUi* ui) { libgui_close_transform(ui); }
 
 // A lambda reaches the C side as a function pointer plus a void*, and is
 // deleted through `drop_user` when libgui drops the paint closure — at the end
@@ -132,6 +134,48 @@ using ContainerGuard = Guard<detail::close_container>;
 using ScrollGuard = Guard<detail::close_scroll>;
 using CollectionGuard = Guard<detail::close_collection>;
 using MenuGuard = Guard<detail::close_menu>;
+using CanvasGuard = Guard<detail::close_canvas>;
+using TransformGuard = Guard<detail::close_transform>;
+
+// A units table, freed when it goes out of scope. Move-only, because two
+// owners of one table would free it twice.
+class Units {
+public:
+    static Units length_mm() { return Units(libgui_units_length_mm()); }
+    static Units angle_deg() { return Units(libgui_units_angle_deg()); }
+    static Units none() { return Units(libgui_units_none()); }
+    explicit Units(const char* base) : h_(libgui_units_new(base)) {}
+    ~Units() { libgui_units_free(h_); }
+    Units(Units&& o) noexcept : h_(o.h_) { o.h_ = nullptr; }
+    Units& operator=(Units&& o) noexcept {
+        if (this != &o) { libgui_units_free(h_); h_ = o.h_; o.h_ = nullptr; }
+        return *this;
+    }
+    Units(const Units&) = delete;
+    Units& operator=(const Units&) = delete;
+
+    Units& add(const char* name, double factor) { libgui_units_add(h_, name, factor); return *this; }
+    Units& display(const char* name) { libgui_units_set_display(h_, name); return *this; }
+    std::string format(double v, uint32_t decimals = 3) const {
+        std::string out(libgui_units_format(h_, v, decimals, nullptr, 0), '\0');
+        libgui_units_format(h_, v, decimals, out.data(), out.size() + 1);
+        return out;
+    }
+    const LibguiUnits* raw() const { return h_; }
+
+private:
+    explicit Units(LibguiUnits* h) : h_(h) {}
+    LibguiUnits* h_;
+};
+
+// What `canvas` reported: the background's response, the view, and the guard
+// that closes it. The background's `mouse_pos` is in WINDOW coordinates;
+// everything built inside the canvas is in canvas coordinates.
+struct Canvas {
+    LibguiResponse background;
+    LibguiCanvasView view;
+    CanvasGuard guard;
+};
 
 // The enabled scope restores what it found rather than forcing "enabled", so
 // it needs the saved value.
@@ -266,6 +310,28 @@ public:
     bool is_enabled() const { return libgui_is_enabled(h_) != 0; }
     uint64_t open_depth() const { return libgui_open_depth(h_); }
 
+    // A pan/zoom canvas. `state` is yours, kept across frames; start it with
+    // libgui_canvas_state_default.
+    [[nodiscard]] Canvas canvas(const char* key, LibguiCanvasState& state) {
+        LibguiCanvasView v{};
+        LibguiResponse bg = libgui_open_canvas(h_, key, &state, &v);
+        return Canvas{bg, v, CanvasGuard(h_)};
+    }
+    [[nodiscard]] TransformGuard transform(uint64_t tid, LibguiVec2 pan, float zoom) {
+        libgui_open_transform(h_, tid, pan, zoom);
+        return TransformGuard(h_);
+    }
+
+    // --- motion ---
+    float animate(uint64_t wid, uint8_t slot, float target) { return libgui_animate(h_, wid, slot, target); }
+    float animate(uint64_t wid, uint8_t slot, bool on) { return libgui_animate_bool(h_, wid, slot, on ? 1 : 0); }
+    float animate(uint64_t wid, uint8_t slot, float target, float speed) {
+        return libgui_animate_with_speed(h_, wid, slot, target, speed);
+    }
+    void set_anim(uint64_t wid, uint8_t slot, float v) { libgui_set_anim(h_, wid, slot, v); }
+    void request_repaint() { libgui_request_repaint(h_); }
+    void keep_id(uint64_t wid) { libgui_keep_id(h_, wid); }
+
     // A menu is a scope only when it opened, so this returns whether to build
     // the items and the guard that closes it.
     std::pair<bool, MenuGuard> menu(const char* label) {
@@ -335,13 +401,34 @@ public:
     void set_cursor(uint64_t coll, uint64_t index) { libgui_set_cursor(h_, coll, index); }
 
     // A text field over a std::string, grown as needed. The C form wants a
-    // buffer and a capacity; this hides that, and retries once if the text
-    // outgrew what was offered.
+    // buffer and a capacity; this hides that. When the text outgrew what was
+    // offered -- a long paste -- the rest is fetched with
+    // libgui_text_overflow. Not by calling the field again: in the same frame
+    // that is a second, unfocused widget, and the paste would be lost.
     LibguiTextResponse text_input(const char* key, std::string& s, const char* placeholder = "") {
         return edit(s, [&](char* buf, uint64_t cap, uint64_t* need) {
             return libgui_text_input(h_, key, buf, cap, placeholder, need);
         });
     }
+    // A CAD dimension box. `value` is in the table's base unit and changes
+    // only on commit. `error`, if given, receives the reason text that did
+    // not evaluate was refused, and is cleared when it is fixed.
+    LibguiNumberResponse number_input(const char* key, double& value, const Units& units,
+                                      LibguiNumberOptions opts, std::string* error = nullptr) {
+        char why[160];
+        opts.error = why;
+        opts.error_cap = sizeof why;
+        auto r = libgui_number_input(h_, key, &value, units.raw(), &opts);
+        if (error) error->assign(why);
+        return r;
+    }
+    LibguiNumberResponse number_input(const char* key, double& value, const Units& units,
+                                      std::string* error = nullptr) {
+        LibguiNumberOptions o;
+        libgui_number_options_default(&o);
+        return number_input(key, value, units, o, error);
+    }
+
     LibguiTextResponse text_area(const char* key, std::string& s, uint64_t rows = 6) {
         return edit(s, [&](char* buf, uint64_t cap, uint64_t* need) {
             return libgui_text_area(h_, key, buf, cap, rows, need);
@@ -370,10 +457,8 @@ private:
         uint64_t need = 0;
         auto r = call(buf.data(), static_cast<uint64_t>(cap), &need);
         if (need >= cap) {
-            // Grew past what was offered: take it again with room.
             buf.assign(need + 1, '\0');
-            std::memcpy(buf.data(), s.data(), s.size());
-            r = call(buf.data(), static_cast<uint64_t>(need + 1), &need);
+            libgui_text_overflow(h_, r.response.id, buf.data(), static_cast<uint64_t>(need + 1));
         }
         s.assign(buf.c_str());
         return r;

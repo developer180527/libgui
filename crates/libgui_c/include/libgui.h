@@ -102,7 +102,8 @@ typedef struct {
     uint8_t        submitted;
     uint8_t        can_undo;
     uint8_t        can_redo;
-    uint8_t        _pad[4];
+    uint8_t        cancelled;        /* Escape: put back what was there */
+    uint8_t        _pad[3];
     uint64_t       caret_line;
     uint64_t       caret_column;
     uint64_t       selection_start;  /* byte offsets into the string you passed */
@@ -500,12 +501,27 @@ uint8_t        libgui_conformance_build(LibguiUi* ui, uint32_t index);
 /* --- Text fields and pickers --------------------------------------------- */
 
 /* The caller owns the buffer. `cap` includes the NUL. `out_len` receives the
- * length the text *is*: more than cap-1 means it was truncated, so grow the
- * buffer and call again next frame. */
+ * length the text *is*. More than cap-1 means it did not fit -- a paste, say
+ * -- and the rest is kept aside for this frame only:
+ *
+ *     uint64_t need = 0;
+ *     LibguiTextResponse r = libgui_text_input(ui, "path", buf, cap, "", &need);
+ *     if (need >= cap) {
+ *         buf = realloc(buf, cap = need + 1);
+ *         libgui_text_overflow(ui, r.response.id, buf, cap);
+ *     }
+ *
+ * Do NOT call the field again instead. A second call with the same key in one
+ * frame is a different, unfocused widget: it applies nothing, and the text is
+ * lost. Waiting for the next frame loses it too, because that frame is fed
+ * from the truncated buffer. */
 LibguiTextResponse libgui_text_input(LibguiUi* ui, const char* key, char* buf, uint64_t cap,
                                      const char* placeholder, uint64_t* out_len);
 LibguiTextResponse libgui_text_area(LibguiUi* ui, const char* key, char* buf, uint64_t cap,
                                     uint64_t rows, uint64_t* out_len);
+/* The whole text of a field that did not fit, this frame. snprintf contract;
+ * 0 when nothing overflowed. */
+uint64_t           libgui_text_overflow(LibguiUi* ui, uint64_t id, char* buf, uint64_t cap);
 LibguiResponse     libgui_combo(LibguiUi* ui, const char* label, uint64_t* selected,
                                 const char* const* options, uint64_t count);
 LibguiResponse     libgui_segmented(LibguiUi* ui, const char* key, uint64_t* selected,
@@ -641,6 +657,85 @@ uint8_t     libgui_drag_source(LibguiUi* ui, uint64_t id, const char* kind, uint
 void        libgui_drop_zone(LibguiUi* ui, const char* const* kinds, uint64_t count, LibguiDropZone* out);
 const char* libgui_dragging(LibguiUi* ui);   /* NULL when nothing is */
 void        libgui_cancel_drag(LibguiUi* ui);
+
+/* --- Numbers typed in units --------------------------------------------------- */
+
+/* A units table: every unit is a factor to one BASE unit, and values leave in
+ * base units whatever the user typed. Keep one for as long as the fields that
+ * use it; it is yours to free. */
+typedef struct LibguiUnits LibguiUnits;
+
+LibguiUnits* libgui_units_none(void);           /* arithmetic only */
+LibguiUnits* libgui_units_length_mm(void);      /* mm cm m um µm in " ft '; shown in mm */
+LibguiUnits* libgui_units_angle_deg(void);      /* deg ° rad; shown in ° */
+LibguiUnits* libgui_units_new(const char* base);
+/* One `name` is `factor` base units. The same factor again is an alias. */
+void         libgui_units_add(LibguiUnits* units, const char* name, double factor);
+/* Show values in `name`, and read a bare number as `name`. */
+void         libgui_units_set_display(LibguiUnits* units, const char* name);
+void         libgui_units_free(LibguiUnits* units);
+
+/* A name an expression may use. value is in base units; dim is 1 for a
+ * quantity of the field's kind (a length) and 0 for a count or a ratio. */
+typedef struct {
+    const char* name;
+    double      value;
+    int32_t     dim;
+    uint32_t    _pad;
+} LibguiVar;
+
+/* The evaluator on its own, for a command line or a table cell. Returns 1 and
+ * writes *out_value on success; 0 with the reason in err and its byte offset
+ * in *out_err_at otherwise. Any output may be NULL.
+ *
+ * What an expression may contain: numbers, + - * / and parentheses, units
+ * after a number, the names in `vars`, and pi. A bare number is in the display
+ * unit. 3/8" is three eighths of an inch. w*h in a length field is refused as
+ * an area. No functions, and no implicit multiplication: 2w is an error. */
+uint8_t  libgui_units_eval(const LibguiUnits* units, const char* text,
+                           const LibguiVar* vars, uint64_t var_count,
+                           double* out_value, char* err, uint64_t err_cap, uint64_t* out_err_at);
+/* snprintf contract: returns the length needed, writes what fits. */
+uint64_t libgui_units_format(const LibguiUnits* units, double value, uint32_t decimals,
+                             char* buf, uint64_t cap);
+
+typedef struct {
+    uint32_t         decimals;       /* shown when not editing; zeros trimmed */
+    uint32_t         _pad;
+    double           min, max;       /* base units; outside is REFUSED, not clamped */
+    const LibguiVar* vars;
+    uint64_t         var_count;
+    const char*      placeholder;
+    char*            error;          /* the reason, when the text does not evaluate */
+    uint64_t         error_cap;
+} LibguiNumberOptions;
+
+void libgui_number_options_default(LibguiNumberOptions* out);
+
+typedef struct {
+    LibguiResponse response;
+    uint8_t        committed;        /* *value changed this frame: act on this one */
+    uint8_t        changed;          /* the text was edited; *value was not */
+    uint8_t        focused;
+    uint8_t        has_error;        /* text did not evaluate; *value untouched */
+    uint32_t       error_at;         /* byte offset of the problem */
+} LibguiNumberResponse;
+
+/* A CAD dimension box. *value is in base units and changes only on commit --
+ * Enter, Tab or a click elsewhere. Escape puts back what was there. Focus
+ * selects everything, so typing replaces the value. Text that does not
+ * evaluate stays, with a red border and the reason beneath it.
+ *
+ *     char why[128];
+ *     LibguiNumberOptions o;
+ *     libgui_number_options_default(&o);
+ *     o.min = 0.0; o.error = why; o.error_cap = sizeof why;
+ *     if (libgui_number_input(ui, "depth", &depth_mm, mm, &o).committed)
+ *         push_undo();
+ */
+LibguiNumberResponse libgui_number_input(LibguiUi* ui, const char* key, double* value,
+                                         const LibguiUnits* units,
+                                         const LibguiNumberOptions* opts);
 
 /* --- Canvas, transforms and animation -------------------------------------- */
 
@@ -781,6 +876,9 @@ uint64_t libgui_sizeof_surface(void);
 uint64_t libgui_sizeof_insets(void);
 uint64_t libgui_sizeof_table_response(void);
 uint64_t libgui_sizeof_drop_zone(void);
+uint64_t libgui_sizeof_var(void);
+uint64_t libgui_sizeof_number_options(void);
+uint64_t libgui_sizeof_number_response(void);
 
 /* === BEGIN GENERATED — from src/table.rs === */
 

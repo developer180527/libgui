@@ -42,6 +42,16 @@ fn nav(ui: &mut Ui, rows: &[String], selected: &mut usize) {
 }
 
 #[allow(dead_code)]
+fn numbers(ui: &mut Ui, depth_mm: &mut f64, width_mm: f64, push_undo: impl FnOnce()) {
+    let units = Units::length_mm();
+    let vars = [Var::quantity("w", width_mm)];
+    let opts = NumberOptions { min: 0.0, vars: &vars, ..Default::default() };
+    if ui.number_input_with("depth", depth_mm, &units, &opts).committed {
+        push_undo();
+    }
+}
+
+#[allow(dead_code)]
 fn custom_draw(ui: &mut Ui, color: Color, ink: Color) {
     let id = ui.make_id("custom");
     let text = ui.frame_text("hello");

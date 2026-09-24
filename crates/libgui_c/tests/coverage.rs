@@ -1293,3 +1293,205 @@ fn a_c_caller_can_animate_its_own_widget() {
         libgui_ui_free(u);
     }
 }
+
+const KEY_ENTER: u32 = 11;
+const KEY_ESCAPE: u32 = 14;
+
+/// A dimension box from C: the value arrives in base units on commit, the
+/// reason for a failure arrives in the caller's buffer, and nothing is handed
+/// back to free.
+#[test]
+fn a_c_caller_gets_a_dimension_box() {
+    unsafe {
+        let u = ui();
+        assert_eq!(libgui_install_keymap(u, PLATFORM_MAC), 0);
+        let mm = libgui_units_length_mm();
+        assert!(!mm.is_null());
+
+        let w = c("w");
+        let vars = [LibguiVar { name: w.as_ptr(), value: 40.0, dim: 1, _pad: 0 }];
+        let mut why = [0 as std::os::raw::c_char; 96];
+        let mut opts = std::mem::zeroed::<LibguiNumberOptions>();
+        libgui_number_options_default(&mut opts);
+        assert_eq!(opts.decimals, 3, "the defaults did not arrive");
+        assert!(opts.max.is_infinite());
+        opts.min = 0.0;
+        opts.vars = vars.as_ptr();
+        opts.var_count = vars.len() as u64;
+        opts.error = why.as_mut_ptr();
+        opts.error_cap = why.len() as u64;
+
+        let value = std::cell::Cell::new(25.4f64);
+        let last = std::cell::Cell::new(LibguiNumberResponse::default());
+        let commits = std::cell::Cell::new(0usize);
+        let step = || {
+            frame(u, || {
+                let mut v = value.get();
+                let r = libgui_number_input(u, c("depth").as_ptr(), &mut v, mm, &opts);
+                value.set(v);
+                last.set(r);
+                commits.set(commits.get() + r.committed as usize);
+            });
+        };
+        for _ in 0..3 {
+            step();
+        }
+        let rect = last.get().response.rect;
+        assert!(rect.w > 0.0, "the field's own rect did not reach C");
+
+        // Click it, type an expression, press Enter.
+        let (x, y) = (rect.x + rect.w * 0.5, rect.y + rect.h * 0.5);
+        let enter = |text: &str| {
+            libgui_push_pointer_moved(u, x, y);
+            libgui_push_pointer_button(u, 0, 1);
+            step();
+            libgui_push_pointer_button(u, 0, 0);
+            step();
+            libgui_push_text(u, c(text).as_ptr());
+            step();
+            libgui_push_key(u, KEY_ENTER, 1, 0);
+            step();
+            libgui_push_key(u, KEY_ENTER, 0, 0);
+            step();
+        };
+
+        enter("w/2 + 3/8\"");
+        let v = value.get();
+        assert!((v - (20.0 + 9.525)).abs() < 1e-9, "got {v}");
+        assert_eq!(commits.get(), 1);
+        let msg = std::ffi::CStr::from_ptr(why.as_ptr()).to_str().unwrap();
+        assert_eq!(msg, "", "a successful commit left a reason in the buffer");
+
+        // Refused, with the reason in the caller's buffer.
+        let before = value.get();
+        enter("-1");
+        assert_eq!(value.get(), before, "an out-of-range value was written");
+        assert_eq!(last.get().has_error, 1);
+        let msg = std::ffi::CStr::from_ptr(why.as_ptr()).to_str().unwrap();
+        assert!(msg.contains("at least 0 mm"), "the reason did not arrive: {msg:?}");
+
+        // Escape from a fresh edit reverts and is reported on a text field too.
+        enter("5");
+        assert_eq!(value.get(), 5.0);
+        // After a failure, a success must clear the buffer, or the app shows
+        // the last error under a value that is now correct.
+        let msg = std::ffi::CStr::from_ptr(why.as_ptr()).to_str().unwrap();
+        assert_eq!(msg, "", "the previous failure's reason was left in the buffer");
+        let mut text = [0 as std::os::raw::c_char; 32];
+        let mut cancelled = 0;
+        let mut trect = LibguiRect::default();
+        for _ in 0..3 {
+            frame(u, || trect = libgui_text_input(u, c("name").as_ptr(), text.as_mut_ptr(), 32, std::ptr::null(), std::ptr::null_mut()).response.rect);
+        }
+        assert!(trect.w > 0.0, "a text field's rect did not reach C");
+        libgui_push_pointer_moved(u, trect.x + 4.0, trect.y + 4.0);
+        libgui_push_pointer_button(u, 0, 1);
+        frame(u, || { libgui_text_input(u, c("name").as_ptr(), text.as_mut_ptr(), 32, std::ptr::null(), std::ptr::null_mut()); });
+        libgui_push_pointer_button(u, 0, 0);
+        frame(u, || { libgui_text_input(u, c("name").as_ptr(), text.as_mut_ptr(), 32, std::ptr::null(), std::ptr::null_mut()); });
+        libgui_push_key(u, KEY_ESCAPE, 1, 0);
+        frame(u, || cancelled = libgui_text_input(u, c("name").as_ptr(), text.as_mut_ptr(), 32, std::ptr::null(), std::ptr::null_mut()).cancelled);
+        assert_eq!(cancelled, 1, "Escape did not reach C as a cancel");
+
+        // The evaluator on its own, and the formatter.
+        let mut out = 0.0;
+        let mut at = 0u64;
+        assert_eq!(libgui_units_eval(mm, c("1ft + 1in").as_ptr(), std::ptr::null(), 0, &mut out, why.as_mut_ptr(), 96, &mut at), 1);
+        assert!((out - 330.2).abs() < 1e-9);
+        assert_eq!(libgui_units_eval(mm, c("12 +").as_ptr(), std::ptr::null(), 0, &mut out, why.as_mut_ptr(), 96, &mut at), 0);
+        assert_eq!(at, 4, "the error's position did not arrive");
+        let mut buf = [0 as std::os::raw::c_char; 4];
+        let need = libgui_units_format(mm, 25.4, 3, buf.as_mut_ptr(), buf.len() as u64);
+        assert_eq!(need, "25.4 mm".len() as u64, "format did not report the length it needed");
+        assert_eq!(std::ffi::CStr::from_ptr(buf.as_ptr()).to_str().unwrap(), "25.", "format overran or misplaced its NUL");
+
+        // A table of the app's own.
+        let own = libgui_units_new(c("m").as_ptr());
+        libgui_units_add(own, c("km").as_ptr(), 1000.0);
+        libgui_units_set_display(own, c("km").as_ptr());
+        assert_eq!(libgui_units_eval(own, c("2").as_ptr(), std::ptr::null(), 0, &mut out, std::ptr::null_mut(), 0, std::ptr::null_mut()), 1);
+        assert_eq!(out, 2000.0, "a bare number was not read in the display unit");
+        assert!(libgui_units_new(std::ptr::null()).is_null());
+        let deg = libgui_units_angle_deg();
+        let none = libgui_units_none();
+        assert_eq!(libgui_units_eval(none, c("6*7").as_ptr(), std::ptr::null(), 0, &mut out, std::ptr::null_mut(), 0, std::ptr::null_mut()), 1);
+        assert_eq!(out, 42.0);
+
+        // Nulls, everywhere, are harmless.
+        let r = libgui_number_input(u, c("x").as_ptr(), std::ptr::null_mut(), mm, std::ptr::null());
+        assert_eq!(r.committed, 0);
+        assert_eq!(libgui_units_eval(std::ptr::null(), c("1").as_ptr(), std::ptr::null(), 0, &mut out, std::ptr::null_mut(), 0, std::ptr::null_mut()), 0);
+        libgui_units_add(std::ptr::null_mut(), c("x").as_ptr(), 1.0);
+        libgui_units_free(std::ptr::null_mut());
+
+        for t in [mm, own, deg, none] {
+            libgui_units_free(t);
+        }
+        assert_eq!(libgui_ui_poisoned(u), 0);
+        libgui_ui_free(u);
+    }
+}
+
+/// A paste longer than the caller's buffer arrives whole, through
+/// `libgui_text_overflow` — and a second call to the field, the tempting fix,
+/// is shown to lose it, which is why the header forbids it.
+#[test]
+fn a_paste_that_outgrows_the_buffer_is_not_lost() {
+    unsafe {
+        let u = ui();
+        assert_eq!(libgui_install_keymap(u, PLATFORM_MAC), 0);
+        let mut buf = vec![0 as std::os::raw::c_char; 8];
+        let mut rect = LibguiRect::default();
+        let mut id = 0u64;
+        let mut need = 0u64;
+        let run = |buf: &mut Vec<std::os::raw::c_char>, need: &mut u64| {
+            let r = libgui_text_input(u, c("path").as_ptr(), buf.as_mut_ptr(), buf.len() as u64, std::ptr::null(), need);
+            (r.response.rect, r.response.id)
+        };
+        for _ in 0..3 {
+            frame(u, || (rect, id) = run(&mut buf, &mut need));
+        }
+        libgui_push_pointer_moved(u, rect.x + 4.0, rect.y + 4.0);
+        libgui_push_pointer_button(u, 0, 1);
+        frame(u, || { run(&mut buf, &mut need); });
+        libgui_push_pointer_button(u, 0, 0);
+        frame(u, || { run(&mut buf, &mut need); });
+
+        let long = "/Users/someone/Projects/bracket-v3.step";
+        libgui_push_paste(u, c(long).as_ptr());
+        let fetched: String;
+        let retried: String;
+        libgui_begin_frame(u, 400.0, 300.0, 1.0, 1.0 / 60.0);
+        run(&mut buf, &mut need);
+        assert_eq!(need, long.len() as u64, "the length the text is did not arrive");
+        assert!(need >= buf.len() as u64, "the test did not overflow its buffer");
+        {
+            let mut big = vec![0 as std::os::raw::c_char; need as usize + 1];
+            let got = libgui_text_overflow(u, id, big.as_mut_ptr(), big.len() as u64);
+            assert_eq!(got, need);
+            fetched = std::ffi::CStr::from_ptr(big.as_ptr()).to_str().unwrap().to_string();
+
+            // The wrong way, for contrast: the field again, with room.
+            let mut again = vec![0 as std::os::raw::c_char; need as usize + 1];
+            std::ptr::copy_nonoverlapping(buf.as_ptr(), again.as_mut_ptr(), buf.len());
+            let mut n2 = 0;
+            libgui_text_input(u, c("path").as_ptr(), again.as_mut_ptr(), again.len() as u64, std::ptr::null(), &mut n2);
+            retried = std::ffi::CStr::from_ptr(again.as_ptr()).to_str().unwrap().to_string();
+        }
+        libgui_end_frame(u);
+        assert_eq!(fetched, long, "the overflow did not hold the whole paste");
+        assert_ne!(retried, long, "calling the field twice worked after all; the header is wrong to forbid it");
+
+        // It is this frame's only: the next frame starts empty.
+        libgui_begin_frame(u, 400.0, 300.0, 1.0, 1.0 / 60.0);
+        let mut small = [0 as std::os::raw::c_char; 4];
+        assert_eq!(libgui_text_overflow(u, id, small.as_mut_ptr(), 4), 0, "the overflow outlived its frame");
+        assert_eq!(small[0], 0, "nothing to fetch still has to leave an empty string");
+        libgui_end_frame(u);
+
+        // Nulls.
+        assert_eq!(libgui_text_overflow(std::ptr::null_mut(), id, std::ptr::null_mut(), 0), 0);
+        assert_eq!(libgui_ui_poisoned(u), 0);
+        libgui_ui_free(u);
+    }
+}

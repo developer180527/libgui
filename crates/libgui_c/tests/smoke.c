@@ -105,6 +105,9 @@ int main(int argc, char** argv) {
     CHECK_SIZE(LibguiInsets, libgui_sizeof_insets);
     CHECK_SIZE(LibguiTableResponse, libgui_sizeof_table_response);
     CHECK_SIZE(LibguiDropZone, libgui_sizeof_drop_zone);
+    CHECK_SIZE(LibguiVar, libgui_sizeof_var);
+    CHECK_SIZE(LibguiNumberOptions, libgui_sizeof_number_options);
+    CHECK_SIZE(LibguiNumberResponse, libgui_sizeof_number_response);
 
     /* Load the font the tests use. */
     FILE* f = fopen(argv[1], "rb");
@@ -498,6 +501,36 @@ int main(int argc, char** argv) {
 
         libgui_request_repaint(ui);
         libgui_keep_id(ui, wid);
+    }
+
+    /* A dimension box, and the evaluator on its own. */
+    {
+        LibguiUnits* mm = libgui_units_length_mm();
+        CHECK(mm != NULL, "no length table");
+        double v = 0.0;
+        uint64_t at = 0;
+        char why[64];
+        CHECK(libgui_units_eval(mm, "3/8\"", NULL, 0, &v, why, sizeof why, &at) == 1, "3/8\" did not evaluate");
+        CHECK(v > 9.524 && v < 9.526, "3/8\" is not 9.525 mm");
+        CHECK(libgui_units_eval(mm, "2mm*3mm", NULL, 0, &v, why, sizeof why, &at) == 0, "an area was accepted as a length");
+
+        char shown[32];
+        libgui_units_format(mm, 25.4, 3, shown, sizeof shown);
+        CHECK(strcmp(shown, "25.4 mm") == 0, "format did not read 25.4 mm");
+
+        LibguiVar w = { "w", 40.0, 1, 0 };
+        LibguiNumberOptions o;
+        libgui_number_options_default(&o);
+        o.vars = &w; o.var_count = 1; o.error = why; o.error_cap = sizeof why;
+        double depth = 12.0;
+        for (int pass = 0; pass < 2; pass++) {
+            libgui_begin_frame(ui, 400.0f, 300.0f, 1.0f, 1.0f / 60.0f);
+            libgui_number_input(ui, "depth", &depth, mm, &o);
+            libgui_end_frame(ui);
+        }
+        CHECK(depth == 12.0, "an untouched field changed its value");
+        CHECK(libgui_ui_poisoned(ui) == 0, "the number field poisoned the handle");
+        libgui_units_free(mm);
     }
 
     libgui_ui_free(ui);

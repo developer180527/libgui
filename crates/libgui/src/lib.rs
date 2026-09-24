@@ -18,6 +18,7 @@ mod input;
 mod input_state;
 mod layout;
 mod math;
+mod number;
 mod paint_arena;
 mod painter;
 mod profile;
@@ -55,6 +56,7 @@ pub use input::{
 };
 pub use layout::{Align, Axis, Insets, Layout, Size};
 pub use math::{Color, Rect, Transform, Vec2};
+pub use number::{ExprError, NumberOptions, NumberResponse, Units, Var};
 pub use painter::{Chevron, Painter};
 pub use profile::{enabled as profile_enabled, Profile};
 pub use scroll::{ScrollConfig, Smoothing};

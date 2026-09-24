@@ -26,6 +26,7 @@ fn bindings() -> KeyBindings {
         .bind(Shortcut::plain(Key::End), UiAction::Move { motion: Motion::LineEnd, select: false })
         .bind(Shortcut::plain(Key::Enter), UiAction::InsertNewline)
         .bind(Shortcut::plain(Key::Enter).ctrl(), UiAction::Submit)
+        .bind(Shortcut::plain(Key::Escape), UiAction::Cancel)
         .bind(ctrl(Key::A), UiAction::SelectAll)
         .bind(ctrl(Key::Z), UiAction::Undo)
         .bind(Shortcut::plain(Key::Z).ctrl().shift(), UiAction::Redo);
@@ -112,6 +113,21 @@ fn enter_breaks_a_line_and_ctrl_enter_commits() {
     let r = w.key(Key::Enter, &[Key::ControlLeft]);
     assert!(r.submitted, "Ctrl+Enter did not commit");
     assert_eq!(w.text, "first\nsecond", "committing changed the text");
+}
+
+/// Escape is reported as its own way of leaving, distinct from committing and
+/// from clicking away, so a field that reverts on cancel can tell them apart.
+#[test]
+fn escape_leaves_the_field_and_says_so() {
+    let mut w = World::new("draft");
+    w.warm();
+    w.click(Vec2::new(200.0, 20.0));
+    let r = w.key(Key::Escape, &[]);
+    assert!(r.cancelled, "Escape was not reported as a cancel");
+    assert!(!r.submitted, "Escape was reported as a commit");
+    assert!(!r.focused, "Escape did not release focus");
+    let r = w.frame();
+    assert!(!r.cancelled, "the cancel was reported again on the next frame");
 }
 
 /// Up and Down keep the column you started in, even walking over a short line
