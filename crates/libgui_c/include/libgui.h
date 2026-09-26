@@ -793,6 +793,13 @@ void libgui_canvas_state_default(LibguiCanvasState* state);
  * and pinch about their midpoint. The response returned is the BACKGROUND's,
  * so `clicked` on it means the user clicked empty canvas.
  *
+ * ONE EXCEPTION to canvas coordinates: that background response is produced
+ * before the transform is pushed, so ITS mouse_pos and drag_delta are in
+ * WINDOW coordinates, while every widget built inside reports canvas ones.
+ * To place a click on empty canvas in the model, convert it:
+ * canvas = (window - xform_pan) / xform_zoom. Assuming otherwise misplaces
+ * every click on empty canvas by the zoom.
+ *
  *     LibguiCanvasState view;
  *     libgui_canvas_state_default(&view);          // once, kept across frames
  *

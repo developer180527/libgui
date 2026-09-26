@@ -403,3 +403,33 @@ fn a_cfg_test_item_without_a_body_ends_at_its_semicolon() {
     assert!(!out.contains("std::time"), "{out}");
     assert!(out.contains("std::fs"), "the cut ran past the `use` into real code: {out}");
 }
+
+/// Every crate in the workspace ships both licence texts.
+///
+/// crates.io packages each crate on its own, so a licence file at the
+/// repository root does not travel with it: a crate without its own copies is
+/// published with no licence file at all. Two crates were added after the rule
+/// was set, and both missed it — one of them the C library that vcpkg ships.
+#[test]
+fn every_crate_ships_its_licence() {
+    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let mut missing = Vec::new();
+    for entry in std::fs::read_dir(&crates).expect("crates/") {
+        let dir = entry.expect("entry").path();
+        if !dir.join("Cargo.toml").exists() {
+            continue;
+        }
+        for file in ["LICENSE-MIT", "LICENSE-APACHE"] {
+            // `exists` follows the symlink, so a dangling one fails too.
+            if !dir.join(file).exists() {
+                missing.push(format!("{}/{file}", dir.file_name().unwrap_or_default().to_string_lossy()));
+            }
+        }
+    }
+    missing.sort();
+    assert!(
+        missing.is_empty(),
+        "these would be published without a licence; symlink them to the repository root's copies:\n  {}",
+        missing.join("\n  ")
+    );
+}

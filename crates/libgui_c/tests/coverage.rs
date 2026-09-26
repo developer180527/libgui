@@ -1547,3 +1547,87 @@ fn a_paste_that_outgrows_the_buffer_is_not_lost() {
         libgui_ui_free(u);
     }
 }
+
+/// What a validator calls on its own handle while libgui holds `&mut Ui`
+/// across the callback. The frame-level calls — ending or beginning a frame,
+/// freeing the handle, showing a dock or a table, sharing its fonts — do not
+/// go through the per-widget guard, so they need refusing on their own:
+/// ending the frame from inside a validator would lay out and close a tree
+/// that the field is still in the middle of building.
+static FRAME_CALL: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+unsafe extern "C" fn validator_that_ends_the_frame(
+    user: *mut c_void,
+    _text: *const std::os::raw::c_char,
+    _len: u64,
+    _error: *mut std::os::raw::c_char,
+    _error_cap: u64,
+    _error_at: *mut u64,
+) -> u8 {
+    let u = user as *mut LibguiUi;
+    unsafe {
+        match FRAME_CALL.load(std::sync::atomic::Ordering::Relaxed) {
+            0 => libgui_end_frame(u),
+            1 => libgui_begin_frame(u, 400.0, 300.0, 1.0, 1.0 / 60.0),
+            2 => {
+                let other = libgui_ui_new_sharing_fonts(u);
+                if !other.is_null() {
+                    libgui_ui_free(other);
+                }
+            }
+            _ => libgui_ui_free(u),
+        }
+    }
+    1
+}
+
+#[test]
+fn a_validator_cannot_end_begin_share_or_free_the_frame_it_runs_in() {
+    for (n, what) in ["libgui_end_frame", "libgui_begin_frame", "libgui_ui_new_sharing_fonts", "libgui_ui_free"]
+        .iter()
+        .enumerate()
+    {
+        FRAME_CALL.store(n as u8, std::sync::atomic::Ordering::Relaxed);
+        unsafe {
+            let u = ui();
+            assert_eq!(libgui_install_keymap(u, PLATFORM_MAC), 0);
+            let mut buf = [0 as std::os::raw::c_char; 32];
+            let buf_ptr = buf.as_mut_ptr();
+            let last = std::cell::Cell::new(LibguiValidatedResponse::default());
+            let step = || {
+                frame(u, || {
+                    last.set(libgui_validated_input(
+                        u,
+                        c("f").as_ptr(),
+                        buf_ptr,
+                        32,
+                        std::ptr::null(),
+                        Some(validator_that_ends_the_frame),
+                        u as *mut c_void,
+                        std::ptr::null_mut(),
+                    ));
+                });
+            };
+            for _ in 0..3 {
+                step();
+            }
+            let r = last.get().response.rect;
+            libgui_push_pointer_moved(u, r.x + r.w / 2.0, r.y + r.h / 2.0);
+            libgui_push_pointer_button(u, 0, 1);
+            step();
+            libgui_push_pointer_button(u, 0, 0);
+            step();
+            libgui_push_text(u, c("7").as_ptr());
+            step();
+            libgui_push_key(u, KEY_ENTER, 1, 0);
+            step(); // the commit: the validator runs here
+
+            let err = std::ffi::CStr::from_ptr(libgui_last_error()).to_string_lossy().into_owned();
+            assert!(err.contains("validator"), "{what} from inside a validator was not refused: {err:?}");
+            assert_eq!(libgui_ui_poisoned(u), 0, "{what} from inside a validator poisoned the handle");
+            let got = std::ffi::CStr::from_ptr(buf.as_ptr()).to_string_lossy().into_owned();
+            assert_eq!(got, "7", "{what}: the refusal spoiled the commit");
+            libgui_ui_free(u);
+        }
+    }
+}

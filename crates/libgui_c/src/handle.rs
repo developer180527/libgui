@@ -121,6 +121,16 @@ pub(crate) fn inside_callback(ui: *mut LibguiUi, what: &str) -> bool {
             set_error(&format!("{what}: not allowed inside a panel callback"));
             true
         }
+        // A validator runs while libgui holds `&mut Ui` across the call, the
+        // same as a panel does. Per-widget calls are refused in `with_ui`; the
+        // frame-level ones do not go through it, so they are refused here —
+        // ending the frame from a validator laid out and closed a tree the
+        // field was still building, and freeing the handle was a
+        // use-after-free.
+        Some(h) if h.validating => {
+            set_error(&format!("{what}: not allowed inside a validator, which must only answer about the text"));
+            true
+        }
         _ => false,
     }
 }
@@ -205,6 +215,11 @@ pub unsafe extern "C" fn libgui_ui_new_sharing_fonts(other: *mut LibguiUi) -> *m
     };
     if handle.poisoned || handle.ui.is_null() {
         set_error("libgui_ui_new_sharing_fonts: the Ui is poisoned");
+        return std::ptr::null_mut();
+    }
+    // Reading the `Ui` while a callback holds `&mut` to it is aliasing, even
+    // for a read.
+    if inside_callback(other, "libgui_ui_new_sharing_fonts") {
         return std::ptr::null_mut();
     }
     // A shared borrow is enough, and nothing here re-enters.
