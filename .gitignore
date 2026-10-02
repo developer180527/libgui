@@ -1,8 +1,8 @@
 target/
 .DS_Store
 # Written by the demos' `look` tests, for eyeballing the layout.
-crates/libgui_solaris/editor.png
-crates/libgui_cut/editor.png
-crates/libgui_cut/editor-scrolled.png
-crates/libgui_pad/pad.png
-crates/libgui_pad/pad-light.png
+crates/demo_gui/libgui_solaris/editor.png
+crates/demo_gui/libgui_cut/editor.png
+crates/demo_gui/libgui_cut/editor-scrolled.png
+crates/demo_gui/libgui_pad/pad.png
+crates/demo_gui/libgui_pad/pad-light.png

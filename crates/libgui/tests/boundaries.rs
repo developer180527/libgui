@@ -410,19 +410,27 @@ fn a_cfg_test_item_without_a_body_ends_at_its_semicolon() {
 /// repository root does not travel with it: a crate without its own copies is
 /// published with no licence file at all. Two crates were added after the rule
 /// was set, and both missed it — one of them the C library that vcpkg ships.
+///
+/// The crates are the workspace's *members*, read from its manifest rather
+/// than found by listing `crates/`: when the demos moved into a subfolder, a
+/// directory scan quietly stopped seeing them, and would have passed with every
+/// one of their licence links dangling.
 #[test]
 fn every_crate_ships_its_licence() {
-    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).expect("workspace Cargo.toml");
+    let list = manifest.split("members").nth(1).and_then(|r| r.split(']').next()).expect("workspace members");
+    let members: Vec<&str> = list.split('"').skip(1).step_by(2).collect();
+    assert!(members.len() > 5, "read {} workspace members; the manifest parse is broken", members.len());
+
     let mut missing = Vec::new();
-    for entry in std::fs::read_dir(&crates).expect("crates/") {
-        let dir = entry.expect("entry").path();
-        if !dir.join("Cargo.toml").exists() {
-            continue;
-        }
+    for member in members {
+        let dir = root.join(member);
+        assert!(dir.join("Cargo.toml").exists(), "workspace member {member} has no Cargo.toml");
         for file in ["LICENSE-MIT", "LICENSE-APACHE"] {
             // `exists` follows the symlink, so a dangling one fails too.
             if !dir.join(file).exists() {
-                missing.push(format!("{}/{file}", dir.file_name().unwrap_or_default().to_string_lossy()));
+                missing.push(format!("{member}/{file}"));
             }
         }
     }

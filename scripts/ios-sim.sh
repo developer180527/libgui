@@ -8,6 +8,6 @@ cargo build --release -p libgui_demo --target aarch64-apple-ios-sim
 APP=target/ios-sim/libgui.app
 rm -rf "$APP" && mkdir -p "$APP"
 cp target/aarch64-apple-ios-sim/release/libgui_demo "$APP/"
-cp crates/libgui_demo/ios/Info.plist "$APP/"
+cp crates/demo_gui/libgui_demo/ios/Info.plist "$APP/"
 codesign --force --sign - "$APP" >/dev/null 2>&1
 echo "$APP"

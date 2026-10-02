@@ -50,10 +50,10 @@ an image or a glyph cannot be turned, only vector paths the app rotates itself. 
 | `crates/libgui_units` | An expression evaluator with units (`25.4mm`, `3/8"`, `w/2 + 1cm`) and a `number_input` built on `validated_input`, for an app with no grammar of its own. Optional; libgui itself interprets no values. |
 | `crates/libgui_soft` | CPU reference `Backend`: renders a frame to an RGBA8 image, the same bytes on every machine. Golden-image tests live here. |
 | `crates/libgui_nodes` | Node-graph editing: nodes, ports, links, selection, routing. Built *on* libgui, not in it. |
-| `crates/libgui_demo` | winit host + editor layout + an "engine" scene rendered offscreen and shown via `ui.viewport`. |
-| `crates/libgui_solaris` | A second demo: one dense, Houdini-shaped editor — menu bar, shelf, viewport, parameter panel, node network, scene-graph tree, details table and timeline, all at once. Its own theme, and a ~170-line host. |
-| `crates/libgui_cut` | A third demo: a non-linear video editor. A **timeline** — zoom, two-axis scroll, clips dragged between tracks, snapping — written as one custom surface on top of the library. |
-| `crates/libgui_pad` | A fourth demo: a plain-text editor. A document on a page, find and replace, and the two undo stacks — the field's and the app's — side by side. Its host is one window, about 200 lines. |
+| `crates/demo_gui/libgui_demo` | winit host + editor layout + an "engine" scene rendered offscreen and shown via `ui.viewport`. |
+| `crates/demo_gui/libgui_solaris` | A second demo: one dense, Houdini-shaped editor — menu bar, shelf, viewport, parameter panel, node network, scene-graph tree, details table and timeline, all at once. Its own theme, and a ~170-line host. |
+| `crates/demo_gui/libgui_cut` | A third demo: a non-linear video editor. A **timeline** — zoom, two-axis scroll, clips dragged between tracks, snapping — written as one custom surface on top of the library. |
+| `crates/demo_gui/libgui_pad` | A fourth demo: a plain-text editor. A document on a page, find and replace, and the two undo stacks — the field's and the app's — side by side. Its host is one window, about 200 lines. |
 
 ## Frame lifecycle
 
@@ -1299,7 +1299,7 @@ an event at all (rotation, Stage Manager, split view).
 
 Resizing is otherwise ordinary work. Every panel's rect changes, so nothing can
 be replayed from the subtree cache — but nothing re-shapes text or re-rasterises
-glyphs either, and `crates/libgui_solaris/tests/resize.rs` drags the dense
+glyphs either, and `crates/demo_gui/libgui_solaris/tests/resize.rs` drags the dense
 editor's corner 300 times, one frame per pixel, to keep it that way.
 
 ### Profiling: knowing rather than guessing
