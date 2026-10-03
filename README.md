@@ -1489,10 +1489,13 @@ lag, fling, easing) stay as frame-trace tests like
 3. ~~Keyboard/shortcut routing~~ ✅ ~~menus, popups/context menus, tooltips, z-order~~ ✅ `Layer`, `popup`, `menu_button`, `context_menu`, `tooltip`; next: checkable/icon menu items, keyboard navigation within a menu, "safe triangle" submenu tracking.
 4. ~~Docking + tabs + splitters~~ ✅ Unity-style with OS-window tear-off; ~~layout save/load~~ ✅ `dock.layout()` / `dock.restore()`, versioned and repairing; ~~a splitter outside the dock~~ ✅ `Ui::splitter`; next: tab close/context menu, maximize pane.
 5. ~~Paths~~ ✅ `p.line` / `polyline` / `bezier` / `wire`, a `Line` primitive at `CONTRACT_VERSION` 2;
-   next: rotated images and glyphs (an angle in the `Image` kind's free `params` slot, so the
-   96-byte stride holds — spinners, rotary knobs, vertical axis labels), stroked/filled
-   arbitrary paths, dashes, arrowheads, and a real line/area plot (`plot` is still a debug bar
-   chart).
+   ~~filled shapes and icons~~ ✅ `p.fill_path`, rasterised into the glyph atlas, so no
+   backend changes; ~~images with real alpha~~ ✅ `ImageAlpha` at `CONTRACT_VERSION` 3; next:
+   rotated images and glyphs (an angle in the `Image` kind's last free slot, `params[2]` —
+   `params[1]` is now the alpha mode — so the 96-byte stride holds: spinners, rotary knobs,
+   vertical axis labels), a triangle primitive for fills that change every frame (chart areas,
+   sketch regions), dashes, arrowheads, and a real line/area plot (`plot` is still a debug
+   bar chart).
 6. ~~Horizontal and 2D scrolling~~ ✅ ~~general drag and drop~~ ✅ ~~tables/data grids with
    resizable and frozen columns~~ ✅ `ScrollOptions::both`, `drag_source` / `drop_zone` / `Payload`
    with a host seam for OS drags, `ui.table` with `TableState`; next: column reordering by drag,

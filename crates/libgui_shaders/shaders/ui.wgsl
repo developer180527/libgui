@@ -107,6 +107,23 @@ fn premul(c: vec4<f32>) -> vec4<f32> {
     return vec4(c.rgb * c.a, c.a);
 }
 
+// sample_bilinear for a straight-alpha texture: each texel is premultiplied
+// BEFORE it is interpolated. Doing it after lets the colour of transparent
+// texels -- usually black -- bleed into every edge, which is the dark halo a
+// hand-rolled icon renderer gets on its first try.
+fn sample_bilinear_premul(uv: vec2<f32>) -> vec4<f32> {
+    let dim = vec2<i32>(textureDimensions(tex, 0));
+    let p = uv * vec2<f32>(dim) - 0.5;
+    let f = fract(p);
+    let i = vec2<i32>(floor(p));
+    let hi = dim - vec2(1);
+    let a = premul(textureLoad(tex, clamp(i, vec2(0), hi), 0));
+    let b = premul(textureLoad(tex, clamp(i + vec2(1, 0), vec2(0), hi), 0));
+    let c = premul(textureLoad(tex, clamp(i + vec2(0, 1), vec2(0), hi), 0));
+    let d = premul(textureLoad(tex, clamp(i + vec2(1, 1), vec2(0), hi), 0));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
 @fragment
 fn fs_main(v: VOut) -> @location(0) vec4<f32> {
     if (v.world.x < v.clip.x || v.world.y < v.clip.y || v.world.x > v.clip.z || v.world.y > v.clip.w) {
@@ -130,8 +147,22 @@ fn fs_main(v: VOut) -> @location(0) vec4<f32> {
         // multiply the colour as well as the coverage, or a faded viewport
         // (a dimmed scene behind a modal, a cross-fade between renderers)
         // comes out at full brightness and blends brighter than white.
-        // The *texture's* own alpha is still ignored — it composites opaque.
-        return premul(vec4(sample_bilinear(v.uv).rgb * v.color.rgb, v.color.a)) * m;
+        //
+        // params.y is the ImageAlpha: 0 ignores the texture's alpha (a 3D
+        // view whose alpha means nothing), 1 reads it as premultiplied, 2 as
+        // straight -- premultiplied per texel before filtering.
+        let mode = u32(round(v.params.y));
+        if (mode == 0u) {
+            return premul(vec4(sample_bilinear(v.uv).rgb * v.color.rgb, v.color.a)) * m;
+        }
+        var s: vec4<f32>;
+        if (mode == 2u) {
+            s = sample_bilinear_premul(v.uv);
+        } else {
+            s = sample_bilinear(v.uv);
+        }
+        // Both premultiplied now: the tint multiplies colour and alpha alike.
+        return vec4(s.rgb * v.color.rgb * v.color.a, s.a * v.color.a) * m;
     }
     if (kind == KIND_GLYPH) {
         return premul(v.color) * sample_bilinear(v.uv).r;

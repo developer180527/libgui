@@ -1631,3 +1631,148 @@ fn a_validator_cannot_end_begin_share_or_free_the_frame_it_runs_in() {
         }
     }
 }
+
+/// An icon's alpha has to be able to count. The mode reaches the instance —
+/// `params[1]` of an image, which is what every backend reads — and an
+/// unknown value is opaque, the one reading that never makes part of an
+/// image disappear.
+#[test]
+fn an_image_draw_says_how_to_read_its_alpha() {
+    unsafe extern "C" fn paint(p: *mut LibguiPainter, r: LibguiRect, _user: *mut c_void) {
+        let white = LibguiColor { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
+        for mode in [0u32, 1, 2, 99] {
+            unsafe { libgui_painter_image_alpha(p, r, 5, 0.0, 0.0, 1.0, 1.0, 0.0, white, mode) };
+        }
+    }
+    unsafe {
+        let u = ui();
+        let layout = LibguiLayout {
+            axis: 1,
+            _pad: [0; 3],
+            width: LibguiSize { kind: LibguiSizeKind::Fixed, value: 32.0 },
+            height: LibguiSize { kind: LibguiSizeKind::Fixed, value: 32.0 },
+            pad_left: 0.0,
+            pad_right: 0.0,
+            pad_top: 0.0,
+            pad_bottom: 0.0,
+            gap: 0.0,
+            align_main: 0,
+            align_cross: 0,
+            _pad2: [0; 2],
+        };
+        frame(u, || {
+            libgui_add_leaf(
+                u,
+                libgui_id_from_name(c("icons").as_ptr()),
+                layout,
+                0,
+                LibguiPaintFn { paint: Some(paint), drop_user: None, user: std::ptr::null_mut() },
+            );
+        });
+        let mut n = 0u64;
+        let p = libgui_frame_instances(u, &mut n) as *const libgui::Instance;
+        let images: Vec<f32> = std::slice::from_raw_parts(p, n as usize)
+            .iter()
+            .filter(|i| i.params[3] == libgui::render_contract::PrimitiveKind::Image.code())
+            .map(|i| i.params[1])
+            .collect();
+        assert_eq!(images, vec![0.0, 1.0, 2.0, 0.0], "the alpha modes did not reach the instances");
+        libgui_ui_free(u);
+    }
+}
+
+/// An icon from C is the same icon as from Rust: the verbs and points become
+/// the same outline, rasterised into the same atlas slot and drawn as the
+/// same glyph instance. And a malformed path draws nothing at all rather than
+/// part of a shape.
+#[test]
+fn a_path_filled_from_c_is_the_path_filled_from_rust() {
+    // A play triangle and a curved notch: every verb kind.
+    const VERBS: [u8; 7] = [0, 1, 1, 4, 0, 2, 3];
+    // MOVE 1 + LINE 1 + LINE 1 + MOVE 1 + QUAD 2 + CUBIC 3 = 9 points.
+    const POINTS: [f32; 18] = [6.0, 4.0, 20.0, 12.0, 6.0, 20.0, 2.0, 2.0, 4.0, 1.0, 6.0, 2.0, 5.0, 4.0, 3.0, 4.0, 2.0, 2.0];
+    static MALFORMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    unsafe extern "C" fn paint(p: *mut LibguiPainter, r: LibguiRect, _user: *mut c_void) {
+        let white = LibguiColor { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
+        let n_points = if MALFORMED.load(std::sync::atomic::Ordering::Relaxed) { 5 } else { 9 };
+        unsafe { libgui_painter_fill_path(p, r, 24.0, 24.0, VERBS.as_ptr(), 7, POINTS.as_ptr(), n_points, 1, white) };
+    }
+
+    let layout = LibguiLayout {
+        axis: 1,
+        _pad: [0; 3],
+        width: LibguiSize { kind: LibguiSizeKind::Fixed, value: 48.0 },
+        height: LibguiSize { kind: LibguiSizeKind::Fixed, value: 48.0 },
+        pad_left: 0.0,
+        pad_right: 0.0,
+        pad_top: 0.0,
+        pad_bottom: 0.0,
+        gap: 0.0,
+        align_main: 0,
+        align_cross: 0,
+        _pad2: [0; 2],
+    };
+    let draw_c = |malformed: bool| unsafe {
+        MALFORMED.store(malformed, std::sync::atomic::Ordering::Relaxed);
+        let u = ui();
+        for _ in 0..2 {
+            libgui_begin_frame(u, 200.0, 200.0, 1.5, 1.0 / 60.0);
+            libgui_add_leaf(
+                u,
+                libgui_id_from_name(c("icon").as_ptr()),
+                layout,
+                0,
+                LibguiPaintFn { paint: Some(paint), drop_user: None, user: std::ptr::null_mut() },
+            );
+            libgui_end_frame(u);
+        }
+        // Null when nothing has gone wrong, which is the case worth handling.
+        let e = libgui_last_error();
+        let err = if e.is_null() { String::new() } else { std::ffi::CStr::from_ptr(e).to_string_lossy().into_owned() };
+        let mut n = 0u64;
+        let p = libgui_frame_instances(u, &mut n) as *const u8;
+        let bytes = std::slice::from_raw_parts(p, n as usize * libgui_instance_stride() as usize).to_vec();
+        libgui_ui_free(u);
+        (bytes, err)
+    };
+
+    let from_rust = {
+        let path = libgui::Path::new(24.0, 24.0)
+            .move_to(libgui::Vec2::new(6.0, 4.0))
+            .line_to(libgui::Vec2::new(20.0, 12.0))
+            .line_to(libgui::Vec2::new(6.0, 20.0))
+            .close()
+            .move_to(libgui::Vec2::new(2.0, 2.0))
+            .quad_to(libgui::Vec2::new(4.0, 1.0), libgui::Vec2::new(6.0, 2.0))
+            .cubic_to(libgui::Vec2::new(5.0, 4.0), libgui::Vec2::new(3.0, 4.0), libgui::Vec2::new(2.0, 2.0))
+            .fill_rule(libgui::FillRule::EvenOdd);
+        let mut ui = libgui::Ui::new(libgui::Theme::dark(), FONT).expect("font");
+        let info = libgui::FrameInfo { screen_size: libgui::Vec2::new(200.0, 200.0), scale: 1.5, dt: 1.0 / 60.0 };
+        let mut bytes = Vec::new();
+        for _ in 0..2 {
+            ui.begin_frame(info);
+            let p = path.clone();
+            ui.add_leaf(
+                libgui::Id::from_name("icon"),
+                libgui::Layout::leaf(libgui::Size::Fixed(48.0), libgui::Size::Fixed(48.0)),
+                libgui::Vec2::ZERO,
+                false,
+                move |pt, r| pt.fill_path(&p, r, libgui::Color::WHITE),
+            );
+            let out = ui.end_frame();
+            let inst = out.draw.instances.as_slice();
+            bytes = unsafe { std::slice::from_raw_parts(inst.as_ptr() as *const u8, std::mem::size_of_val(inst)) }.to_vec();
+        }
+        bytes
+    };
+
+    let (from_c, _) = draw_c(false);
+    assert!(!from_c.is_empty(), "the path drew nothing");
+    assert_eq!(from_c, from_rust, "the outline from C is not the one from Rust");
+
+    // Five points where nine are needed: refused whole, and said so.
+    let (broken, err) = draw_c(true);
+    assert!(broken.is_empty(), "a malformed path drew part of a shape");
+    assert!(err.contains("fill_path"), "a malformed path was refused silently: {err:?}");
+}

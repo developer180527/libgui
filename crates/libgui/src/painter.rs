@@ -51,6 +51,59 @@ impl<'a> Painter<'a> {
         self.draw.image_uv(r, tex, uv, radius, tint);
     }
 
+    /// An image whose own alpha counts: an icon, a decal, anything that is
+    /// not a rectangle all the way to its edges. `tint` multiplies it, so one
+    /// white icon serves every state.
+    ///
+    /// For a PNG as loaded, [`ImageAlpha::Straight`](crate::ImageAlpha::Straight).
+    /// If your renderer filters in hardware, premultiply on upload and pass
+    /// [`ImageAlpha::Premultiplied`](crate::ImageAlpha::Premultiplied)
+    /// instead, or every edge gets a dark halo — see `ImageAlpha`.
+    pub fn image_with_alpha(
+        &mut self,
+        r: Rect,
+        tex: TextureId,
+        uv: [f32; 4],
+        radius: f32,
+        tint: Color,
+        alpha: crate::ImageAlpha,
+    ) {
+        self.draw.image_alpha(r, tex, uv, radius, tint, alpha);
+    }
+
+    /// Fill `path`, scaled from its view box into `r`, in `color`.
+    ///
+    /// For icons and other static vector art. The outline is rasterised on
+    /// the CPU at the size it is shown — through any canvas zoom — into an
+    /// 8-bit coverage mask in the glyph atlas, and drawn the way text is: so
+    /// it is anti-aliased by exact area, tinted by `color`, crisp at every
+    /// DPI, rasterised **once** per size and reused every frame after, and
+    /// needs nothing from a backend beyond what text already needs.
+    ///
+    /// A shape that changes every frame misses that cache every frame; it
+    /// still draws, but it is not what this is for.
+    ///
+    /// The rect is snapped to the pixel grid, which is what lets one
+    /// rasterisation serve every frame: a path at a fractional position would
+    /// be a different raster each time it moved by a fraction.
+    pub fn fill_path(&mut self, path: &crate::Path, r: Rect, color: Color) {
+        if path.is_empty() || color.a <= 0.0 {
+            return;
+        }
+        // The size it is actually shown at: through the canvas transform, then
+        // to physical pixels.
+        let t = self.draw.xform();
+        let (window, w, h) = crate::path::pixel_box(t.rect(r), self.scale);
+        if w == 0 || h == 0 {
+            return;
+        }
+        let key = path.key(w, h);
+        let Some(uv) = self.fonts.coverage_mask(key, w, h, |buf| path.rasterize(w, h, buf)) else { return };
+        // Back into the coordinates the draw list expects; it applies the
+        // transform itself.
+        self.draw.glyph(t.inv_rect(window), uv, color);
+    }
+
     /// Straight line with round caps.
     pub fn line(&mut self, a: Vec2, b: Vec2, width: f32, color: Color) {
         self.draw.line(a, b, width, color);

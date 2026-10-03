@@ -35,13 +35,65 @@
 //!   samples it. Recording both into one command buffer gives that ordering;
 //!   across queues or devices it is the host's to arrange.
 //! - The glyph atlas is [`ATLAS_FORMAT`] coverage; user textures
-//!   (`TextureId::User`) are [`USER_TEXTURE_FORMAT`] and composite as opaque RGB.
+//!   (`TextureId::User`) are [`USER_TEXTURE_FORMAT`], and how their alpha is
+//!   read is the draw's [`ImageAlpha`], carried in `params[1]` of an
+//!   [`PrimitiveKind::Image`] instance. The default, opaque, ignores it.
 //! - Textures are read with texel loads and filtered in the shader: no sampler.
 
 use crate::Instance;
 
 /// Bumped whenever anything in this module changes meaning.
-pub const CONTRACT_VERSION: u32 = 2;
+///
+/// 3: an image's `params[1]` is its [`ImageAlpha`]. Zero is what it always
+/// was, so a version-2 backend still draws every image — opaque.
+pub const CONTRACT_VERSION: u32 = 3;
+
+/// How an image draw reads its texture's alpha, stored in `params[1]` of a
+/// [`PrimitiveKind::Image`] instance.
+///
+/// Opaque is the default because the commonest image is a 3D view, and engine
+/// render targets often leave junk in alpha: honouring it would punch holes in
+/// the scene. An icon needs the opposite, so it is the draw's choice rather
+/// than the library's.
+///
+/// **Where the premultiply happens is the whole difference between a clean
+/// edge and a dark halo.** A straight-alpha texture's transparent texels are
+/// usually black; filter first and premultiply after, and that black bleeds
+/// into every edge. Premultiplying each texel *before* filtering is correct.
+/// libgui's shader filters by hand and does that for [`ImageAlpha::Straight`].
+/// A backend that filters in hardware cannot, so it must premultiply on upload
+/// and draw with [`ImageAlpha::Premultiplied`].
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum ImageAlpha {
+    /// Alpha ignored; the texture covers its rect. 3D views, video, render
+    /// targets whose alpha means nothing.
+    #[default]
+    Opaque = 0,
+    /// Colour already multiplied by alpha. GPU render targets with real
+    /// alpha, and icons premultiplied on upload.
+    Premultiplied = 1,
+    /// Ordinary straight alpha, as a PNG stores it. Premultiplied per texel
+    /// before filtering, so edges stay clean.
+    Straight = 2,
+}
+
+impl ImageAlpha {
+    /// Value stored in `Instance::params[1]`.
+    pub const fn code(self) -> f32 {
+        self as u32 as f32
+    }
+
+    /// Decode `Instance::params[1]`. Anything unrecognised is opaque, which is
+    /// the one reading that never makes part of an image disappear.
+    pub fn from_code(c: f32) -> ImageAlpha {
+        match c.round() as i64 {
+            1 => ImageAlpha::Premultiplied,
+            2 => ImageAlpha::Straight,
+            _ => ImageAlpha::Opaque,
+        }
+    }
+}
 
 /// What an instance draws, stored in `Instance::params[3]` as a float code.
 #[repr(u32)]
@@ -214,7 +266,7 @@ mod tests {
         assert_eq!(INSTANCE_STRIDE, 96);
         assert_eq!(INSTANCE_ATTRIBUTES.len(), 6);
         assert_eq!(std::mem::size_of::<Instance>(), INSTANCE_STRIDE);
-        assert_eq!(CONTRACT_VERSION, 2, "bump this when the contract changes meaning");
+        assert_eq!(CONTRACT_VERSION, 3, "bump this when the contract changes meaning");
     }
 
     #[test]

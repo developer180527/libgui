@@ -527,6 +527,36 @@ ui.add_leaf(id, Layout::leaf(Size::Grow(1.0), Size::Fixed(40.0)), Vec2::ZERO, tr
 The closure runs **after layout**, so `r` is the final rect. Anything it
 captures must be `'static` — resolve strings with `ui.frame_text` first.
 
+**Icons** come two ways.
+
+*Drawn*, with `p.fill_path(&path, r, colour)`. A `Path` is an outline in its
+own box — 24 x 24 for a typical icon set — of lines and curves, with holes by
+`FillRule::NonZero` (wind the hole the other way) or `EvenOdd` (any contour
+inside another). It is rasterised on the CPU at the size it is shown, through
+any canvas zoom, into the glyph atlas, and drawn the way text is: exact
+anti-aliasing, tinted by the colour so one icon serves every state, crisp at
+every DPI, rasterised **once** per size and free every frame after (pinned:
+forty cached icons allocate nothing), and shared between windows that share
+fonts. A backend draws it with no changes. Keep the `Path` — in an `Rc`, or
+`reset` and rebuild it — rather than allocating one per frame.
+
+```rust
+let play = Rc::new(Path::new(24.0, 24.0)
+    .move_to(Vec2::new(6.0, 4.0)).line_to(Vec2::new(20.0, 12.0))
+    .line_to(Vec2::new(6.0, 20.0)).close());
+let icon = play.clone();
+ui.add_leaf(id, Layout::leaf(Size::Fixed(16.0), Size::Fixed(16.0)), Vec2::ZERO, true,
+    move |p, r| p.fill_path(&icon, r, ink));
+```
+
+*Loaded*, as a texture of your own, with `p.image_with_alpha`. Images ignore
+their alpha by default, because the commonest image is a 3D view whose alpha
+means nothing; an icon passes `ImageAlpha::Straight` for a PNG as loaded, or
+`ImageAlpha::Premultiplied` if it was premultiplied on upload. **If your
+renderer filters in hardware, premultiply on upload** — straight alpha
+filtered first and multiplied after lets the transparent texels' colour bleed
+in, and every edge gets a dark halo.
+
 ---
 
 ## 6. Identity, state and keys
@@ -1208,8 +1238,11 @@ puts it in the order the gaps are worth closing.
 
 ### Drawing
 
-- No rotated images or glyphs.
-- No stroked/filled arbitrary paths, dashes or arrowheads.
+- No rotated images or glyphs. (A drawn icon can be rotated: transform its
+  points before building the `Path`.)
+- Filled paths are cached per size, so a shape that changes every frame is
+  rasterised every frame; there is no GPU triangle primitive for that yet. No
+  dashes or arrowheads.
 - The glyph atlas is one page. It grows to `set_atlas_limit` (4096 default);
   past that it resets, with a one-frame flicker. Multi-page with LRU eviction
   is the real answer and is not done.

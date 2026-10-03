@@ -144,3 +144,22 @@ fn the_manuals_testing_example_works() {
     let out = ui.end_frame();
     assert!(!out.draw.instances.is_empty());
 }
+
+/// §5.8: a drawn icon, kept by the app and filled each frame; and a loaded
+/// one with its alpha counted.
+#[allow(dead_code)]
+fn icons(ui: &mut Ui, id: Id, ink: Color, tex: TextureId) {
+    use std::rc::Rc;
+    let play = Rc::new(
+        Path::new(24.0, 24.0)
+            .move_to(Vec2::new(6.0, 4.0))
+            .line_to(Vec2::new(20.0, 12.0))
+            .line_to(Vec2::new(6.0, 20.0))
+            .close(),
+    );
+    let icon = play.clone();
+    ui.add_leaf(id, Layout::leaf(Size::Fixed(16.0), Size::Fixed(16.0)), Vec2::ZERO, true, move |p, r| p.fill_path(&icon, r, ink));
+    ui.add_leaf(id.with("png"), Layout::leaf(Size::Fixed(16.0), Size::Fixed(16.0)), Vec2::ZERO, true, move |p, r| {
+        p.image_with_alpha(r, tex, [0.0, 0.0, 1.0, 1.0], 0.0, Color::WHITE, ImageAlpha::Straight)
+    });
+}

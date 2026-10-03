@@ -328,3 +328,118 @@ fn swapping_the_v_coordinates_turns_an_image_over() {
     assert!(!redish(flipped.at(0.5, 0.25)), "swapping v did not turn it over: {:?}", flipped.at(0.5, 0.25));
     assert!(redish(flipped.at(0.5, 0.75)), "swapping v did not turn it over");
 }
+
+// ---------------------------------------------------------------------------
+// Image alpha
+// ---------------------------------------------------------------------------
+
+/// Draw `tex` scaled up into a 100 px square on a plain background, so every
+/// edge is filtered, and hand back the shot.
+fn icon_shot(texture: Texture, alpha: ImageAlpha, background: Color) -> Shot {
+    let mut soft = SoftRenderer::new();
+    let tex = soft.register_texture(texture);
+    run(&mut soft, 1.0, move |ui| {
+        let layout = Layout::column().width(Size::Grow(1.0)).height(Size::Grow(1.0)).padding(Insets::all(20.0));
+        ui.container(layout, Frame { fill: background, ..Frame::none() }, |ui| {
+            let id = Id::new("icon");
+            ui.add_leaf(id, Layout::leaf(Size::Fixed(100.0), Size::Fixed(100.0)), Vec2::ZERO, false, move |p, r| {
+                p.image_with_alpha(r, tex, [0.0, 0.0, 1.0, 1.0], 0.0, Color::WHITE, alpha);
+            });
+            ui.rect_of(id).unwrap_or_default()
+        })
+    })
+}
+
+/// An 8x8 icon: an opaque square in the middle of a transparent field. The
+/// transparent texels carry `outside` as their colour, which is what decides
+/// whether a wrong filter shows: transparent *black* is what an image editor
+/// usually writes.
+fn square_icon(inside: [u8; 3], outside: [u8; 3], premultiplied: bool) -> Texture {
+    let (w, h) = (8u32, 8u32);
+    let mut data = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            let core = (2..6).contains(&x) && (2..6).contains(&y);
+            let (rgb, a) = if core { (inside, 255u8) } else { (outside, 0u8) };
+            let k = if premultiplied { a as u32 } else { 255 };
+            data.extend_from_slice(&[
+                (rgb[0] as u32 * k / 255) as u8,
+                (rgb[1] as u32 * k / 255) as u8,
+                (rgb[2] as u32 * k / 255) as u8,
+                a,
+            ]);
+        }
+    }
+    Texture { width: w, height: h, data }
+}
+
+/// The default reads no alpha at all: a 3D view's alpha usually means
+/// nothing, and honouring it would punch holes in the scene.
+#[test]
+fn an_opaque_image_ignores_its_alpha() {
+    let shot = icon_shot(square_icon([255, 0, 0], [0, 0, 255], false), ImageAlpha::Opaque, Color::WHITE);
+    // The corner is a transparent texel, drawn anyway: blue, not the white
+    // background behind it.
+    let corner = shot.at(0.05, 0.05);
+    assert!(corner[2] > 200 && corner[0] < 50, "opaque mode let the background through: {corner:?}");
+}
+
+/// Straight alpha lets the background through where the icon is transparent,
+/// and covers it where the icon is solid.
+#[test]
+fn a_straight_alpha_image_is_see_through_where_it_is_transparent() {
+    let shot = icon_shot(square_icon([255, 0, 0], [0, 0, 0], false), ImageAlpha::Straight, Color::WHITE);
+    let corner = shot.at(0.05, 0.05);
+    let middle = shot.at(0.5, 0.5);
+    assert!(corner.iter().take(3).all(|&c| c > 250), "the transparent corner is not the background: {corner:?}");
+    assert!(middle[0] > 250 && middle[1] < 5 && middle[2] < 5, "the solid middle is not the icon: {middle:?}");
+}
+
+/// The test that matters. A white icon on a white background, with the
+/// transparent texels around it black, as image editors usually write them:
+/// filtered correctly, every pixel is white. Premultiply after filtering
+/// instead and the black bleeds into every edge — the dark halo a
+/// hand-written icon renderer gets on its first try.
+#[test]
+fn a_straight_alpha_icon_has_no_dark_halo() {
+    let shot = icon_shot(square_icon([255, 255, 255], [0, 0, 0], false), ImageAlpha::Straight, Color::WHITE);
+    let mut darkest = 255u8;
+    for i in 0..=40 {
+        for j in 0..=40 {
+            let px = shot.at(i as f32 / 40.0, j as f32 / 40.0);
+            darkest = darkest.min(px[0]).min(px[1]).min(px[2]);
+        }
+    }
+    assert!(darkest >= 254, "a white icon on white has a dark edge: darkest channel {darkest}");
+}
+
+/// A texture premultiplied on upload, drawn as premultiplied, is the same
+/// picture as the straight original drawn as straight. That is the path a
+/// renderer that filters in hardware has to take, so it has to agree.
+#[test]
+fn premultiplied_on_upload_draws_what_straight_draws() {
+    let straight = icon_shot(square_icon([40, 160, 220], [0, 0, 0], false), ImageAlpha::Straight, Color::hex(0x202020));
+    let premul = icon_shot(square_icon([40, 160, 220], [0, 0, 0], true), ImageAlpha::Premultiplied, Color::hex(0x202020));
+    let worst = straight.img.data.iter().zip(&premul.img.data).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0);
+    assert!(worst <= 1, "premultiplying on upload changed the picture by {worst} levels");
+}
+
+/// The tint multiplies an icon's alpha as well as its colour, so one white
+/// icon can be faded for a disabled state.
+#[test]
+fn a_tint_fades_an_icon_without_brightening_it() {
+    let mut soft = SoftRenderer::new();
+    let tex = soft.register_texture(square_icon([255, 255, 255], [0, 0, 0], false));
+    let shot = run(&mut soft, 1.0, move |ui| {
+        let layout = Layout::column().width(Size::Grow(1.0)).height(Size::Grow(1.0)).padding(Insets::all(20.0));
+        ui.container(layout, Frame { fill: Color::BLACK, ..Frame::none() }, |ui| {
+            let id = Id::new("icon");
+            ui.add_leaf(id, Layout::leaf(Size::Fixed(100.0), Size::Fixed(100.0)), Vec2::ZERO, false, move |p, r| {
+                p.image_with_alpha(r, tex, [0.0, 0.0, 1.0, 1.0], 0.0, Color::WHITE.with_alpha(0.5), ImageAlpha::Straight);
+            });
+            ui.rect_of(id).unwrap_or_default()
+        })
+    });
+    let middle = shot.at(0.5, 0.5);
+    assert!((120..=135).contains(&middle[0]), "half-faded white on black is not mid-grey: {middle:?}");
+}

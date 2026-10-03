@@ -38,7 +38,18 @@ fn gpu() -> Option<Gpu> {
 
 /// Render one frame through `libgui_wgpu` into an offscreen RGBA8 target and
 /// read it back, rows tightly packed.
-fn render_gpu(g: &Gpu, out: &libgui::FrameOutput, (w, h): (u32, u32)) -> Vec<u8> {
+fn render_gpu(g: &Gpu, out: &libgui::FrameOutput, size: (u32, u32)) -> Vec<u8> {
+    render_gpu_with(g, out, size, &[])
+}
+
+/// [`render_gpu`] with user textures registered first, under the ids the
+/// frame refers to them by.
+fn render_gpu_with(
+    g: &Gpu,
+    out: &libgui::FrameOutput,
+    (w, h): (u32, u32),
+    textures: &[(libgui::TextureId, &libgui_soft::Texture)],
+) -> Vec<u8> {
     let format = wgpu::TextureFormat::Rgba8Unorm;
     let target = g.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("parity target"),
@@ -52,6 +63,29 @@ fn render_gpu(g: &Gpu, out: &libgui::FrameOutput, (w, h): (u32, u32)) -> Vec<u8>
     });
     let view = target.create_view(&Default::default());
     let mut renderer = libgui_wgpu::Renderer::new(&g.device, &g.queue, format);
+    // Kept alive until the frame is drawn: the renderer holds only a view.
+    let mut keep = Vec::new();
+    for &(id, t) in textures {
+        let size = wgpu::Extent3d { width: t.width, height: t.height, depth_or_array_layers: 1 };
+        let tex = g.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("parity user texture"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        g.queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: &tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            &t.data,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(t.width * 4), rows_per_image: Some(t.height) },
+            size,
+        );
+        renderer.update_texture(id, &tex.create_view(&Default::default()));
+        keep.push(tex);
+    }
     renderer.prepare(out);
 
     let row = (w * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
@@ -146,4 +180,75 @@ fn the_cpu_renderer_matches_the_gpu() {
     }
     eprintln!("{}", report.join("\n"));
     assert!(failures.is_empty(), "the CPU renderer disagrees with the GPU:\n{}", failures.join("\n"));
+}
+
+
+/// The image alpha modes, through the real shader, against the CPU reference.
+///
+/// The CPU side has its own tests for what each mode means; this is what
+/// says the shader agrees, including the per-texel premultiply that keeps a
+/// straight-alpha icon's edges clean. Every edge is filtered: an 8x8 texture
+/// drawn into 100 px.
+#[test]
+fn the_image_alpha_modes_match_the_gpu() {
+    let Some(g) = gpu() else {
+        eprintln!("parity: no GPU adapter, skipped");
+        return;
+    };
+    // A coloured square on a transparent field whose texels are black: what
+    // decides whether the filter order is right.
+    let icon = {
+        let mut data = Vec::new();
+        for y in 0..8u32 {
+            for x in 0..8u32 {
+                let core = (2..6).contains(&x) && (2..6).contains(&y);
+                data.extend_from_slice(if core { &[40, 160, 220, 255] } else { &[0, 0, 0, 0] });
+            }
+        }
+        libgui_soft::Texture { width: 8, height: 8, data }
+    };
+
+    for alpha in [libgui::ImageAlpha::Opaque, libgui::ImageAlpha::Premultiplied, libgui::ImageAlpha::Straight] {
+        for scale in [1.0f32, 1.5] {
+            let mut soft = SoftRenderer::new();
+            let id = soft.register_texture(icon.clone());
+            let mut ui = libgui::Ui::new(libgui::Theme::light(), SCENE_FONT).expect("font");
+            let size = libgui::Vec2::new(160.0, 160.0);
+            let info = libgui::FrameInfo { screen_size: size, scale, dt: 1.0 };
+            let build = |ui: &mut libgui::Ui| {
+                ui.begin_frame(info);
+                ui.add_leaf(
+                    libgui::Id::new("icon"),
+                    libgui::Layout::leaf(libgui::Size::Fixed(100.0), libgui::Size::Fixed(100.0)),
+                    libgui::Vec2::ZERO,
+                    false,
+                    move |p, r| {
+                        // Faded, so the tint's alpha is part of what is compared.
+                        let tint = libgui::Color::WHITE.with_alpha(0.75);
+                        p.image_with_alpha(r, id, [0.0, 0.0, 1.0, 1.0], 6.0, tint, alpha);
+                    },
+                );
+            };
+            build(&mut ui);
+            drop(ui.end_frame());
+            build(&mut ui);
+            let out = ui.end_frame();
+            let px = ((size.x * scale) as u32, (size.y * scale) as u32);
+            let cpu = soft.render_to_image(&out, px.0, px.1).data;
+            let gpu_px = render_gpu_with(&g, &out, px, &[(id, &icon)]);
+
+            let total = (px.0 * px.1) as usize;
+            let (cpu_px, _) = cpu.as_chunks::<4>();
+            let (gpu_chunks, _) = gpu_px.as_chunks::<4>();
+            let disagree = cpu_px
+                .iter()
+                .zip(gpu_chunks)
+                .filter(|(a, b)| a.iter().zip(b.iter()).any(|(x, y)| x.abs_diff(*y) > CLOSE))
+                .count();
+            assert!(
+                (disagree as f64) <= total as f64 * MAX_DISAGREE,
+                "{alpha:?}@{scale}x: {disagree} of {total} pixels differ between the shader and the CPU reference"
+            );
+        }
+    }
 }

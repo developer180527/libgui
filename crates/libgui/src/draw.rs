@@ -402,6 +402,19 @@ impl DrawList {
     /// `[u0, v0, u1, v1]` in 0..1, with v increasing downwards — a frame from a
     /// thumbnail sheet, one icon from an atlas, a tile from a sprite page.
     pub fn image_uv(&mut self, r: Rect, texture: TextureId, uv: [f32; 4], radius: f32, tint: Color) {
+        self.image_alpha(r, texture, uv, radius, tint, crate::render_contract::ImageAlpha::Opaque);
+    }
+
+    /// [`DrawList::image_uv`] with the texture's alpha read as `alpha` says.
+    pub fn image_alpha(
+        &mut self,
+        r: Rect,
+        texture: TextureId,
+        uv: [f32; 4],
+        radius: f32,
+        tint: Color,
+        alpha: crate::render_contract::ImageAlpha,
+    ) {
         let t = self.xform();
         let (r, radius) = (t.rect(r), radius * t.zoom);
         self.push(
@@ -413,7 +426,7 @@ impl DrawList {
                 color: tint.to_array(),
                 border_color: [0.0; 4],
                 clip: [0.0; 4],
-                params: [radius, 0.0, 0.0, KIND_IMAGE],
+                params: [radius, alpha.code(), 0.0, KIND_IMAGE],
             },
         );
     }

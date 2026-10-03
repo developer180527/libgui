@@ -374,6 +374,161 @@ pub unsafe extern "C" fn libgui_painter_image_uv(
     }
 }
 
+/// One of your own textures, with its alpha counted: an icon, a decal,
+/// anything that is not a rectangle all the way to its edges.
+///
+/// `alpha` is `LIBGUI_IMAGE_OPAQUE` (0, alpha ignored, as for a 3D view),
+/// `LIBGUI_IMAGE_PREMULTIPLIED` (1) or `LIBGUI_IMAGE_STRAIGHT` (2, as a PNG is
+/// loaded). Anything else is opaque. `tint` multiplies colour and alpha, so one
+/// white icon serves every state.
+///
+/// If your renderer filters in hardware, premultiply on upload and pass
+/// PREMULTIPLIED: straight alpha filtered in hardware gives every edge a dark
+/// halo, because the transparent texels' colour bleeds in before it is
+/// multiplied away.
+///
+/// # Safety
+/// `p` must be null or the painter handed to a paint callback.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn libgui_painter_image_alpha(
+    p: *mut LibguiPainter,
+    r: LibguiRect,
+    texture: u64,
+    u0: f32,
+    v0: f32,
+    u1: f32,
+    v1: f32,
+    radius: f32,
+    tint: LibguiColor,
+    alpha: u32,
+) {
+    let mode = match alpha {
+        1 => libgui::ImageAlpha::Premultiplied,
+        2 => libgui::ImageAlpha::Straight,
+        _ => libgui::ImageAlpha::Opaque,
+    };
+    if let Some(p) = painter(p) {
+        let tex = libgui::TextureId::User(texture);
+        p.image_with_alpha(Rect::new(r.x, r.y, r.w, r.h), tex, [u0, v0, u1, v1], radius, color(tint), mode);
+    }
+}
+
+/// Fill an outline: an icon drawn rather than loaded.
+///
+/// The outline is in its own coordinates, from `(0, 0)` to
+/// `(view_w, view_h)` — a 24 x 24 box for a typical icon set — and is scaled
+/// into `r`. It is described as `verbs`, one byte each, consuming points from
+/// `points` (x, y pairs) in order:
+///
+/// | verb | `LIBGUI_PATH_*` | points |
+/// |---|---|---|
+/// | 0 | `MOVE`  | 1: start a contour |
+/// | 1 | `LINE`  | 1 |
+/// | 2 | `QUAD`  | 2: control, end |
+/// | 3 | `CUBIC` | 3: control, control, end |
+/// | 4 | `CLOSE` | 0 |
+///
+/// `fill_rule` is `LIBGUI_FILL_NONZERO` (0) or `LIBGUI_FILL_EVENODD` (1).
+///
+/// Rasterised once per size into the glyph atlas and drawn as text is: exact
+/// anti-aliasing, tinted by `c`, crisp at every DPI and zoom, and nothing new
+/// for your renderer to support. A malformed path — a verb wanting more points
+/// than remain, an unknown verb — draws nothing and says why in
+/// `libgui_last_error`, rather than drawing part of a shape.
+///
+/// # Safety
+/// `p` must be null or the painter handed to a paint callback; `verbs` must
+/// point to `verb_count` bytes and `points` to `point_count * 2` floats.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn libgui_painter_fill_path(
+    p: *mut LibguiPainter,
+    r: LibguiRect,
+    view_w: f32,
+    view_h: f32,
+    verbs: *const u8,
+    verb_count: u64,
+    points: *const f32,
+    point_count: u64,
+    fill_rule: u32,
+    c: LibguiColor,
+) {
+    let Some(painter) = painter(p) else { return };
+    if verbs.is_null() || verb_count == 0 {
+        return;
+    }
+    let verbs = unsafe { std::slice::from_raw_parts(verbs, verb_count as usize) };
+    let pts: &[f32] =
+        if points.is_null() { &[] } else { unsafe { std::slice::from_raw_parts(points, point_count as usize * 2) } };
+
+    PATH.with(|cell| {
+        let mut path = std::mem::replace(&mut *cell.borrow_mut(), libgui::Path::new(0.0, 0.0));
+        path.reset(view_w, view_h);
+        let mut at = 0usize;
+        // The next point, or `None` when the array has run out.
+        let mut next = || -> Option<Vec2> {
+            let v = pts.get(at * 2..at * 2 + 2)?;
+            at += 1;
+            Some(Vec2::new(v[0], v[1]))
+        };
+        let mut ok = true;
+        for &verb in verbs {
+            // Gather the verb's points first, so a short array refuses the
+            // whole path rather than drawing the part before it.
+            let applied = match verb {
+                0 => next().map(|a| path_take(&mut path, |q| q.move_to(a))).is_some(),
+                1 => next().map(|a| path_take(&mut path, |q| q.line_to(a))).is_some(),
+                2 => match (next(), next()) {
+                    (Some(c1), Some(e)) => {
+                        path_take(&mut path, |q| q.quad_to(c1, e));
+                        true
+                    }
+                    _ => false,
+                },
+                3 => match (next(), next(), next()) {
+                    (Some(c1), Some(c2), Some(e)) => {
+                        path_take(&mut path, |q| q.cubic_to(c1, c2, e));
+                        true
+                    }
+                    _ => false,
+                },
+                4 => {
+                    path_take(&mut path, |q| q.close());
+                    true
+                }
+                _ => false,
+            };
+            if !applied {
+                ok = false;
+                break;
+            }
+        }
+        if ok {
+            let rule = if fill_rule == 1 { libgui::FillRule::EvenOdd } else { libgui::FillRule::NonZero };
+            path_take(&mut path, |q| q.fill_rule(rule));
+            painter.fill_path(&path, Rect::new(r.x, r.y, r.w, r.h), color(c));
+        } else {
+            crate::handle::set_error(
+                "libgui_painter_fill_path: a verb wanted more points than remained, or was not a LIBGUI_PATH_* value",
+            );
+        }
+        *cell.borrow_mut() = path;
+    });
+}
+
+thread_local! {
+    /// One path, rebuilt for every call: a C host has nowhere to keep one, and
+    /// reusing its storage is what keeps a frame of icons from allocating.
+    static PATH: std::cell::RefCell<libgui::Path> = std::cell::RefCell::new(libgui::Path::new(0.0, 0.0));
+}
+
+/// Apply a by-value builder step to a path held by `&mut`.
+fn path_take(path: &mut libgui::Path, f: impl FnOnce(libgui::Path) -> libgui::Path) {
+    let p = std::mem::replace(path, libgui::Path::new(0.0, 0.0));
+    *path = f(p);
+}
+
 /// Text at the left of `r`, vertically centred.
 ///
 /// # Safety

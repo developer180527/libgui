@@ -36,7 +36,7 @@ use std::collections::HashMap;
 use std::ops::Range;
 
 // This file is a port of the shader for one version of the contract.
-const _: () = assert!(CONTRACT_VERSION == 2, "the contract changed: update libgui_soft to match ui.wgsl");
+const _: () = assert!(CONTRACT_VERSION == 3, "the contract changed: update libgui_soft to match ui.wgsl");
 
 /// An RGBA8 image: what the UI is drawn into. Pixels are premultiplied, like
 /// a GPU framebuffer after the UI pass; with an opaque clear colour (the usual
@@ -66,7 +66,8 @@ impl Target {
 }
 
 /// A texture sampled by `TextureId::User`: RGBA8, sRGB-encoded values, as the
-/// render contract specifies. Its alpha is ignored.
+/// render contract specifies. Whether its alpha counts is the draw's
+/// [`libgui::ImageAlpha`]: ignored by default, as a 3D view wants.
 #[derive(Clone, Debug)]
 pub struct Texture {
     pub width: u32,
@@ -112,6 +113,28 @@ impl TexRef<'_> {
         let b = self.load(cx(ix + 1), cy(iy));
         let c = self.load(cx(ix), cy(iy + 1));
         let d = self.load(cx(ix + 1), cy(iy + 1));
+        let mut out = [0.0; 4];
+        for k in 0..4 {
+            out[k] = mix(mix(a[k], b[k], fx), mix(c[k], d[k], fx), fy);
+        }
+        out
+    }
+
+    /// `sample_bilinear_premul` in `ui.wgsl`: each texel premultiplied before
+    /// it is interpolated, so a straight-alpha texture's transparent texels
+    /// cannot bleed their colour into its edges.
+    fn sample_premul(&self, u: f32, v: f32) -> [f32; 4] {
+        let (w, h) = (self.width, self.height);
+        let px = u * w as f32 - 0.5;
+        let py = v * h as f32 - 0.5;
+        let (fx, fy) = (fract(px), fract(py));
+        let (ix, iy) = (px.floor() as i32, py.floor() as i32);
+        let cx = |x: i32| x.clamp(0, w - 1);
+        let cy = |y: i32| y.clamp(0, h - 1);
+        let a = premul(self.load(cx(ix), cy(iy)));
+        let b = premul(self.load(cx(ix + 1), cy(iy)));
+        let c = premul(self.load(cx(ix), cy(iy + 1)));
+        let d = premul(self.load(cx(ix + 1), cy(iy + 1)));
         let mut out = [0.0; 4];
         for k in 0..4 {
             out[k] = mix(mix(a[k], b[k], fx), mix(c[k], d[k], fx), fy);
@@ -353,12 +376,24 @@ fn fragment(kind: PrimitiveKind, v: &Varyings, aa: f32, tex: &TexRef) -> [f32; 4
             let r = p[0].min(half[0].min(half[1]));
             let d = sd_round_rect(local, half, r);
             let m = clamp01(0.5 - d / aa);
-            let s = tex.sample(v.uv[0], v.uv[1]);
             let c = v.color;
-            // Premultiplied: the tint's alpha multiplies the colour too. The
-            // texture's own alpha is ignored — a user texture composites as
-            // opaque RGB (render contract).
-            scale4(premul([s[0] * c[0], s[1] * c[1], s[2] * c[2], c[3]]), m)
+            match libgui::ImageAlpha::from_code(p[1]) {
+                // The texture's own alpha ignored: a 3D view whose alpha
+                // means nothing. The tint's alpha multiplies colour too.
+                libgui::ImageAlpha::Opaque => {
+                    let s = tex.sample(v.uv[0], v.uv[1]);
+                    scale4(premul([s[0] * c[0], s[1] * c[1], s[2] * c[2], c[3]]), m)
+                }
+                alpha => {
+                    let s = if alpha == libgui::ImageAlpha::Straight {
+                        tex.sample_premul(v.uv[0], v.uv[1])
+                    } else {
+                        tex.sample(v.uv[0], v.uv[1])
+                    };
+                    // Both premultiplied now: the tint multiplies alike.
+                    scale4([s[0] * c[0] * c[3], s[1] * c[1] * c[3], s[2] * c[2] * c[3], s[3] * c[3]], m)
+                }
+            }
         }
         PrimitiveKind::Glyph => scale4(premul(v.color), tex.sample(v.uv[0], v.uv[1])[0]),
         PrimitiveKind::Shape => {

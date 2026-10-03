@@ -443,10 +443,55 @@ fn paragraph(ui: &mut Ui) {
     });
 }
 
+/// Filled paths: the icon set an app would draw rather than load. Small and
+/// large, on and off the pixel grid, curved, with holes by either rule, and
+/// translucent — everything a hand-written icon renderer gets wrong.
+fn paths(ui: &mut Ui) {
+    let id = ui.make_id("paths");
+    let fill = Layout::leaf(Size::Grow(1.0), Size::Grow(1.0));
+    ui.add_leaf(id, fill, Vec2::ZERO, false, |p, r| {
+        let (x, y) = (r.x, r.y);
+        let white = Color::hex(0xffffff);
+        let accent = Color::hex(0x4c8dff);
+        let play = Path::new(24.0, 24.0)
+            .move_to(Vec2::new(6.0, 4.0))
+            .line_to(Vec2::new(20.0, 12.0))
+            .line_to(Vec2::new(6.0, 20.0))
+            .close();
+        // The same icon at three sizes, the middle one at a fractional
+        // position, as a scroll area or an odd DPI puts it.
+        p.fill_path(&play, Rect::new(x + 12.0, y + 12.0, 16.0, 16.0), white);
+        p.fill_path(&play, Rect::new(x + 40.4, y + 12.6, 24.0, 24.0), white);
+        p.fill_path(&play, Rect::new(x + 76.0, y + 12.0, 48.0, 48.0), accent);
+        // Curves: a circle, and a quadratic leaf.
+        p.fill_path(&Path::circle(24.0, 24.0, Vec2::new(12.0, 12.0), 10.0), Rect::new(x + 136.0, y + 12.0, 48.0, 48.0), white);
+        let leaf = Path::new(24.0, 24.0)
+            .move_to(Vec2::new(4.0, 20.0))
+            .quad_to(Vec2::new(4.0, 4.0), Vec2::new(20.0, 4.0))
+            .quad_to(Vec2::new(20.0, 20.0), Vec2::new(4.0, 20.0))
+            .close();
+        p.fill_path(&leaf, Rect::new(x + 196.0, y + 12.0, 48.0, 48.0), accent);
+        // Holes: a reversed inner circle under non-zero, and the same two
+        // circles wound alike under even-odd. Both are rings.
+        let ring = Path::new(24.0, 24.0).add_circle(Vec2::new(12.0, 12.0), 10.0, false).add_circle(Vec2::new(12.0, 12.0), 5.0, true);
+        p.fill_path(&ring, Rect::new(x + 12.0, y + 72.0, 48.0, 48.0), white);
+        let ring_eo = Path::new(24.0, 24.0)
+            .add_circle(Vec2::new(12.0, 12.0), 10.0, false)
+            .add_circle(Vec2::new(12.0, 12.0), 5.0, false)
+            .fill_rule(FillRule::EvenOdd);
+        p.fill_path(&ring_eo, Rect::new(x + 72.0, y + 72.0, 48.0, 48.0), white);
+        // Translucent over something, so the tint's alpha is part of it.
+        p.rect(Rect::new(x + 136.0, y + 80.0, 108.0, 32.0), accent, 4.0);
+        p.fill_path(&play, Rect::new(x + 140.0, y + 72.0, 48.0, 48.0), white.with_alpha(0.5));
+        p.fill_path(&play, Rect::new(x + 196.0, y + 72.0, 48.0, 48.0), Color::rgba(0.0, 0.0, 0.0, 0.7));
+    });
+}
+
 pub const SCENES: &[Scene] = &[
     Scene { name: "widgets", size: (320.0, 640.0), pointer: Pointer::None, build: widgets },
     Scene { name: "tree", size: (240.0, 230.0), pointer: Pointer::None, build: tree },
     Scene { name: "shapes", size: (280.0, 200.0), pointer: Pointer::None, build: shapes },
+    Scene { name: "paths", size: (260.0, 132.0), pointer: Pointer::None, build: paths },
     Scene { name: "text", size: (360.0, 200.0), pointer: Pointer::None, build: text },
     Scene { name: "button_hover", size: (240.0, 90.0), pointer: Pointer::Hover, build: button_target },
     Scene { name: "button_pressed", size: (240.0, 90.0), pointer: Pointer::Press, build: button_target },

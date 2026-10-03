@@ -23,6 +23,7 @@ mod paint_arena;
 mod painter;
 mod profile;
 pub mod render_contract;
+mod path;
 mod scroll;
 #[cfg(feature = "shape")]
 mod shape;
@@ -49,6 +50,8 @@ pub use dock::{DockConfig, FloatingMode, DockNode, DockState, DropKind, DropTarg
 pub use dock_layout::{DockLayout, LayoutError, NodeLayout, Restored, SurfaceLayout};
 pub use dnd::{DragSource, DropZone, Payload};
 pub use draw::{Batch, DrawList, Instance, TextureId};
+pub use render_contract::ImageAlpha;
+pub use path::{FillRule, Path};
 pub use id::{Id, StableHasher};
 pub use input::{
     Cursor, FrameInfo, FrameInput, Gesture, InputEvent, Key, KeyBindings, Modifiers, Motion, Nav, PlatformOutput, PointerButton,

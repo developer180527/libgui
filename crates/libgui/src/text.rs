@@ -175,6 +175,11 @@ struct FontsInner {
     /// (font, px) -> (ascent, descent), in physical px.
     lines: RefCell<FxMap<(u16, u32), (f32, f32)>>,
     atlas: Atlas,
+    /// Filled paths in the atlas: their key at a size -> uv, `None` when it
+    /// can never fit. Cleared with the glyphs on a repack.
+    masks: FxMap<u64, Option<[f32; 4]>>,
+    /// Reused between rasterisations, so a path costs no allocation.
+    mask_scratch: Vec<u8>,
     scale: f32,
     /// Extra resolution for text inside a zoomed canvas.
     zoom: f32,
@@ -240,6 +245,7 @@ impl FontsInner {
             self.atlas.reset();
         }
         self.glyphs.clear();
+        self.masks.clear();
         true
     }
 
@@ -266,6 +272,8 @@ impl FontsInner {
             lines: RefCell::new(FxMap::default()),
             runs: RefCell::new(FxMap::default()),
             atlas: Atlas::new(2048),
+            masks: FxMap::default(),
+            mask_scratch: Vec::new(),
             scale: 1.0,
             zoom: 1.0,
             rasterized: 0,
@@ -694,6 +702,79 @@ impl FontsInner {
         ((asc - desc) * size / px).ceil()
     }
 
+    /// Put a `w` x `h` coverage bitmap in the atlas and return its uv rect, or
+    /// `None` when it cannot go in this frame. Glyphs and filled paths both
+    /// come through here, so they grow, defer and repack by the same rules.
+    fn place(&mut self, w: u32, h: u32, bitmap: &[u8]) -> Option<[f32; 4]> {
+        let pos = if !self.atlas.fits(w, h) {
+            // Too big for the atlas as it stands. Growing is what would hold
+            // it, and growing is exactly what the limit permits, so ask for
+            // it — `fits` is a question about today's size, not about what the
+            // cap allows. Without this, raising the limit did nothing for the
+            // glyph that motivated raising it: the glyph was cached as
+            // unplaceable and never reconsidered.
+            if self.atlas.size < self.atlas.max_size && self.atlas.could_fit(w, h) {
+                self.repack_pending = true;
+            }
+            None
+        } else {
+            match self.atlas.alloc(w, h) {
+                Some(p) => Some(p),
+                None => {
+                    // Full. Repacking here would move every glyph already in
+                    // it, and the instances emitted earlier *this frame* carry
+                    // uv coordinates into the old packing: the frame would draw
+                    // with whatever now sits at those texels. So it is deferred
+                    // to the frame boundary ([`Fonts::repack`]), and this
+                    // bitmap is simply not drawn this frame.
+                    self.repack_pending = true;
+                    None
+                }
+            }
+        };
+        let pos = pos?;
+        let s = self.atlas.size;
+        for row in 0..h {
+            let dst = ((pos.1 + row) * s + pos.0) as usize;
+            let src = (row * w) as usize;
+            Rc::make_mut(&mut self.atlas.data)[dst..dst + w as usize].copy_from_slice(&bitmap[src..src + w as usize]);
+        }
+        self.atlas.version += 1;
+        let sf = s as f32;
+        Some([pos.0 as f32 / sf, pos.1 as f32 / sf, (pos.0 + w) as f32 / sf, (pos.1 + h) as f32 / sf])
+    }
+
+    /// A filled path's coverage, from the atlas if it is already there and
+    /// rasterised by `raster` into a `w` x `h` buffer if it is not. `key` names
+    /// the path *at this size*: the caller hashes both.
+    ///
+    /// Cached the way glyphs are, and dropped with them when the atlas is
+    /// repacked, so a steady frame of icons rasterises nothing.
+    pub(crate) fn coverage_mask(&mut self, key: u64, w: u32, h: u32, raster: impl FnOnce(&mut Vec<u8>)) -> Option<[f32; 4]> {
+        if let Some(uv) = self.masks.get(&key) {
+            return *uv;
+        }
+        // The same ceiling glyphs have: bigger than the atlas could ever hold
+        // is not worth rasterising.
+        if w == 0 || h == 0 || w > self.atlas.max_size || h > self.atlas.max_size {
+            self.masks.insert(key, None);
+            return None;
+        }
+        self.rasterized += 1;
+        let mut buf = std::mem::take(&mut self.mask_scratch);
+        buf.clear();
+        buf.resize((w * h) as usize, 0);
+        raster(&mut buf);
+        let uv = self.place(w, h, &buf);
+        self.mask_scratch = buf;
+        // Not placed because the atlas is full is not cached: the repack at
+        // the frame boundary clears this map, and the next frame tries again.
+        if uv.is_some() || !self.atlas.could_fit(w, h) {
+            self.masks.insert(key, uv);
+        }
+        uv
+    }
+
     fn glyph(&mut self, font: FontId, face: u16, id: u32, px: f32) -> Glyph {
         let key = (font.0, face, id, px as u32);
         if let Some(g) = self.glyphs.get(&key) {
@@ -721,52 +802,8 @@ impl FontsInner {
         // theme file or a zoomed canvas can ask for.
         let mut placed = (w, h);
         if w > 0 && h > 0 {
-            let pos = if !self.atlas.fits(w, h) {
-                // Too big for the atlas as it stands. Growing is what would
-                // hold it, and growing is exactly what the limit permits, so
-                // ask for it — `fits` is a question about today's size, not
-                // about what the cap allows. Without this, raising the limit
-                // did nothing for the glyph that motivated raising it: the
-                // glyph was cached as unplaceable and never reconsidered.
-                if self.atlas.size < self.atlas.max_size && self.atlas.could_fit(w, h) {
-                    self.repack_pending = true;
-                }
-                None
-            } else {
-                match self.atlas.alloc(w, h) {
-                    Some(p) => Some(p),
-                    None => {
-                        // Full. Repacking here would move every glyph already
-                        // in it, and the instances emitted earlier *this
-                        // frame* carry uv coordinates into the old packing:
-                        // the frame would draw with whatever now sits at
-                        // those texels. So it is deferred to the frame
-                        // boundary ([`Fonts::repack`]), and this glyph is
-                        // simply not drawn this frame — its advance still
-                        // counts, so nothing moves.
-                        self.repack_pending = true;
-                        None
-                    }
-                }
-            };
-            match pos {
-                Some(pos) => {
-                    let s = self.atlas.size;
-                    for row in 0..h {
-                        let dst = ((pos.1 + row) * s + pos.0) as usize;
-                        let src = (row * w) as usize;
-                        Rc::make_mut(&mut self.atlas.data)[dst..dst + w as usize]
-                            .copy_from_slice(&bitmap[src..src + w as usize]);
-                    }
-                    self.atlas.version += 1;
-                    let sf = s as f32;
-                    uv = [
-                        pos.0 as f32 / sf,
-                        pos.1 as f32 / sf,
-                        (pos.0 + w) as f32 / sf,
-                        (pos.1 + h) as f32 / sf,
-                    ];
-                }
+            match self.place(w, h, bitmap) {
+                Some(at) => uv = at,
                 None => placed = (0, 0),
             }
         }
@@ -995,6 +1032,10 @@ impl Fonts {
     }
 
     // ---- crate-internal ---------------------------------------------------
+
+    pub(crate) fn coverage_mask(&self, key: u64, w: u32, h: u32, raster: impl FnOnce(&mut Vec<u8>)) -> Option<[f32; 4]> {
+        self.0.borrow_mut().coverage_mask(key, w, h, raster)
+    }
 
     pub(crate) fn repack_pending(&self) -> bool {
         self.0.borrow().repack_pending()

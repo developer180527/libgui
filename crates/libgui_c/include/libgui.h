@@ -26,8 +26,10 @@
  *    target, not an sRGB view -- the values are already encoded, so an sRGB
  *    target encodes them twice. libgui_frame_clear_color() is in the same
  *    space: 0..1 sRGB-encoded, straight alpha.
- *  - YOUR TEXTURES: RGBA8, sRGB-encoded values, composited as OPAQUE RGB --
- *    a viewport's own alpha is ignored. The instance colour still tints it.
+ *  - YOUR TEXTURES: RGBA8, sRGB-encoded values. Opaque by default -- a
+ *    viewport's own alpha is ignored -- unless the draw asks otherwise
+ *    (libgui_painter_image_alpha); the image's params[1] says which. The
+ *    instance colour tints either way.
  *  - SAMPLING: bilinear, clamped to edge. Hardware filtering is fine; the CPU
  *    reference does the same thing by hand, which is what makes the two
  *    comparable.
@@ -261,6 +263,48 @@ void libgui_painter_image(LibguiPainter* p, LibguiRect r, uint64_t texture, floa
 void libgui_painter_image_uv(LibguiPainter* p, LibguiRect r, uint64_t texture,
                              float u0, float v0, float u1, float v1,
                              float radius, LibguiColor tint);
+
+/* The calls above ignore the texture's alpha, as a 3D view wants. An icon
+ * needs it counted. PREMULTIPLIED if your colour is already multiplied by
+ * alpha; STRAIGHT for a PNG as loaded, premultiplied per texel before
+ * filtering so edges stay clean. If your renderer filters in HARDWARE,
+ * premultiply on upload and use PREMULTIPLIED -- straight alpha filtered in
+ * hardware gives every edge a dark halo. Unknown values are opaque. */
+#define LIBGUI_IMAGE_OPAQUE        0u
+#define LIBGUI_IMAGE_PREMULTIPLIED 1u
+#define LIBGUI_IMAGE_STRAIGHT      2u
+void libgui_painter_image_alpha(LibguiPainter* p, LibguiRect r, uint64_t texture,
+                                float u0, float v0, float u1, float v1,
+                                float radius, LibguiColor tint, uint32_t alpha);
+
+/* Fill an outline: an icon drawn rather than loaded. Coordinates run from
+ * (0,0) to (view_w, view_h) -- a 24x24 box for a typical icon set -- and are
+ * scaled into `r`. One byte per verb, consuming x,y pairs from `points`:
+ *
+ *     MOVE 1 point, LINE 1, QUAD 2 (control, end), CUBIC 3, CLOSE 0
+ *
+ *     static const uint8_t play_v[] = { LIBGUI_PATH_MOVE, LIBGUI_PATH_LINE,
+ *                                       LIBGUI_PATH_LINE, LIBGUI_PATH_CLOSE };
+ *     static const float   play_p[] = { 6,4,  20,12,  6,20 };
+ *     libgui_painter_fill_path(p, r, 24, 24, play_v, 4, play_p, 3,
+ *                              LIBGUI_FILL_NONZERO, white);
+ *
+ * Rasterised ONCE per size into the glyph atlas and drawn the way text is:
+ * exact anti-aliasing, tinted by the colour, crisp at every DPI and zoom, and
+ * nothing new for your renderer to support. For static art; a shape that
+ * changes every frame is rasterised every frame. A malformed path draws
+ * nothing and libgui_last_error says why. */
+#define LIBGUI_PATH_MOVE    0u
+#define LIBGUI_PATH_LINE    1u
+#define LIBGUI_PATH_QUAD    2u
+#define LIBGUI_PATH_CUBIC   3u
+#define LIBGUI_PATH_CLOSE   4u
+#define LIBGUI_FILL_NONZERO 0u
+#define LIBGUI_FILL_EVENODD 1u
+void libgui_painter_fill_path(LibguiPainter* p, LibguiRect r, float view_w, float view_h,
+                              const uint8_t* verbs, uint64_t verb_count,
+                              const float* points, uint64_t point_count,
+                              uint32_t fill_rule, LibguiColor c);
 
 /* --- Input -------------------------------------------------------------- */
 

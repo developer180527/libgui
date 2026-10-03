@@ -95,6 +95,7 @@ fn a_frame_stays_within_its_allocation_budget() {
 
     nesting_is_free(&mut ui);
     a_table_costs_nothing_per_frame(&mut ui);
+    icons_cost_nothing_per_frame(&mut ui);
     a_frame_without_text_allocates_nothing(false);
     a_frame_without_text_allocates_nothing(true);
     a_text_area_costs_nothing_at_rest(&mut ui);
@@ -276,4 +277,42 @@ fn build(ui: &mut Ui, rows: usize, names: &[String]) {
         });
     }
     let _ = ui.button("Apply");
+}
+
+/// A toolbar of drawn icons, held by the app and filled every frame. Each is
+/// rasterised into the atlas once; after that a frame looks it up, which must
+/// not allocate — the lookup hashes the outline every frame, hit or not.
+fn icons_cost_nothing_per_frame(ui: &mut Ui) {
+    let icons: Vec<std::rc::Rc<libgui::Path>> = (0..40)
+        .map(|i| {
+            let k = i as f32 * 0.25;
+            std::rc::Rc::new(
+                libgui::Path::new(24.0, 24.0)
+                    .move_to(Vec2::new(4.0 + k, 4.0))
+                    .line_to(Vec2::new(20.0, 12.0))
+                    .cubic_to(Vec2::new(14.0, 18.0), Vec2::new(8.0, 20.0), Vec2::new(4.0, 20.0))
+                    .close(),
+            )
+        })
+        .collect();
+    let frame = |ui: &mut Ui| {
+        ui.begin_frame(FrameInfo::default());
+        for (i, icon) in icons.iter().enumerate() {
+            let icon = icon.clone();
+            let leaf = libgui::Layout::leaf(Size::Fixed(24.0), Size::Fixed(24.0));
+            let id = ui.make_id(("icon", i));
+            ui.add_leaf(id, leaf, Vec2::ZERO, false, move |p, r| {
+                p.fill_path(&icon, r, Color::WHITE);
+            });
+        }
+        let _ = ui.end_frame();
+    };
+    for _ in 0..3 {
+        frame(ui);
+    }
+    ALLOCS.store(0, Relaxed);
+    frame(ui);
+    let steady = ALLOCS.load(Relaxed);
+    println!("40 drawn icons at rest: {steady} allocations");
+    assert_eq!(steady, 0, "40 cached icons allocated {steady} times in a frame that changed nothing");
 }
