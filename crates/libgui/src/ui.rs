@@ -46,6 +46,14 @@ pub struct Response {
     /// be the second one, and a widget that only cares about single clicks
     /// needs no change.
     pub double_clicked: bool,
+    /// The button that pressed this widget came up this frame — wherever the
+    /// pointer is now. A drag ends here.
+    ///
+    /// `clicked` needs the pointer still over the widget; a drag that is let
+    /// go off it is still a drag that ended. This is the frame to hand a
+    /// gesture's momentum on: `Ui::set_spring` with `Ui::pointer_velocity`.
+    /// `active` is still true on this frame, so test this first.
+    pub released: bool,
     /// Movement since last frame while active. Raw (unaccelerated) motion while
     /// the pointer is locked, otherwise the change in pointer position.
     pub drag_delta: Vec2,
@@ -609,6 +617,10 @@ pub struct Ui {
     hovered: Option<Id>,
     active: Option<Id>,
     anims: FxMap<(Id, u8), f32>,
+    /// Springs: position and velocity, per id and slot.
+    springs: FxMap<(Id, u8), crate::spring::State>,
+    /// The pointer's velocity in logical px/s, smoothed over a few frames.
+    pointer_velocity: Vec2,
     pub(crate) seen: FxSet<Id>,
     /// Next free suffix per colliding base id, so N widgets sharing a key cost
     /// O(N) to disambiguate rather than O(N^2).
@@ -897,6 +909,8 @@ impl Ui {
             hovered: None,
             active: None,
             anims: FxMap::default(),
+            springs: FxMap::default(),
+            pointer_velocity: Vec2::ZERO,
             seen: FxSet::default(),
             dup_next: FxMap::default(),
             key_salt: Vec::new(),
@@ -1518,6 +1532,15 @@ impl Ui {
         self.prev_down = input.mouse_down;
         self.mouse_delta = if touch && self.pressed { Vec2::ZERO } else { input.mouse_pos - self.mouse_prev };
         self.mouse_prev = input.mouse_pos;
+        // Smoothed over roughly 50 ms: one frame's delta is noisy (pointer
+        // events do not arrive in step with frames), and the last few frames
+        // of a flick are what a person means by how hard they threw it.
+        if input.dt > 0.0 {
+            let raw = self.mouse_delta * (1.0 / input.dt);
+            let k = 1.0 - (-input.dt / 0.05).exp();
+            let v = self.pointer_velocity + (raw - self.pointer_velocity) * k;
+            self.pointer_velocity = if v.x.is_finite() && v.y.is_finite() { v } else { Vec2::ZERO };
+        }
         self.fonts.set_scale(input.scale);
         // Hit-test against last frame's layout; later entries were painted on top.
         self.hovered = if input.mouse_inside {
@@ -1748,6 +1771,7 @@ impl Ui {
         }
         let seen = &self.seen;
         self.anims.retain(|(id, _), _| seen.contains(id));
+        self.springs.retain(|(id, _), _| seen.contains(id));
         self.text_states.retain(|id, _| seen.contains(id));
         self.text_history.retain(|id, _| seen.contains(id));
         self.validated_edits.retain(|id, _| seen.contains(id));
@@ -2040,6 +2064,7 @@ impl Ui {
             pressed: hovered && self.pressed,
             clicked: active && hovered && self.released,
             double_clicked: active && hovered && self.released && self.is_double_click(id),
+            released: active && self.released,
             // Zero on the frame the drag starts: the pointer movement that
             // brought it onto the widget happened *before* the press, and with
             // a teleporting pointer (a pen, synthetic input) that jump is large.
@@ -2112,6 +2137,79 @@ impl Ui {
         self.animating |= v != target;
         self.unsettled += (v != target) as u64;
         v
+    }
+
+    /// A retained value that moves toward `target` like a spring, using the
+    /// theme's spring ([`Metrics::spring`](crate::Metrics::spring)).
+    ///
+    /// Unlike [`Ui::animate`] it carries velocity, so when `target` changes
+    /// mid-flight — a drawer told to close while still opening, a hover that
+    /// leaves halfway through — the motion bends toward the new target
+    /// instead of reversing in a single frame. That continuity, more than any
+    /// bounce, is what makes motion feel physical.
+    ///
+    /// The first time an id is seen it starts *at* `target`, so nothing
+    /// animates into existence. It asks for frames until it comes to rest,
+    /// and the curve is the same at any frame rate.
+    pub fn animate_spring(&mut self, id: Id, slot: u8, target: f32) -> f32 {
+        let spring = self.theme.metrics.spring;
+        self.animate_spring_with(id, slot, target, spring)
+    }
+
+    /// [`Ui::animate_spring`] with an explicit spring.
+    pub fn animate_spring_with(&mut self, id: Id, slot: u8, target: f32, spring: crate::Spring) -> f32 {
+        // Asking is what keeps it alive. Retained state belongs to ids seen
+        // this frame, and a spring on an id no widget is built with — the
+        // natural thing to write for a value that is not a widget — was
+        // otherwise dropped every frame and restarted at its target: motion
+        // that silently never happened.
+        self.mark_seen(id);
+        let target = sane(target, 0.0);
+        let dt = self.input.dt;
+        let reduced = self.theme.metrics.reduced_motion;
+        let s = self.springs.entry((id, slot)).or_insert(crate::spring::State { pos: target, vel: 0.0 });
+        if reduced {
+            // Arrive at once: for someone for whom motion is a problem, the
+            // value matters and the journey does not.
+            *s = crate::spring::State { pos: target, vel: 0.0 };
+            return target;
+        }
+        let rested = crate::spring::step(s, target, spring, dt);
+        let v = s.pos;
+        self.animating |= !rested;
+        self.unsettled += (!rested) as u64;
+        v
+    }
+
+    /// Put a spring at `value`, moving at `velocity` units/s. It then springs
+    /// toward whatever target it is next given.
+    ///
+    /// This is how a gesture hands over: while a drag holds something, set it
+    /// to where the pointer has it; on release, pass the release velocity —
+    /// [`Ui::pointer_velocity`] — and let the spring carry the momentum
+    /// home, overshooting if it was thrown hard.
+    pub fn set_spring(&mut self, id: Id, slot: u8, value: f32, velocity: f32) {
+        self.mark_seen(id);
+        // A spring just moved has to be drawn moving — or, with reduced
+        // motion, drawn arriving — and that happens next frame. Without asking
+        // for it, a hand-off made after the spring was read this frame (a
+        // drag let go) left the host asleep with the thing drawn where the
+        // pointer let go, until some unrelated input happened to wake it.
+        self.animating = true;
+        self.unsettled += 1;
+        self.springs.insert((id, slot), crate::spring::State { pos: sane(value, 0.0), vel: sane(velocity, 0.0) });
+    }
+
+    /// A spring's current velocity in units/s; zero if it has none.
+    pub fn spring_velocity(&self, id: Id, slot: u8) -> f32 {
+        self.springs.get(&(id, slot)).map_or(0.0, |s| s.vel)
+    }
+
+    /// The pointer's velocity in logical px/s, smoothed over the last few
+    /// frames: what to hand [`Ui::set_spring`] when a drag lets go, so a
+    /// thrown thing keeps moving the way it was thrown.
+    pub fn pointer_velocity(&self) -> Vec2 {
+        self.pointer_velocity
     }
 
     /// Jump an animation to `value` (it then eases towards its next target).

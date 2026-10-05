@@ -64,7 +64,11 @@ pub struct LibguiResponse {
     pub secondary_pressed: u8,
     pub middle_pressed: u8,
     pub has_raw_delta: u8,
-    pub _pad: [u8; 7],
+    /// The button that pressed this widget came up this frame, wherever the
+    /// pointer is: the frame a drag ends. Took a byte of padding, so the
+    /// struct did not change size.
+    pub released: u8,
+    pub _pad: [u8; 6],
     pub drag_delta: LibguiVec2,
     pub raw_delta: LibguiVec2,
     pub scroll: LibguiVec2,
@@ -133,7 +137,8 @@ impl From<Response> for LibguiResponse {
             secondary_pressed: b(r.secondary_pressed),
             middle_pressed: b(r.middle_pressed),
             has_raw_delta: b(r.raw_delta.is_some()),
-            _pad: [0; 7],
+            released: b(r.released),
+            _pad: [0; 6],
             drag_delta: r.drag_delta.into(),
             raw_delta: r.raw_delta.unwrap_or(Vec2::ZERO).into(),
             scroll: r.scroll.into(),

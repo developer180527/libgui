@@ -1776,3 +1776,45 @@ fn a_path_filled_from_c_is_the_path_filled_from_rust() {
     assert!(broken.is_empty(), "a malformed path drew part of a shape");
     assert!(err.contains("fill_path"), "a malformed path was refused silently: {err:?}");
 }
+
+/// Springs from C: the theme's spring when given zeros, an explicit one
+/// otherwise, a release velocity that carries, and the pointer's speed.
+#[test]
+fn springs_cross_to_c() {
+    unsafe {
+        let u = ui();
+        let id = libgui_id_from_name(c("puck").as_ptr());
+        let step = |target: f32, response: f32, damping: f32| {
+            libgui_begin_frame(u, 400.0, 300.0, 1.0, 1.0 / 60.0);
+            let v = libgui_animate_spring(u, id, 0, target, response, damping);
+            libgui_end_frame(u);
+            v
+        };
+        assert_eq!(step(0.0, 0.0, 0.0), 0.0, "a new spring starts at its target");
+        let moving = step(100.0, 0.0, 0.0);
+        assert!(moving > 0.0 && moving < 100.0, "the theme's spring did not move: {moving}");
+        assert!(libgui_spring_velocity(u, id, 0) > 0.0);
+
+        // Thrown hard toward 100 with a bouncy spring: it sails past.
+        libgui_set_spring(u, id, 0, 0.0, 4000.0);
+        let mut furthest = 0.0f32;
+        for _ in 0..60 {
+            furthest = furthest.max(step(100.0, 0.4, 0.5));
+        }
+        assert!(furthest > 115.0, "a 4000 px/s throw only reached {furthest}");
+
+        // The pointer, moving 8 px a frame at 60 Hz.
+        let mut x = 0.0;
+        for _ in 0..30 {
+            x += 8.0;
+            libgui_push_pointer_moved(u, x, 10.0);
+            libgui_begin_frame(u, 800.0, 300.0, 1.0, 1.0 / 60.0);
+            libgui_end_frame(u);
+        }
+        let (mut vx, mut vy) = (0.0f32, 0.0f32);
+        libgui_pointer_velocity(u, &mut vx, &mut vy);
+        assert!((vx - 480.0).abs() < 10.0 && vy.abs() < 1.0, "measured ({vx}, {vy}) for 480 px/s");
+        assert_eq!(libgui_ui_poisoned(u), 0);
+        libgui_ui_free(u);
+    }
+}

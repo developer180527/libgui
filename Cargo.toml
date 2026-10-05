@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/libgui", "crates/libgui_winit", "crates/libgui_shaders", "crates/libgui_wgpu", "crates/demo_gui/libgui_demo", "crates/libgui_bench", "crates/libgui_nodes", "crates/libgui_soft", "crates/libgui_keymap", "crates/libgui_units", "crates/demo_gui/libgui_solaris", "crates/demo_gui/libgui_cut", "crates/demo_gui/libgui_pad", "crates/libgui_c"]
+members = ["crates/libgui", "crates/libgui_winit", "crates/libgui_shaders", "crates/libgui_wgpu", "crates/demo_gui/libgui_demo", "crates/libgui_bench", "crates/libgui_nodes", "crates/libgui_soft", "crates/libgui_keymap", "crates/libgui_units", "crates/demo_gui/libgui_solaris", "crates/demo_gui/libgui_cut", "crates/demo_gui/libgui_pad", "crates/demo_gui/libgui_springs", "crates/libgui_c"]
 
 [workspace.package]
 authors = ["Venu Gopal"]

@@ -557,6 +557,51 @@ renderer filters in hardware, premultiply on upload** — straight alpha
 filtered first and multiplied after lets the transparent texels' colour bleed
 in, and every edge gets a dark halo.
 
+
+### 5.9 Motion: springs
+
+`ui.animate(id, slot, target)` eases: each frame closes a fixed fraction of the
+gap. It carries no velocity, so when the target changes mid-flight — a drawer
+told to close while it is opening, a hover that leaves halfway through — the
+motion reverses on the spot. A spring carries velocity, so it bends toward the
+new target instead, which is most of why motion reads as physical.
+
+```rust
+// The theme's spring (critically damped: quick, and then still).
+let open = ui.animate_spring(id, 0, if drawer_open { 1.0 } else { 0.0 });
+
+// Or your own: `response` is roughly how long it takes, in seconds;
+// `damping` 1 is no overshoot, below 1 bounces.
+let x = ui.animate_spring_with(id, 1, target_x, Spring::new(0.4, 0.6));
+```
+
+Two numbers rather than a stiffness and a mass, because they are the two a
+designer tunes. Each frame applies the *exact* solution of the spring for that
+interval, so it traces the same curve at 30, 60 or 144 Hz and a stalled frame
+cannot fling it; it asks for frames while it moves and stops when it rests,
+so an idle window sleeps. The first time an id is seen it starts at its
+target, and asking keeps an id alive, so a spring on a value that is not a
+widget works.
+
+**Throwing.** A gesture hands over on the frame it ends: while a drag holds the
+value, tell the spring where it is; when `response.released`, hand it the
+pointer's velocity and let it carry the throw.
+
+```rust
+if r.released {
+    ui.set_spring(id, 0, x, ui.pointer_velocity().x);   // momentum handed over
+} else if r.active {
+    ui.set_spring(id, 0, x, 0.0);                       // held where the pointer is
+}
+```
+
+`released` is true wherever the pointer is when the button comes up, unlike
+`clicked`, and `active` is still true on that frame — so test `released` first.
+
+`Metrics::reduced_motion` makes every spring arrive at once: the host passes
+on the operating system's setting, and nothing else changes.
+`Spring::value_at(t)` is the curve itself, for plotting one while you tune it.
+`crates/demo_gui/libgui_springs` shows all of it.
 ---
 
 ## 6. Identity, state and keys

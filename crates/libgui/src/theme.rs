@@ -71,6 +71,46 @@ pub struct Palette {
 }
 
 serde_struct! {
+/// How a spring moves: how quickly, and how much it overshoots.
+///
+/// The two numbers a designer actually tunes, rather than a stiffness and a
+/// mass nobody can picture. `response` is the period of the undamped
+/// oscillation in seconds — roughly how long the motion takes. `damping` is
+/// the damping ratio: **1 settles as fast as possible without overshooting**,
+/// below 1 overshoots and rings, above 1 creeps in more slowly.
+///
+/// For a working tool, critically damped is the default: motion that is quick
+/// and then still. Bounce is for when the motion *means* something — a drag
+/// released hard, a value hitting its stop.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Spring {
+    /// Seconds. Shorter is quicker.
+    pub response: f32,
+    /// 1 = no overshoot (critical). Below 1 bounces; above 1 is sluggish.
+    pub damping: f32,
+}
+}
+
+impl Spring {
+    /// Quick and still: the default for interface motion.
+    pub const SNAPPY: Spring = Spring { response: 0.25, damping: 1.0 };
+    /// Unhurried, still no overshoot: a panel or a drawer.
+    pub const SMOOTH: Spring = Spring { response: 0.45, damping: 1.0 };
+    /// Visibly springy: a released drag, a value hitting its stop.
+    pub const BOUNCY: Spring = Spring { response: 0.4, damping: 0.55 };
+
+    pub const fn new(response: f32, damping: f32) -> Self {
+        Spring { response, damping }
+    }
+}
+
+impl Default for Spring {
+    fn default() -> Self {
+        Spring::SNAPPY
+    }
+}
+
+serde_struct! {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Metrics {
     pub radius: f32,
@@ -93,6 +133,15 @@ pub struct Metrics {
     pub disabled_alpha: f32,
     /// Thickness of the keyboard focus ring.
     pub focus_ring_width: f32,
+    /// The spring [`Ui::animate_spring`](crate::Ui::animate_spring) uses when
+    /// it is not given one. Absent from a theme file means the default.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub spring: Spring,
+    /// Make springs arrive at once. For people for whom motion is a problem
+    /// rather than a cue — the operating system has a setting for it, and a
+    /// host passes it on. Absent from a theme file means off.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub reduced_motion: bool,
 }
 }
 
@@ -113,6 +162,8 @@ impl Metrics {
                 focus_ring_width: 2.0,
                 anim_speed: 20.0,
                 disabled_alpha: 0.38,
+                spring: Spring::SNAPPY,
+                reduced_motion: false,
             },
             Density::Regular => Self {
                 radius: 6.0,
@@ -128,6 +179,8 @@ impl Metrics {
                 focus_ring_width: 2.0,
                 anim_speed: 18.0,
                 disabled_alpha: 0.38,
+                spring: Spring::SNAPPY,
+                reduced_motion: false,
             },
             Density::Touch => Self {
                 radius: 10.0,
@@ -143,6 +196,8 @@ impl Metrics {
                 focus_ring_width: 2.0,
                 anim_speed: 16.0,
                 disabled_alpha: 0.38,
+                spring: Spring::SNAPPY,
+                reduced_motion: false,
             },
         }
     }

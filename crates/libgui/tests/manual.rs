@@ -163,3 +163,17 @@ fn icons(ui: &mut Ui, id: Id, ink: Color, tex: TextureId) {
         p.image_with_alpha(r, tex, [0.0, 0.0, 1.0, 1.0], 0.0, Color::WHITE, ImageAlpha::Straight)
     });
 }
+
+/// §5.9: springs, and handing a throw over.
+#[allow(dead_code)]
+fn springs(ui: &mut Ui, id: Id, drawer_open: bool, target_x: f32, x: f32, r: Response) {
+    let _open = ui.animate_spring(id, 0, if drawer_open { 1.0 } else { 0.0 });
+    let _x = ui.animate_spring_with(id, 1, target_x, Spring::new(0.4, 0.6));
+    if r.released {
+        let v = ui.pointer_velocity().x;
+        ui.set_spring(id, 0, x, v);
+    } else if r.active {
+        ui.set_spring(id, 0, x, 0.0);
+    }
+    let _ = Spring::SNAPPY.value_at(0.1);
+}

@@ -24,6 +24,7 @@ mod painter;
 mod profile;
 pub mod render_contract;
 mod path;
+mod spring;
 mod scroll;
 #[cfg(feature = "shape")]
 mod shape;
@@ -74,7 +75,7 @@ pub use table::{Column, Sort, TableOptions, TableResponse, TableState};
 pub use text_arena::{FrameText, PaintText};
 pub use theme::{
     ButtonStyle, Density, DropPreviewStyle, Metrics, MenuStyle, Palette, PanelStyle, PlotStyle, ScrollbarStyle, SegmentedStyle,
-    SelectableStyle, Shadow, SliderStyle, SplitterStyle, StateColors, TabStyle, TableStyle, TextInputStyle, TooltipStyle, Theme,
+    SelectableStyle, Shadow, SliderStyle, SplitterStyle, Spring, StateColors, TabStyle, TableStyle, TextInputStyle, TooltipStyle, Theme,
     ToggleStyle,
     ViewportStyle,
 };

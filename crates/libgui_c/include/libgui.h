@@ -82,7 +82,8 @@ typedef struct {
     uint8_t         secondary_pressed;
     uint8_t         middle_pressed;
     uint8_t         has_raw_delta;
-    uint8_t         _pad[7];
+    uint8_t         released;    /* the press on this widget ended this frame */
+    uint8_t         _pad[6];
     LibguiVec2      drag_delta;
     LibguiVec2      raw_delta;   /* only when has_raw_delta */
     LibguiVec2      scroll;
@@ -885,6 +886,20 @@ float libgui_animate(LibguiUi* ui, uint64_t id, uint8_t slot, float target);
 float libgui_animate_bool(LibguiUi* ui, uint64_t id, uint8_t slot, uint8_t on);
 /* speed is 1/s; higher is snappier. */
 float libgui_animate_with_speed(LibguiUi* ui, uint64_t id, uint8_t slot, float target, float speed);
+/* A spring: carries velocity, so a target changed mid-flight bends the motion
+ * instead of reversing it in one frame. `response` ~ seconds the motion takes;
+ * `damping` 1 = no overshoot, below 1 bounces. 0 and 0 = the theme's spring.
+ * Same curve at any frame rate. On a drag's release, hand over the throw:
+ *
+ *     float vx, vy;
+ *     libgui_pointer_velocity(ui, &vx, &vy);
+ *     libgui_set_spring(ui, id, 0, x_now, vx);   // then keep animating to home
+ */
+float libgui_animate_spring(LibguiUi* ui, uint64_t id, uint8_t slot, float target,
+                            float response, float damping);
+void  libgui_set_spring(LibguiUi* ui, uint64_t id, uint8_t slot, float value, float velocity);
+float libgui_spring_velocity(LibguiUi* ui, uint64_t id, uint8_t slot);
+void  libgui_pointer_velocity(LibguiUi* ui, float* out_x, float* out_y);
 /* Jump to a value; it eases from there towards its next target. */
 void  libgui_set_anim(LibguiUi* ui, uint64_t id, uint8_t slot, float value);
 /* Ask for another frame for a reason libgui cannot see: your own simulation is

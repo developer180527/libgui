@@ -373,3 +373,72 @@ pub unsafe extern "C" fn libgui_request_repaint(ui: *mut LibguiUi) {
 pub unsafe extern "C" fn libgui_keep_id(ui: *mut LibguiUi, id: u64) {
     with_ui(ui, (), |u| u.keep_id(Id(id)));
 }
+
+/// A retained value that moves toward `target` like a spring: `response` is
+/// roughly how long the motion takes in seconds, `damping` 1 for no overshoot
+/// (below 1 bounces). Pass 0 for both to use the theme's spring.
+///
+/// Unlike [`libgui_animate`] it carries velocity, so when `target` changes
+/// mid-flight the motion bends toward the new target instead of reversing in a
+/// single frame. Starts at `target` the first time an id is seen, asks for
+/// frames until it rests, and traces the same curve at any frame rate.
+///
+/// # Safety
+/// `ui` must be null or a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn libgui_animate_spring(
+    ui: *mut LibguiUi,
+    id: u64,
+    slot: u8,
+    target: f32,
+    response: f32,
+    damping: f32,
+) -> f32 {
+    with_ui(ui, 0.0, |u| {
+        u.keep_id(Id(id));
+        if response == 0.0 && damping == 0.0 {
+            u.animate_spring(Id(id), slot, target)
+        } else {
+            u.animate_spring_with(Id(id), slot, target, libgui::Spring::new(response, damping))
+        }
+    })
+}
+
+/// Put a spring at `value`, moving at `velocity` units/s: how a drag hands
+/// over on release. Pass [`libgui_pointer_velocity`] and the spring carries
+/// the throw.
+///
+/// # Safety
+/// `ui` must be null or a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn libgui_set_spring(ui: *mut LibguiUi, id: u64, slot: u8, value: f32, velocity: f32) {
+    with_ui(ui, (), |u| {
+        u.keep_id(Id(id));
+        u.set_spring(Id(id), slot, value, velocity)
+    })
+}
+
+/// A spring's current velocity in units/s; 0 if it has none.
+///
+/// # Safety
+/// `ui` must be null or a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn libgui_spring_velocity(ui: *mut LibguiUi, id: u64, slot: u8) -> f32 {
+    with_ui(ui, 0.0, |u| u.spring_velocity(Id(id), slot))
+}
+
+/// The pointer's velocity in logical px/s, smoothed over the last few frames.
+///
+/// # Safety
+/// `ui` must be null or a live handle; the out-parameters null or writable.
+#[no_mangle]
+pub unsafe extern "C" fn libgui_pointer_velocity(ui: *mut LibguiUi, out_x: *mut f32, out_y: *mut f32) {
+    let v = with_ui(ui, libgui::Vec2::ZERO, |u| u.pointer_velocity());
+    if let Some(s) = unsafe { out_x.as_mut() } {
+        *s = v.x;
+    }
+    if let Some(s) = unsafe { out_y.as_mut() } {
+        *s = v.y;
+    }
+}
+

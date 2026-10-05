@@ -54,6 +54,7 @@ an image or a glyph cannot be turned, only vector paths the app rotates itself. 
 | `crates/demo_gui/libgui_solaris` | A second demo: one dense, Houdini-shaped editor — menu bar, shelf, viewport, parameter panel, node network, scene-graph tree, details table and timeline, all at once. Its own theme, and a ~170-line host. |
 | `crates/demo_gui/libgui_cut` | A third demo: a non-linear video editor. A **timeline** — zoom, two-axis scroll, clips dragged between tracks, snapping — written as one custom surface on top of the library. |
 | `crates/demo_gui/libgui_pad` | A fourth demo: a plain-text editor. A document on a page, find and replace, and the two undo stacks — the field's and the app's — side by side. Its host is one window, about 200 lines. |
+| `crates/demo_gui/libgui_springs` | A small demo of spring animation: three switches flipped together (an ease against two springs, so an interruption shows the difference), a puck you throw between slots, and the two numbers that tune a spring with its curve drawn live. |
 
 ## Frame lifecycle
 
