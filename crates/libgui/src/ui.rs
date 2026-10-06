@@ -556,6 +556,20 @@ pub struct NavResponse {
     pub expand: bool,
     /// [`Nav::Collapse`](crate::Nav::Collapse) — a tree's Left.
     pub collapse: bool,
+    /// The cursor moved this frame *extending* the selection (Shift with the
+    /// arrows, in the default keymap). A multi-select list grows its range
+    /// from the anchor on this, and replaces its selection on a plain move:
+    ///
+    /// ```no_run
+    /// # use libgui::*;
+    /// # fn f(ui: &mut Ui, nav: NavResponse, apply: impl FnOnce(Selection)) {
+    /// if nav.moved {
+    ///     let kind = if nav.extend { SelectKind::Range } else { SelectKind::Replace };
+    ///     apply(ui.select(nav.id, nav.cursor, kind));
+    /// }
+    /// # }
+    /// ```
+    pub extend: bool,
 }
 
 /// What `close_cached` needs from `open_cached`. Held on a stack rather than
@@ -659,6 +673,20 @@ pub struct Ui {
     sheet_done: bool,
     /// Popups currently being built, innermost last.
     popup_stack: Vec<Id>,
+    /// Each menu's rows as last built: what the keyboard can land on. A popup
+    /// with none is not a menu, and keeps no keyboard of its own.
+    menu_items: FxMap<Id, Vec<MenuRow>>,
+    /// The rows of the menus being built this frame, innermost last, beside
+    /// `popup_stack`.
+    menu_building: Vec<Vec<MenuRow>>,
+    /// Spare row lists, so a steady menu allocates nothing.
+    menu_spare: Vec<Vec<MenuRow>>,
+    /// Where the keyboard highlight is in each open menu.
+    menu_cursor: FxMap<Id, usize>,
+    /// A row chosen from the keyboard this frame, and a submenu row opened
+    /// from it: (menu, row).
+    menu_choose: Option<(Id, usize)>,
+    menu_expand: Option<(Id, usize)>,
     /// Canvases currently being built: the composed canvas-to-window transform.
     xform_stack: Vec<Transform>,
     /// (widget, time the pointer arrived) for the tooltip delay.
@@ -684,6 +712,11 @@ pub struct Ui {
     /// both expose it as a system setting, and an app that reads it should
     /// write it here. The default is the value both platforms ship.
     pub double_click_time: f32,
+    /// How long a pause in typing starts a new type-ahead search, in seconds.
+    /// See [`Ui::type_ahead`]. One second is what Windows and macOS lists use.
+    pub type_ahead_pause: f32,
+    /// What has been typed into each collection's type-ahead, and when.
+    type_ahead: FxMap<Id, (String, f64)>,
     /// How long a pause in typing closes the current undo step, in seconds.
     ///
     /// A stretch of uninterrupted typing should be one thing to take back, not
@@ -928,6 +961,12 @@ impl Ui {
             open_anchors: FxMap::default(),
             sheet_done: false,
             popup_stack: Vec::new(),
+            menu_items: FxMap::default(),
+            menu_building: Vec::new(),
+            menu_spare: Vec::new(),
+            menu_cursor: FxMap::default(),
+            menu_choose: None,
+            menu_expand: None,
             xform_stack: Vec::new(),
             hover_since: None,
             layer_min: FxMap::default(),
@@ -938,6 +977,8 @@ impl Ui {
             pending_tab: None,
             focus_policy: crate::FocusPolicy::default(),
             double_click_time: 0.5,
+            type_ahead_pause: 1.0,
+            type_ahead: FxMap::default(),
             undo_run_pause: crate::text_history::DEFAULT_RUN_PAUSE,
             enabled: true,
             focus_visible: false,
@@ -1171,14 +1212,29 @@ impl Ui {
     /// without closures.
     pub fn open_popup_body(&mut self, id: Id, min_width: f32) -> bool {
         if !self.popup_open(id) {
+            // Closed: the next opening starts with no highlight, unless the
+            // keyboard opens it and puts one there.
+            self.menu_cursor.remove(&id);
             return false;
         }
         self.popup_sheet();
         if self.input.events.contains(&UiEvent::Action(UiAction::Cancel)) {
-            // Innermost first: Escape backs out one level.
+            // Innermost first: Escape backs out one level. Taken, so nothing
+            // outside the menu also reads it as "unfocus".
             if self.open_chain.last() == Some(&id) {
+                self.take_action(UiAction::Cancel);
                 self.open_chain.pop();
                 return false;
+            }
+        }
+        // The innermost open menu has the keyboard.
+        if self.open_chain.last() == Some(&id) {
+            if let Some(rows) = self.menu_items.remove(&id) {
+                let stays = rows.is_empty() || self.menu_keys(id, &rows);
+                self.menu_items.insert(id, rows);
+                if !stays {
+                    return false;
+                }
             }
         }
         let anchor = self.open_anchors.get(&id).copied().unwrap_or_default();
@@ -1217,8 +1273,128 @@ impl Ui {
         self.root_kids.push(idx as u32);
 
         self.popup_stack.push(id);
+        let rows = self.menu_spare.pop().unwrap_or_default();
+        self.menu_building.push(rows);
         self.open(idx);
         true
+    }
+
+    /// The keyboard in an open menu: move the highlight, choose, open or
+    /// close a submenu. Returns false if this menu closed itself (Left in a
+    /// submenu).
+    fn menu_keys(&mut self, id: Id, rows: &[MenuRow]) -> bool {
+        let n = rows.len();
+        let can = |i: usize| rows.get(i).is_some_and(|r| *r != MenuRow::Disabled);
+        // From `from` in direction `dir`, the next row that can be landed on;
+        // from nowhere, the first (or last).
+        let step = |from: Option<usize>, dir: isize| -> Option<usize> {
+            let start = match from {
+                Some(c) => c as isize,
+                None if dir > 0 => -1,
+                None => n as isize,
+            };
+            (1..=n as isize).map(|k| (start + dir * k).rem_euclid(n as isize) as usize).find(|&i| can(i))
+        };
+        let mut cur = self.menu_cursor.get(&id).copied();
+        // A highlight on a row that is disabled now, or gone, moves on.
+        if let Some(c) = cur {
+            if !can(c) {
+                cur = step(Some(c), 1);
+            }
+        }
+        // Shift changes nothing in a menu.
+        while let Some((nav, _)) = self.take_nav() {
+            match nav {
+                crate::Nav::Next => cur = step(cur, 1),
+                crate::Nav::Previous => cur = step(cur, -1),
+                crate::Nav::First | crate::Nav::PagePrevious => cur = step(None, 1),
+                crate::Nav::Last | crate::Nav::PageNext => cur = step(None, -1),
+                crate::Nav::Expand => {
+                    if let Some(c) = cur.filter(|&c| rows[c] == MenuRow::Submenu) {
+                        self.menu_expand = Some((id, c));
+                    }
+                }
+                crate::Nav::Collapse => {
+                    // Back out of a submenu; the parent keeps its highlight on
+                    // the row that opened it. A top-level menu has nowhere to
+                    // go back to.
+                    if self.open_chain.len() > 1 {
+                        self.open_chain.pop();
+                        return false;
+                    }
+                }
+            }
+        }
+        // A menu is not a text field: Enter chooses on every platform.
+        let choose =
+            self.take_action(UiAction::Activate) | self.take_action(UiAction::InsertNewline) | self.take_action(UiAction::Submit);
+        if let (true, Some(c)) = (choose, cur) {
+            match rows[c] {
+                MenuRow::Item => self.menu_choose = Some((id, c)),
+                MenuRow::Submenu => self.menu_expand = Some((id, c)),
+                MenuRow::Disabled => {}
+            }
+        }
+        match cur {
+            Some(c) => self.menu_cursor.insert(id, c),
+            None => self.menu_cursor.remove(&id),
+        };
+        true
+    }
+
+    /// Register a menu row being built, if this is inside a popup body:
+    /// `(menu, row index, keyboard highlight is here)`.
+    pub(crate) fn menu_row(&mut self, kind: MenuRow) -> Option<(Id, usize, bool)> {
+        let menu = self.popup_stack.last().copied()?;
+        let rows = self.menu_building.last_mut()?;
+        let i = rows.len();
+        rows.push(kind);
+        Some((menu, i, self.menu_cursor.get(&menu) == Some(&i)))
+    }
+
+    /// The pointer moved onto row `i` of `menu`: the highlight follows it, so
+    /// the keyboard carries on from where the hand left off. Only on movement,
+    /// so a resting pointer does not fight the arrow keys.
+    pub(crate) fn menu_point(&mut self, menu: Id, i: usize) {
+        if self.mouse_delta != Vec2::ZERO {
+            self.menu_cursor.insert(menu, i);
+        }
+    }
+
+    /// Has anyone used the keyboard (or moved the pointer) in `menu`?
+    pub(crate) fn menu_has_cursor(&self, menu: Id) -> bool {
+        self.menu_cursor.contains_key(&menu)
+    }
+
+    /// Was row `i` of `menu` chosen from the keyboard this frame?
+    pub(crate) fn menu_chosen(&mut self, menu: Id, i: usize) -> bool {
+        if self.menu_choose == Some((menu, i)) {
+            self.menu_choose = None;
+            return true;
+        }
+        false
+    }
+
+    /// Was submenu row `i` of `menu` opened from the keyboard this frame?
+    pub(crate) fn menu_expanded(&mut self, menu: Id, i: usize) -> bool {
+        if self.menu_expand == Some((menu, i)) {
+            self.menu_expand = None;
+            return true;
+        }
+        false
+    }
+
+    /// Put the keyboard highlight on the first row of `menu` when it next
+    /// builds: a menu opened from the keyboard starts with one.
+    pub(crate) fn menu_highlight_first(&mut self, menu: Id) {
+        self.menu_cursor.insert(menu, 0);
+    }
+
+    /// May a widget being built here take keyboard actions? Not while a popup
+    /// is open and this is outside it: a context menu over a focused list owns
+    /// the arrows, whichever was built first.
+    pub(crate) fn keys_reach(&self) -> bool {
+        self.open_chain.is_empty() || !self.popup_stack.is_empty()
     }
 
     /// Close the panel opened by [`Ui::open_popup_body`]. Only call this when
@@ -1250,6 +1426,14 @@ impl Ui {
         );
         self.close();
         self.popup_stack.pop();
+        if let Some(rows) = self.menu_building.pop() {
+            // Kept for next frame's keyboard; the list it replaces is reused.
+            if let Some(old) = self.menu_items.insert(id, rows) {
+                let mut old = old;
+                old.clear();
+                self.menu_spare.push(old);
+            }
+        }
     }
 
     /// How long the pointer has rested on `id`, in seconds. 0 if it is not there.
@@ -1643,6 +1827,14 @@ impl Ui {
         let _ = self.fonts.take_shaped_runs();
         self.dnd_begin_frame();
         self.popup_stack.clear();
+        // A keyboard choice that no row took — the menu closed under it — is
+        // not carried into another frame.
+        for mut rows in self.menu_building.drain(..) {
+            rows.clear();
+            self.menu_spare.push(rows);
+        }
+        self.menu_choose = None;
+        self.menu_expand = None;
         self.xform_stack.clear();
         let s = self.input.screen_size;
         let root = Node::new(Id::new("root"), Layout::column().width(Size::Fixed(s.x)).height(Size::Fixed(s.y)));
@@ -1780,6 +1972,9 @@ impl Ui {
         self.text_history.retain(|id, _| seen.contains(id));
         self.validated_edits.retain(|id, _| seen.contains(id));
         self.picker_states.retain(|id, _| seen.contains(id));
+        self.menu_items.retain(|id, _| seen.contains(id));
+        self.menu_cursor.retain(|id, _| seen.contains(id));
+        self.type_ahead.retain(|id, _| seen.contains(id));
         self.scroll_states.retain(|id, _| seen.contains(id));
         self.in_scroll.retain(|id, _| seen.contains(id));
         self.nav_states.retain(|id, _| seen.contains(id));
@@ -1963,9 +2158,15 @@ impl Ui {
         if !focused {
             return crate::KeyResponse::default();
         }
-        // What chord produces Submit is the keymap's, and a host with no
-        // keyboard can send the action straight in.
-        let activated = self.take_action(UiAction::Submit);
+        // What chord produces Submit or Activate is the keymap's, and a host
+        // with no keyboard can send either straight in. Both are taken, not
+        // the first found, so neither lingers for a later widget.
+        // While a popup is open, the keys are its; a control outside it keeps
+        // focus but is not pressed or unfocused through the menu.
+        if !self.keys_reach() {
+            return crate::KeyResponse { focused, activated: false };
+        }
+        let activated = self.take_action(UiAction::Submit) | self.take_action(UiAction::Activate);
         if self.take_action(UiAction::Cancel) {
             self.focused = None;
         }
@@ -2942,13 +3143,17 @@ impl Ui {
         let before = cursor;
         let mut expand = false;
         let mut collapse = false;
+        let mut extend = false;
 
-        if k.focused && len > 0 {
+        if k.focused && len > 0 && self.keys_reach() {
             let page = opts.page.max(1);
             // Every pending Navigate is taken, not just the first: a key held
             // down delivers several in a frame, and dropping them makes a long
             // list feel like it is fighting the hand holding the key.
-            while let Some(nav) = self.take_nav() {
+            while let Some((nav, ext)) = self.take_nav() {
+                // The last move decides: a held Shift extends, and a plain
+                // arrow after it replaces.
+                extend = ext;
                 let step = |c: usize, d: isize| -> usize {
                     let n = len as isize;
                     let t = c as isize + d;
@@ -2982,6 +3187,137 @@ impl Ui {
             activated: k.activated,
             expand,
             collapse,
+            extend: extend && cursor != before,
+        }
+    }
+
+    /// The arrow keys, read as steps for a control that adjusts a value: a
+    /// slider, a drag value, a colour picker's square. Only for a focused
+    /// widget, and only when no popup has the keys.
+    ///
+    /// Right and Up step up, Left and Down step down, Page Up and Page Down
+    /// take ten steps, Home and End go to the ends, and the extending form
+    /// (Shift) takes steps ten times larger. Which key is which is the
+    /// keymap's; these are what [`Nav`](crate::Nav) means to an adjustable
+    /// control, as ARIA defines a slider.
+    pub(crate) fn take_nudge(&mut self, focused: bool) -> Nudge {
+        let mut n = Nudge::default();
+        if !focused || !self.keys_reach() {
+            return n;
+        }
+        while let Some((nav, coarse)) = self.take_nav() {
+            let k = if coarse { 10.0 } else { 1.0 };
+            match nav {
+                crate::Nav::Expand => n.x += k,
+                crate::Nav::Collapse => n.x -= k,
+                crate::Nav::Previous => n.y += k,
+                crate::Nav::Next => n.y -= k,
+                crate::Nav::PagePrevious => n.y += 10.0 * k,
+                crate::Nav::PageNext => n.y -= 10.0 * k,
+                crate::Nav::First => {
+                    n.home = true;
+                    n.end = false;
+                }
+                crate::Nav::Last => {
+                    n.end = true;
+                    n.home = false;
+                }
+            }
+        }
+        n
+    }
+
+    /// Jump a focused collection's cursor to the row whose label starts with
+    /// what the user is typing — "br" to *bracket* — the way every list on
+    /// every desktop does. Call it after [`Ui::open_collection`] and before
+    /// building the rows, with the labels the rows show; libgui never learns
+    /// what a row is, so this is the only way it can know.
+    ///
+    /// The rules everyone expects and nobody enjoys writing:
+    ///
+    /// - The match is a case-insensitive prefix, and starts **at** the
+    ///   current row, so typing on from "b" to "br" stays put when the row
+    ///   already fits.
+    /// - The same letter again cycles through the rows that start with it.
+    /// - A pause of [`Ui::type_ahead_pause`] starts a new search.
+    /// - A space that begins a search is the Activate key, not text.
+    ///
+    /// Moves `nav.cursor` and sets `nav.moved`, so code that follows the
+    /// cursor — selection, `scroll_to` — needs nothing new.
+    ///
+    /// ```no_run
+    /// # use libgui::*;
+    /// # fn f(ui: &mut Ui, parts: &[String]) {
+    /// let mut nav = ui.open_collection("parts", parts.len());
+    /// ui.type_ahead(&mut nav, parts.len(), |i| parts[i].as_str());
+    /// for (i, p) in parts.iter().enumerate() {
+    ///     let r = ui.selectable_keyed(i, p, nav.cursor == i);
+    ///     if nav.moved && nav.cursor == i { ui.scroll_to(r.id); }
+    /// }
+    /// ui.close_collection();
+    /// # }
+    /// ```
+    ///
+    /// Typing is taken from a focused collection, so a single-letter app
+    /// shortcut does not also fire while the list has focus — which is the
+    /// point of a list having focus.
+    pub fn type_ahead<S: AsRef<str>>(&mut self, nav: &mut NavResponse, len: usize, label: impl Fn(usize) -> S) {
+        if !nav.focused || len == 0 || !self.keys_reach() {
+            return;
+        }
+        // Everything typed this frame, in order.
+        let mut typed = String::new();
+        self.input.events.retain(|e| match e {
+            UiEvent::Text(t) => {
+                typed.push_str(t);
+                false
+            }
+            _ => true,
+        });
+        if typed.is_empty() {
+            return;
+        }
+        let now = self.time;
+        let pause = self.type_ahead_pause as f64;
+        let (buf, last) = self.type_ahead.entry(nav.id).or_insert_with(|| (String::new(), f64::NEG_INFINITY));
+        if now - *last > pause {
+            buf.clear();
+        }
+        let mut spaced = false;
+        for c in typed.chars() {
+            if c.is_control() || (c.is_whitespace() && buf.is_empty()) {
+                continue;
+            }
+            spaced |= c.is_whitespace();
+            buf.push(c);
+        }
+        // A space in the middle of a search is part of it ("my file"), so the
+        // Activate the same key sent is withdrawn: one keystroke, one meaning.
+        if spaced {
+            nav.activated = false;
+        }
+        *last = now;
+        if buf.is_empty() {
+            return;
+        }
+        let query: Vec<char> = buf.chars().flat_map(char::to_lowercase).collect();
+        let cursor = nav.cursor.min(len - 1);
+        // "bbb": cycle the rows starting with b, from the one after the cursor.
+        // Anything else: the first row from the cursor itself that fits.
+        let cycling = query.iter().all(|c| *c == query[0]);
+        let (start, want) = if cycling { (cursor + 1, &query[..1]) } else { (cursor, &query[..]) };
+        let fits = |i: usize| {
+            let l = label(i);
+            let mut l = l.as_ref().chars().flat_map(char::to_lowercase);
+            want.iter().all(|q| l.next() == Some(*q))
+        };
+        if let Some(i) = (0..len).map(|k| (start + k) % len).find(|&i| fits(i)) {
+            if i != nav.cursor {
+                nav.cursor = i;
+                nav.moved = true;
+                nav.extend = false;
+                self.nav_states.insert(nav.id, i);
+            }
         }
     }
 
@@ -3075,16 +3411,19 @@ impl Ui {
         self.nav_states.get(&id).copied()
     }
 
-    /// Take one pending [`Nav`](crate::Nav), whichever it is. `take_action`
-    /// wants the exact action, and a collection accepts any of eight.
-    fn take_nav(&mut self) -> Option<crate::Nav> {
-        let at = self.input.events.iter().position(|e| matches!(e, UiEvent::Action(UiAction::Navigate(_))));
-        match at {
-            Some(i) => match self.input.events.remove(i) {
-                UiEvent::Action(UiAction::Navigate(n)) => Some(n),
-                _ => None,
-            },
-            None => None,
+    /// Take one pending [`Nav`](crate::Nav), whichever it is, plain or
+    /// extending: `(nav, extend)`. `take_action` wants the exact action, and a
+    /// collection accepts any of sixteen.
+    pub(crate) fn take_nav(&mut self) -> Option<(crate::Nav, bool)> {
+        let at = self
+            .input
+            .events
+            .iter()
+            .position(|e| matches!(e, UiEvent::Action(UiAction::Navigate(_) | UiAction::NavigateExtend(_))));
+        match self.input.events.remove(at?) {
+            UiEvent::Action(UiAction::Navigate(n)) => Some((n, false)),
+            UiEvent::Action(UiAction::NavigateExtend(n)) => Some((n, true)),
+            _ => None,
         }
     }
 
@@ -5304,5 +5643,46 @@ mod tests {
         build_touch(&mut ui, touch(&[(10.0, 15.0)]), &mut v);
         let (r, _) = build_touch(&mut ui, touch(&[]), &mut v);
         assert!(!r[0].clicked, "a pinch never clicks");
+    }
+}
+
+/// What a menu row is, to the keyboard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MenuRow {
+    Item,
+    Submenu,
+    Disabled,
+}
+
+/// Steps from the arrow keys for an adjustable control. See
+/// [`Ui::take_nudge`]. `y` is up-positive, as a value is.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct Nudge {
+    pub x: f32,
+    pub y: f32,
+    pub home: bool,
+    pub end: bool,
+}
+
+impl Nudge {
+    /// For a control with one value: both axes adjust it.
+    pub fn steps(&self) -> f32 {
+        self.x + self.y
+    }
+
+    pub fn any(&self) -> bool {
+        self.x != 0.0 || self.y != 0.0 || self.home || self.end
+    }
+
+    /// `value` moved by these steps of `step`, within `min..=max`.
+    pub fn apply(&self, value: f32, step: f32, min: f32, max: f32) -> f32 {
+        let v = if self.home {
+            min
+        } else if self.end {
+            max
+        } else {
+            value + self.steps() * step
+        };
+        if min <= max { v.clamp(min, max) } else { v }
     }
 }

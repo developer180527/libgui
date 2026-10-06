@@ -625,8 +625,8 @@ black: dragging to the bottom of the square and back, or an undo to grey,
 does not snap the hue to red. A still picker never writes your colour, so one
 that HSV cannot reproduce bit for bit does not drift by being looked at.
 
-Arrow keys do not nudge it, as they do not nudge a slider; Tab reaches every
-part, and the hex field takes an exact value.
+Tab reaches every part; the arrows adjust a focused part (§8.3.1), and the
+hex field takes an exact value.
 
 ### 5.9 Motion: springs
 
@@ -786,6 +786,60 @@ ui.close_collection();
 The collection becomes **one** Tab stop instead of one per row, and the arrows
 move the cursor inside it. `nav.expand` / `nav.collapse` report a tree's
 Right/Left for you to act on — libgui does not know your tree's shape.
+
+**Shift with the arrows** extends a selection. `nav.extend` says the move was
+an extending one; the selection stays yours, and `ui.select` keeps the anchor:
+
+```rust
+if nav.moved {
+    let kind = if nav.extend { SelectKind::Range } else { SelectKind::Replace };
+    apply(ui.select(nav.id, nav.cursor, kind));
+}
+```
+
+**Type-ahead** — typing "br" to jump to *bracket* — needs the labels, which
+only you have. Call it straight after opening the collection:
+
+```rust
+let mut nav = ui.open_collection("parts", parts.len());
+ui.type_ahead(&mut nav, parts.len(), |i| parts[i].as_str());
+```
+
+It moves `nav.cursor` and sets `nav.moved`, so nothing else changes. The rules
+are the ones every desktop list follows: a case-insensitive prefix from the
+current row, so typing on from "b" to "br" stays put when the row still fits;
+the same letter again cycles through the rows starting with it; a pause of
+`ui.type_ahead_pause` (one second) starts over; and a space that *begins* a
+search is the Activate key while one in the middle is text ("my file").
+
+### 8.3.1 Pressing, menus and adjustable controls
+
+**Activate** (`UiAction::Activate`) presses whatever has focus — a button, a
+checkbox, a list's row, a menu item. The default keymap binds Space to it on
+every platform, and Enter too on Windows and Linux; on a Mac, Enter belongs to
+the default button and the focused one is Space's. A text field ignores it and
+types its space. It is separate from `Submit` because a focused field reads
+`Submit` as *commit*: bound to Space, it would commit on every space typed.
+
+**Menus** work from the keyboard with nothing to write. A menu button is a
+focus stop and opens on Activate with its first row lit; the arrows move the
+highlight past disabled rows and separators, wrapping at the ends; Right opens
+a submenu on its first row and Left backs out of it; Enter or Space chooses;
+Escape backs out one level at a time. Moving the pointer moves the same
+highlight, so hand and keys never disagree about which row is lit.
+
+**While a popup is open, it has the keys.** A list, a field or a button outside
+it keeps its focus but takes no navigation, typing or activation until the
+popup closes — so a context menu over a focused list owns the arrows whichever
+was built first, and Escape closes the menu without unfocusing the field under
+it.
+
+**Sliders, drag values and the colour picker** take the arrows when focused:
+Right and Up step up, Left and Down step down, Page Up and Page Down take ten
+steps, Home and End go to the ends, and Shift makes every step ten times
+larger. A slider's step is a hundredth of its range; a drag value's is its
+speed; the picker's square moves saturation across and value up and down, and
+each keyboard step is one finished edit.
 
 ### 8.4 Scrolling focus into view
 
@@ -1336,10 +1390,8 @@ puts it in the order the gaps are worth closing.
 - `plot` is a debug bar chart, not a real line/area chart.
 - No modal/dialog primitive (build one on `ui.popup` / `Layer`).
 - No date picker, no toast/notification.
-- Tables have no 2-D cell cursor; menus have no arrow-key navigation; no
-  type-ahead in lists.
-- Trees have no drag-to-reparent. Multi-select works (§5.4) but only by
-  pointer: Shift+Arrow does not extend a selection.
+- Tables have no 2-D cell cursor.
+- Trees have no drag-to-reparent.
 - The C API (§14) covers everything the Rust API does that a host needs,
   docking and tables included — both through function-pointer vtables. What it
   does not cross is what does not exist yet, which is the rest of this list.

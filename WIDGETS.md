@@ -124,11 +124,13 @@ from the keyboard is missing for a portion of every application's users.
 | Element | Apps | libgui |
 |---|---|---|
 | Tab traversal, focus ring | 14 | yes |
+| Pressing the focused control (Space, Enter) | 14 | yes — **was missing**: the keymap bound neither, so no focused button could be pressed |
+| Adjusting a focused slider with the arrows | 12 | yes — was missing |
 | Focus scrolled into view | 14 | yes |
 | Arrow-key navigation within a list or tree | 14 | yes (`collection`) |
-| **Arrow-key navigation within a menu** | 14 | **no** |
-| **Type-ahead in a list** (type "br" to jump to "bracket") | 12 | **no** |
-| Shift+Arrow to extend a selection | 11 | **no** — multi-select is pointer-only |
+| Arrow-key navigation within a menu | 14 | yes |
+| Type-ahead in a list (type "br" to jump to "bracket") | 12 | yes (`type_ahead`) |
+| Shift+Arrow to extend a selection | 11 | yes (`NavResponse::extend`) |
 | Application shortcuts, chords | 14 | yes (`libgui_keymap`) |
 | Screen reader / platform accessibility tree | 14 | **no** — deferred, DESIGN §14 |
 
@@ -198,7 +200,7 @@ application actually being built.
 | 4 | Toast / notification | The standard way to report a non-modal failure. Twelve of fourteen. | 2 d |
 | 5 | **Decide on rotation** | Not build — decide. The cost falls on backend authors, and it gets worse the longer it waits. | — |
 | 6 | Virtualised tree | A CAD assembly browser is a tree with tens of thousands of nodes. Today it is a tree or it is virtual, not both. | 3 d |
-| 7 | Menu arrow keys, list type-ahead, Shift+Arrow selection | Keyboard gaps in widgets that otherwise exist. Small, and they compound with accessibility later. | 3 d |
+| 7 | ~~Menu arrow keys, list type-ahead, Shift+Arrow selection~~ | **Done**, with two the survey missed: no focused control could be pressed from the keyboard at all, and sliders took no arrows. | — |
 | 8 | Searchable dropdown, command palette, search field, badge, split button | The compositions. Cheap, and worth having once rather than five times. | 4 d total |
 | 9 | Table cell editing behaviour + 2-D cursor | A parameters table. A field in a cell already works; what is missing is click-to-edit, commit/cancel, and Tab moving to the next cell. | 4 d |
 | 10 | Chart with axes | No CAD need. Do it when an app asks. | 4 d |

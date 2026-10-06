@@ -131,6 +131,17 @@ void paint_delete(void* user) {
     delete static_cast<F*>(user);
 }
 
+// A label lambda for type-ahead: nothing escapes, so an exception reads as
+// a row with no label.
+template <class F>
+const char* label_trampoline(void* user, uint64_t index) {
+    try {
+        return (*static_cast<F*>(user))(index);
+    } catch (...) {
+        return nullptr;
+    }
+}
+
 // A lambda validator reaches C as a function pointer plus a pointer to the
 // lambda, which lives on the caller's stack for the whole call. Nothing
 // escapes: an exception is a refusal, because unwinding through libgui's
@@ -232,6 +243,7 @@ struct Nav {
     bool activated = false;
     bool expand = false;
     bool collapse = false;
+    bool extend = false;   // Shift+arrow: grow the selection from its anchor
 };
 
 class Ui {
@@ -384,6 +396,7 @@ public:
         n.activated = libgui_nav_activated() != 0;
         n.expand = libgui_nav_expand() != 0;
         n.collapse = libgui_nav_collapse() != 0;
+        n.extend = libgui_nav_extend() != 0;
         return {n, CollectionGuard(h_)};
     }
 
@@ -431,6 +444,18 @@ public:
     void tooltip(uint64_t wid, const char* t) { libgui_tooltip(h_, wid, t); }
     void scroll_to(uint64_t wid) { libgui_scroll_to(h_, wid); }
     void set_cursor(uint64_t coll, uint64_t index) { libgui_set_cursor(h_, coll, index); }
+
+    // Type-ahead for the collection just opened, with `label(i)` giving row
+    // i's text (a const char*, valid until it returns). Updates `nav`.
+    template <class F>
+    void type_ahead(Nav& nav, uint64_t len, F&& label) {
+        using Fn = std::remove_reference_t<F>;
+        libgui_type_ahead(h_, len, &detail::label_trampoline<Fn>,
+                          const_cast<void*>(static_cast<const void*>(&label)));
+        nav.cursor = libgui_nav_cursor();
+        nav.moved = libgui_nav_moved() != 0;
+        nav.extend = libgui_nav_extend() != 0;
+    }
 
     // A text field over a std::string, grown as needed. The C form wants a
     // buffer and a capacity; this hides that. When the text outgrew what was

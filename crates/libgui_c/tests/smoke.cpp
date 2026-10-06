@@ -256,6 +256,31 @@ int main(int argc, char** argv) {
         CHECK(!ui.poisoned(), "the picker poisoned the Ui");
     }
 
+    // Type-ahead with a lambda for the labels.
+    {
+        const char* parts[] = {"Axle", "bearing", "Bolt", "Bracket"};
+        ui.install_default_keymap();
+        auto build = [&](uint64_t* cursor) {
+            ui.begin_frame(400.0f, 300.0f, 1.0f, 1.0f / 60.0f);
+            {
+                auto [nav, _g] = ui.collection("parts", 4);
+                ui.type_ahead(nav, 4, [&](uint64_t i) { return parts[i]; });
+                *cursor = nav.cursor;
+                for (uint64_t i = 0; i < 4; i++) ui.selectable(i, parts[i], nav.cursor == i);
+            }
+            ui.end_frame();
+        };
+        uint64_t cursor = 0;
+        build(&cursor);
+        ui.key(LIBGUI_KEY_TAB, true);
+        build(&cursor);
+        ui.key(LIBGUI_KEY_TAB, false);
+        build(&cursor);
+        ui.text("br");
+        build(&cursor);
+        CHECK(cursor == 3, "C++ type-ahead did not reach Bracket");
+    }
+
     if (failures == 0) std::printf("ok: C++ wrapper test passed (%d paints)\n", painted);
     return failures == 0 ? 0 : 1;
 }

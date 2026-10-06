@@ -182,8 +182,10 @@ pub fn ui_bindings(platform: Platform) -> KeyBindings {
     // same chord is deliberately bound twice: only one of a text field and a
     // collection can have focus, so each takes the action it understands and
     // the other is dropped. See `KeyBindings::bind`.
+    // Shift extends: a list grows its selection, a slider takes a coarse step.
     let nav = |b: &mut KeyBindings, c: Chord, n: Nav| {
         b.bind(p(c), UiAction::Navigate(n));
+        b.bind(p(c.shift()), UiAction::NavigateExtend(n));
     };
     nav(&mut b, Chord::key(ArrowDown), Nav::Next);
     nav(&mut b, Chord::key(ArrowUp), Nav::Previous);
@@ -193,6 +195,10 @@ pub fn ui_bindings(platform: Platform) -> KeyBindings {
     nav(&mut b, Chord::key(End), Nav::Last);
     nav(&mut b, Chord::key(PageDown), Nav::PageNext);
     nav(&mut b, Chord::key(PageUp), Nav::PagePrevious);
+
+    // Space presses whatever has focus, everywhere. A text field ignores
+    // Activate and types the space instead.
+    act(&mut b, Chord::key(Space), UiAction::Activate);
 
     match platform {
         Platform::Mac => {
@@ -219,6 +225,10 @@ pub fn ui_bindings(platform: Platform) -> KeyBindings {
             del(&mut b, Chord::key(K).ctrl(), LineEnd);
         }
         Platform::Windows | Platform::Linux => {
+            // Enter presses the focused control here too. Not on a Mac, where
+            // Enter is the default button's and the focused one is Space's.
+            act(&mut b, Chord::key(Enter), UiAction::Activate);
+            act(&mut b, Chord::key(NumpadEnter), UiAction::Activate);
             mv(&mut b, Chord::key(ArrowLeft).ctrl(), WordLeft);
             mv(&mut b, Chord::key(ArrowRight).ctrl(), WordRight);
             mv(&mut b, Chord::key(Home).ctrl(), DocStart);
@@ -540,11 +550,12 @@ mod tests {
     }
 
     /// Which consumer would take an action: a focused text field, or a
-    /// focused collection. One chord may serve both — Down moves a caret and
-    /// moves a list cursor — because only one of them can have focus.
+    /// focused list or control. One chord may serve both — Down moves a caret
+    /// and moves a list cursor, Enter commits a field and presses a button —
+    /// because only one of them can have focus.
     fn consumer(a: UiAction) -> &'static str {
         match a {
-            UiAction::Navigate(_) => "collection",
+            UiAction::Navigate(_) | UiAction::NavigateExtend(_) | UiAction::Activate => "collection",
             _ => "widget",
         }
     }

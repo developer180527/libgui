@@ -328,3 +328,35 @@ fn a_focused_collection_shows_a_focus_ring() {
     }
     assert!(rings(&mut ui) > idle, "tabbing onto the list drew no focus ring");
 }
+
+/// Two moves in one frame — a held key, or a host sending actions directly —
+/// report the last: an extending move and then a plain one is a plain move.
+#[test]
+fn the_last_move_in_a_frame_decides_whether_it_extends() {
+    let mut ui = Ui::new(Theme::dark(), include_bytes!("../../../assets/Inter.ttf")).expect("font");
+    let last = std::cell::Cell::new(None);
+    let frame = |ui: &mut Ui| {
+        ui.begin_frame(FrameInfo { screen_size: Vec2::new(300.0, 300.0), scale: 1.0, dt: 1.0 / 60.0 });
+        let nav = ui.open_collection("rows", 6);
+        ui.set_focus(Some(nav.id));
+        last.set(Some(nav));
+        for i in 0..6 {
+            ui.selectable_keyed(i, "Row", false);
+        }
+        ui.close_collection();
+        let _ = ui.end_frame();
+    };
+    frame(&mut ui);
+    frame(&mut ui);
+    ui.push(InputEvent::Action(UiAction::NavigateExtend(Nav::Next)));
+    ui.push(InputEvent::Action(UiAction::Navigate(Nav::Next)));
+    frame(&mut ui);
+    let nav = last.get().unwrap();
+    assert_eq!(nav.cursor, 2);
+    assert!(!nav.extend, "an extending move followed by a plain one was reported as extending");
+
+    ui.push(InputEvent::Action(UiAction::Navigate(Nav::Next)));
+    ui.push(InputEvent::Action(UiAction::NavigateExtend(Nav::Next)));
+    frame(&mut ui);
+    assert!(last.get().unwrap().extend, "a plain move followed by an extending one was not reported as extending");
+}

@@ -7,3 +7,7 @@ crates/demo_gui/libgui_cut/editor-scrolled.png
 crates/demo_gui/libgui_pad/pad.png
 crates/demo_gui/libgui_pad/pad-light.png
 crates/demo_gui/libgui_springs/springs.png
+crates/demo_gui/libgui_colors/colors-dark.png
+crates/demo_gui/libgui_colors/colors-midnight.png
+crates/demo_gui/libgui_colors/colors-light.png
+crates/demo_gui/libgui_colors/colors-accent.png

@@ -40,11 +40,12 @@ pub struct LibguiUi {
     /// bug is worse than either. So the handle stops, says so, and the app
     /// decides what to do.
     pub(crate) poisoned: bool,
-    /// A validator callback is running. libgui holds `&mut Ui` across it, so
-    /// any call through this handle would make a second one: refused, rather
-    /// than undefined behaviour. A validator answers a question about text;
-    /// it has no reason to build UI.
-    pub(crate) validating: bool,
+    /// A callback that answers a question is running — a validator, or the
+    /// labels for a type-ahead. libgui holds `&mut Ui` across it, so any call
+    /// through this handle would make a second one: refused, rather than
+    /// undefined behaviour. Such a callback answers about text; it has no
+    /// reason to build UI.
+    pub(crate) answering: bool,
 }
 
 thread_local! {
@@ -85,8 +86,8 @@ pub(crate) fn with_ui<R>(ui: *mut LibguiUi, fallback: R, body: impl FnOnce(&mut 
         if handle.poisoned {
             return fallback;
         }
-        if handle.validating {
-            set_error("libgui called from inside a validator, which must only answer about the text");
+        if handle.answering {
+            set_error("libgui called from inside a validator or label callback, which must only answer about the text");
             return fallback;
         }
         handle.ui
@@ -127,8 +128,8 @@ pub(crate) fn inside_callback(ui: *mut LibguiUi, what: &str) -> bool {
         // ending the frame from a validator laid out and closed a tree the
         // field was still building, and freeing the handle was a
         // use-after-free.
-        Some(h) if h.validating => {
-            set_error(&format!("{what}: not allowed inside a validator, which must only answer about the text"));
+        Some(h) if h.answering => {
+            set_error(&format!("{what}: not allowed inside a validator or label callback, which must only answer about the text"));
             true
         }
         _ => false,
@@ -239,7 +240,7 @@ pub(crate) fn into_handle(ui: Ui) -> *mut LibguiUi {
         depth: 0,
         frame: Default::default(),
         poisoned: false,
-        validating: false,
+        answering: false,
     }))
 }
 

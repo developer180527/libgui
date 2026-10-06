@@ -293,6 +293,19 @@ pub enum UiAction {
     /// Move the cursor inside the focused collection (the arrow keys, usually).
     /// Focus moves *between* widgets; this moves *within* one.
     Navigate(Nav),
+    /// [`UiAction::Navigate`], extending the selection as it goes (Shift with
+    /// the arrows, usually). A list reports it in
+    /// [`NavResponse::extend`](crate::NavResponse::extend); a slider takes it
+    /// as a coarse step.
+    NavigateExtend(Nav),
+    /// Press the focused control: a button, a checkbox, a menu item, a list's
+    /// row. Space, usually, and Enter on platforms where Enter presses what
+    /// has focus.
+    ///
+    /// Separate from [`UiAction::Submit`] because a focused text field takes
+    /// `Submit` as *commit*: bound to Space, it would commit a field on every
+    /// space typed. A text field ignores `Activate`.
+    Activate,
 }
 
 /// Which chords perform which [`UiAction`]: the part of the keymap libgui's

@@ -4,6 +4,7 @@
 //!   4. copy its style from `self.theme` (so `with_style` scopes work)
 //!   5. `add_leaf` with a layout + a paint closure that runs after layout.
 
+use crate::ui::MenuRow;
 use crate::{
     Align, Axis, ButtonStyle, Chevron, Color, Cursor, FocusKind, Id, Insets, Layout, Painter, Rect, Response, Size, TextureId, Theme, Ui,
     Vec2,
@@ -387,6 +388,11 @@ impl Ui {
             let frac = ((resp.mouse_pos.x - resp.rect.x - kr0) / (resp.rect.w - 2.0 * kr0)).clamp(0.0, 1.0);
             *value = min + frac * (max - min);
         }
+        // The keyboard: a hundredth of the range a step.
+        let nudge = self.take_nudge(resp.focused);
+        if nudge.any() {
+            *value = nudge.apply(*value, (max - min) / 100.0, min.min(max), min.max(max));
+        }
         if resp.hovered || resp.active {
             self.cursor = if resp.active { Cursor::Grabbing } else { Cursor::Grab };
         }
@@ -448,6 +454,18 @@ impl Ui {
             let scale = if mods.alt { 0.1 } else if mods.shift { 10.0 } else { 1.0 };
             *value = (*value + resp.drag_delta.x * speed * scale).clamp(*range.start(), *range.end());
         }
+        // The keyboard: one pixel's worth of drag a step. Home and End mean
+        // something only when the range has ends.
+        let mut nudge = self.take_nudge(resp.focused);
+        if !range.start().is_finite() {
+            nudge.home = false;
+        }
+        if !range.end().is_finite() {
+            nudge.end = false;
+        }
+        if nudge.any() {
+            *value = nudge.apply(*value, speed, *range.start(), *range.end());
+        }
         if resp.hovered || resp.active {
             self.cursor = Cursor::ResizeHorizontal;
         }
@@ -488,6 +506,10 @@ impl Ui {
             // Up is more, which is the opposite of the y axis.
             let frac = 1.0 - ((resp.mouse_pos.y - resp.rect.y - kr0) / (resp.rect.h - 2.0 * kr0)).clamp(0.0, 1.0);
             *value = min + frac * (max - min);
+        }
+        let nudge = self.take_nudge(resp.focused);
+        if nudge.any() {
+            *value = nudge.apply(*value, (max - min) / 100.0, min.min(max), min.max(max));
         }
         if resp.hovered || resp.active {
             self.cursor = if resp.active { Cursor::Grabbing } else { Cursor::Grab };
@@ -703,8 +725,11 @@ impl Ui {
         let s = self.theme.menu;
         let size = self.theme.metrics.font_size;
         let m = self.text_size(size, label);
-        let resp = self.interact(id);
+        // Focusable, so the keyboard can reach a menu at all: Tab to it and
+        // Activate opens it with its first row highlighted.
+        let resp = self.interact_focusable(id, FocusKind::Control);
         let open = self.popup_open(menu_id);
+        let from_keys = resp.clicked && !resp.pressed && !resp.active;
 
         // While a menu is open the sheet swallows the pointer, so hovering is
         // judged against this button's own rect: that is what lets you slide
@@ -721,6 +746,9 @@ impl Ui {
                 self.close_popups();
             } else {
                 self.open_popup(menu_id, anchor);
+                if from_keys {
+                    self.menu_highlight_first(menu_id);
+                }
             }
         }
         if resp.hovered {
@@ -777,6 +805,17 @@ impl Ui {
             resp.clicked = false;
             resp.hovered = false;
         }
+        let row = self.menu_row(if enabled { MenuRow::Item } else { MenuRow::Disabled });
+        let mut keyed = false;
+        if let Some((menu, i, here)) = row {
+            if resp.hovered {
+                self.menu_point(menu, i);
+            }
+            if enabled && self.menu_chosen(menu, i) {
+                resp.clicked = true;
+            }
+            keyed = here && enabled;
+        }
         if resp.clicked {
             // Choosing an item dismisses the whole chain, submenus included.
             self.close_popups();
@@ -786,7 +825,10 @@ impl Ui {
             // Moving onto a plain item closes any submenu the pointer left.
             self.close_sibling_submenus(id);
         }
-        let hot = self.animate_bool(id, 0, resp.hovered);
+        // Lit by the keyboard highlight, which the pointer moves when it moves;
+        // a menu nobody has used the keyboard in lights what is under the hand.
+        let lit = keyed || (resp.hovered && row.is_none_or(|(m, _, _)| !self.menu_has_cursor(m)));
+        let hot = self.animate_bool(id, 0, lit);
         let label = self.frame_text(label);
         let content = Vec2::new(s.gutter + m.x + hint_w + s.item_padding_x, m.y);
         let layout = Layout::leaf(Size::Grow(1.0), Size::Fixed(s.item_height)).padding(Insets::xy(s.item_padding_x, 0.0));
@@ -823,18 +865,30 @@ impl Ui {
         let m = self.text_size(size, label);
         let resp = self.interact(id);
         let open = self.popup_open(child);
-        if resp.hovered && !open {
+        let row = self.menu_row(MenuRow::Submenu);
+        let (mut keyed, mut from_keys) = (false, false);
+        if let Some((menu, i, here)) = row {
+            if resp.hovered {
+                self.menu_point(menu, i);
+            }
+            from_keys = self.menu_expanded(menu, i);
+            keyed = here;
+        }
+        if (resp.hovered || from_keys) && !open {
             // Anchored to the row's right edge, so the child sits beside it.
             let a = self.xform().rect(resp.rect);
             let anchor = Rect::new(a.right() - 4.0, a.y - s.padding.top - 1.0, 0.0, 0.0);
             if let Some(parent) = self.enclosing_popup() {
                 self.open_child_popup(parent, child, anchor);
+                if from_keys {
+                    self.menu_highlight_first(child);
+                }
             }
         }
         if resp.hovered {
             self.cursor = Cursor::Pointer;
         }
-        let hot = self.animate_bool(id, 0, resp.hovered || open);
+        let hot = self.animate_bool(id, 0, resp.hovered || open || keyed);
         let label = self.frame_text(label);
         let arrow_w = s.item_padding_x * 1.5;
         let content = Vec2::new(s.gutter + m.x + arrow_w + s.item_padding_x, m.y);

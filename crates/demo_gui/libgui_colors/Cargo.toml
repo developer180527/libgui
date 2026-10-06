@@ -1,0 +1,21 @@
+[package]
+name = "libgui_colors"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "A libgui demo of colour: the picker inline, as swatches and compact, gradients, and themes rebuilt around a picked accent."
+
+[dependencies]
+libgui = { path = "../../libgui" }
+libgui_keymap = { path = "../../libgui_keymap" }
+libgui_wgpu = { path = "../../libgui_wgpu" }
+libgui_winit = { path = "../../libgui_winit" }
+wgpu.workspace = true
+winit.workspace = true
+pollster.workspace = true
+
+[dev-dependencies]
+libgui_soft = { path = "../../libgui_soft" }
+png = "0.18"

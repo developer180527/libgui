@@ -291,3 +291,33 @@ fn a_swatch_opens_a_picker_that_edits_the_colour() {
     frame(&mut ui, &mut color);
     assert!(close(color, Color::WHITE), "the picker in the popup did not edit the colour: {color:?}");
 }
+
+/// At full value the handle sits on the square's top edge — where every
+/// saturated colour is — and must be drawn whole, not cut in half by the
+/// square's own clip.
+#[test]
+fn the_handle_is_whole_at_the_squares_edge() {
+    let mut w = World::new(RED); // value 1: the top edge
+    w.ui.begin_frame(FrameInfo { screen_size: Vec2::new(600.0, 400.0), scale: 1.0, dt: 1.0 / 60.0 });
+    let color = &mut w.color;
+    // Away from the window's edge, which may clip it and should.
+    let col = Layout::column().width(Size::Fixed(W + 40.0)).height(Size::Fit).padding(Insets::all(20.0));
+    w.ui.container(col, Frame::none(), |ui| {
+        ui.color_picker("c", color);
+    });
+    let out = w.ui.end_frame();
+    let ring = out
+        .draw
+        .instances
+        .iter()
+        .find(|i| i.rect[2] == 12.0 && i.rect[3] == 12.0 && i.border_color == Color::WHITE.to_array())
+        .expect("no handle drawn");
+    let [x, y, rw, rh] = ring.rect;
+    let [cx0, cy0, cx1, cy1] = ring.clip;
+    assert!(
+        cx0 <= x && cy0 <= y && cx1 >= x + rw && cy1 >= y + rh,
+        "the handle at {:?} is clipped to {:?}",
+        ring.rect,
+        ring.clip
+    );
+}

@@ -1,10 +1,11 @@
 //! The collection cursor, flattened.
 //!
-//! `NavResponse` carries six things a C caller needs after opening a
+//! `NavResponse` carries what a C caller needs after opening a
 //! collection. Returning a struct from the table's shape would need another
 //! mirror and another size check, so instead the id comes back and the rest is
 //! read through accessors — the same pattern as the frame output.
 
+use crate::handle::{set_error, with_ui, LibguiUi};
 use libgui::NavResponse;
 use std::cell::Cell;
 
@@ -29,6 +30,7 @@ fn get() -> NavResponse {
         activated: false,
         expand: false,
         collapse: false,
+        extend: false,
     })
 }
 
@@ -70,4 +72,61 @@ pub extern "C" fn libgui_nav_expand() -> u8 {
 #[no_mangle]
 pub extern "C" fn libgui_nav_collapse() -> u8 {
     get().collapse as u8
+}
+
+/// The cursor moved this frame *extending* the selection (Shift with the
+/// arrows): grow the range from the anchor — `libgui_select` with kind 2 — rather
+/// than replacing the selection.
+#[no_mangle]
+pub extern "C" fn libgui_nav_extend() -> u8 {
+    get().extend as u8
+}
+
+/// The label of row `index`, for [`libgui_type_ahead`]: a NUL-terminated
+/// UTF-8 string that stays valid until the call returns, or null for a row
+/// with none. **Do not call libgui from here.**
+pub type LibguiLabelFn = Option<unsafe extern "C" fn(user: *mut std::ffi::c_void, index: u64) -> *const std::os::raw::c_char>;
+
+/// Type-ahead for the collection most recently opened with
+/// `libgui_open_collection`: jump its cursor to the row whose label starts
+/// with what the user is typing. Call it straight after opening the
+/// collection, before building rows; `libgui_nav_cursor` and
+/// `libgui_nav_moved` then report the jump.
+///
+/// Case-insensitive prefix from the current row; the same letter again
+/// cycles; a one-second pause starts over; a space that begins a search is
+/// the Activate key.
+///
+/// ```c
+/// static const char* part_name(void* parts, uint64_t i) { return ((Part*)parts)[i].name; }
+/// libgui_open_collection(ui, "parts", n);
+/// libgui_type_ahead(ui, n, part_name, parts);
+/// uint64_t cursor = libgui_nav_cursor();
+/// ```
+///
+/// # Safety
+/// `ui` null or live; `label` null or honouring [`LibguiLabelFn`].
+#[no_mangle]
+pub unsafe extern "C" fn libgui_type_ahead(ui: *mut LibguiUi, len: u64, label: LibguiLabelFn, user: *mut std::ffi::c_void) {
+    let Some(f) = label else { return };
+    let mut nav = get();
+    if nav.id.0 == 0 {
+        set_error("libgui_type_ahead: no collection has been opened");
+        return;
+    }
+    with_ui(ui, (), |u| {
+        // Everything through this handle is refused while labels are asked
+        // for: libgui holds `&mut Ui` across the calls.
+        unsafe { (*ui).answering = true };
+        u.type_ahead(&mut nav, len as usize, |i| {
+            let p = unsafe { f(user, i as u64) };
+            if p.is_null() {
+                std::borrow::Cow::Borrowed("")
+            } else {
+                unsafe { std::ffi::CStr::from_ptr(p) }.to_string_lossy()
+            }
+        });
+        unsafe { (*ui).answering = false };
+    });
+    store(nav);
 }

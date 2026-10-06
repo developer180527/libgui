@@ -203,6 +203,8 @@ impl Ui {
         // frame the press ends, a frame before `active` clears.
         let mut dragging = false;
         let mut released = false;
+        // A keyboard step is a whole edit: it changes the colour and finishes.
+        let mut keyed = false;
 
         let gap = self.theme.metrics.space;
         let layout = Layout::column().width(Size::Grow(1.0)).height(Size::Fit).gap(gap);
@@ -215,15 +217,28 @@ impl Ui {
                 s = ((r.mouse_pos.x - r.rect.x) / r.rect.w).clamp(0.0, 1.0);
                 v = 1.0 - ((r.mouse_pos.y - r.rect.y) / r.rect.h).clamp(0.0, 1.0);
             }
+            // The keyboard: left and right are saturation, up and down value,
+            // a hundredth a step; Home and End are white and the pure hue.
+            let n = ui.take_nudge(r.focused);
+            if n.any() {
+                (s, v) = if n.home {
+                    (0.0, 1.0)
+                } else if n.end {
+                    (1.0, 1.0)
+                } else {
+                    ((s + n.x * 0.01).clamp(0.0, 1.0), (v + n.y * 0.01).clamp(0.0, 1.0))
+                };
+                keyed = true;
+            }
             hover_cursor(ui, &r);
             let (hh, ss, vv) = (h, s, v);
             ui.add_leaf(sq_id, Layout::leaf(Size::Grow(1.0), Size::Fixed(opts.square_height)), Vec2::new(120.0, 0.0), true, move |p, r| {
                 p.gradient(r, Color::WHITE, opaque(hue_rgb(hh)), Axis::X);
                 p.gradient(r, Color::TRANSPARENT, Color::BLACK, Axis::Y);
                 p.rect_bordered(r, Color::TRANSPARENT, 0.0, 1.0, border);
-                p.draw.push_clip(r);
+                // Not clipped to the square: at full value — the top edge,
+                // where every saturated colour is — half of it would vanish.
                 ring(p, Vec2::new(r.x + ss * r.w, r.y + (1.0 - vv) * r.h), 6.0);
-                p.draw.pop_clip();
             });
 
             // Hue.
@@ -232,6 +247,11 @@ impl Ui {
             released |= r.released;
             if r.active && r.rect.w > 0.0 {
                 h = ((r.mouse_pos.x - r.rect.x) / r.rect.w).clamp(0.0, 1.0);
+            }
+            let n = ui.take_nudge(r.focused);
+            if n.any() {
+                h = n.apply(h, 1.0 / 360.0, 0.0, 1.0);
+                keyed = true;
             }
             hover_cursor(ui, &r);
             let hh = h;
@@ -257,6 +277,11 @@ impl Ui {
                 if r.active && r.rect.w > 0.0 {
                     a = ((r.mouse_pos.x - r.rect.x) / r.rect.w).clamp(0.0, 1.0);
                 }
+                let n = ui.take_nudge(r.focused);
+                if n.any() {
+                    a = n.apply(a, 0.01, 0.0, 1.0);
+                    keyed = true;
+                }
                 hover_cursor(ui, &r);
                 let solid = from_hsv(h, s, v, 1.0);
                 let aa = a;
@@ -272,11 +297,11 @@ impl Ui {
         });
 
         let next = from_hsv(h, s, v, a);
-        if next.to_array() != color.to_array() && (dragging || st.dragging) {
+        if next.to_array() != color.to_array() && (dragging || st.dragging || keyed) {
             *color = next;
             out.changed = true;
         }
-        if released {
+        if released || (keyed && out.changed) {
             out.finished = true;
         }
         st.dragging = dragging;

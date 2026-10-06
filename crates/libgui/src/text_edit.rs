@@ -551,7 +551,8 @@ impl Ui {
         let mut submitted = false;
         let mut cancelled = false;
         let (mut can_undo, mut can_redo) = (false, false);
-        if self.focused == Some(id) {
+        // While a popup is open the keys are its, even with focus here.
+        if self.focused == Some(id) && self.keys_reach() {
             let out = apply_events(self, id, text, &mut st, false);
             changed = out.changed;
             submitted = out.submitted;
@@ -1005,7 +1006,8 @@ impl Ui {
         let mut submitted = false;
         let mut cancelled = false;
         let (mut can_undo, mut can_redo) = (false, false);
-        if self.focused == Some(id) {
+        // While a popup is open the keys are its, even with focus here.
+        if self.focused == Some(id) && self.keys_reach() {
             let out = apply_events(self, id, text, &mut st, true);
             changed = out.changed;
             submitted = out.submitted;

@@ -625,6 +625,18 @@ uint8_t  libgui_nav_focused(void);
 uint8_t  libgui_nav_activated(void);
 uint8_t  libgui_nav_expand(void);
 uint8_t  libgui_nav_collapse(void);
+/* The move was Shift+arrow: extend the selection from the anchor (a range
+ * select) rather than replacing it. */
+uint8_t  libgui_nav_extend(void);
+/* The label of row `index`, for libgui_type_ahead; valid until the call
+ * returns, or NULL for none. Do not call libgui from here. */
+typedef const char* (*LibguiLabelFn)(void* user, uint64_t index);
+/* Type-ahead for the collection just opened: jump its cursor to the row whose
+ * label starts with what is being typed ("br" to "bracket"). Call it straight
+ * after libgui_open_collection, before the rows; libgui_nav_cursor and
+ * libgui_nav_moved then report the jump. Case-insensitive prefix from the
+ * current row; the same letter again cycles; a one-second pause starts over. */
+void     libgui_type_ahead(LibguiUi* ui, uint64_t len, LibguiLabelFn label, void* user);
 
 /* --- Docking ------------------------------------------------------------- */
 

@@ -1952,3 +1952,124 @@ fn a_c_colour_picker_edits_the_hosts_colour() {
         libgui_ui_free(u);
     }
 }
+
+const KEY_TAB: u32 = 13;
+const KEY_SPACE: u32 = 15;
+const KEY_DOWN: u32 = 4;
+const PLATFORM_WINDOWS: i32 = 1;
+
+unsafe fn key(u: *mut LibguiUi, k: u32, mut frame: impl FnMut()) {
+    unsafe {
+        libgui_push_key(u, k, 1, 0);
+        if k == KEY_SPACE {
+            libgui_push_text(u, c(" ").as_ptr());
+        }
+        frame();
+        libgui_push_key(u, k, 0, 0);
+        frame();
+    }
+}
+
+/// The keyboard from C, through the keymap a C host installs: Space presses
+/// a focused button, and a menu is opened, walked and chosen from.
+#[test]
+fn a_c_host_gets_buttons_and_menus_from_the_keyboard() {
+    unsafe {
+        let u = ui();
+        assert_eq!(libgui_install_keymap(u, PLATFORM_WINDOWS), 0);
+        let clicks = std::cell::Cell::new(0);
+        let chosen = std::cell::RefCell::new(Vec::<&str>::new());
+        let step = || {
+            frame(u, || {
+                if libgui_button(u, c("OK").as_ptr()).clicked != 0 {
+                    clicks.set(clicks.get() + 1);
+                }
+                if libgui_open_menu(u, c("File").as_ptr()) != 0 {
+                    for name in ["New", "Open", "Quit"] {
+                        if libgui_menu_item(u, c(name).as_ptr()).clicked != 0 {
+                            chosen.borrow_mut().push(name);
+                        }
+                    }
+                    libgui_close_menu(u);
+                }
+            })
+        };
+        step();
+        key(u, KEY_TAB, step);
+        key(u, KEY_SPACE, step);
+        assert_eq!(clicks.get(), 1, "Space did not press the focused C button");
+        key(u, KEY_TAB, step); // to File
+        key(u, KEY_SPACE, step); // opens on New
+        key(u, KEY_DOWN, step); // Open
+        key(u, KEY_SPACE, step);
+        assert_eq!(*chosen.borrow(), ["Open"], "the C menu was not walked from the keyboard");
+        assert_eq!(libgui_ui_poisoned(u), 0);
+        libgui_ui_free(u);
+    }
+}
+
+struct Labels {
+    names: Vec<CString>,
+    misbehave: *mut LibguiUi,
+}
+
+unsafe extern "C" fn label_of(user: *mut c_void, i: u64) -> *const std::os::raw::c_char {
+    unsafe {
+        let l = &*(user as *const Labels);
+        if !l.misbehave.is_null() {
+            libgui_label(l.misbehave, c("from a label callback").as_ptr());
+        }
+        l.names.get(i as usize).map(|n| n.as_ptr()).unwrap_or(std::ptr::null())
+    }
+}
+
+/// Type-ahead from C, the labels through a callback; Shift+Down extends; and a
+/// label callback that calls libgui is refused rather than undefined.
+#[test]
+fn a_c_list_has_type_ahead_and_extends_with_shift() {
+    unsafe {
+        let u = ui();
+        assert_eq!(libgui_install_keymap(u, PLATFORM_WINDOWS), 0);
+        let mut labels = Labels {
+            names: ["Axle", "bearing", "Bolt", "Bracket", "Bushing"].iter().map(|s| c(s)).collect(),
+            misbehave: std::ptr::null_mut(),
+        };
+        let user = &mut labels as *mut Labels as *mut c_void;
+        let (cursor, extend) = (std::cell::Cell::new(0u64), std::cell::Cell::new(0u8));
+        let step = || {
+            frame(u, || {
+                libgui_open_collection(u, c("parts").as_ptr(), 5);
+                libgui_type_ahead(u, 5, Some(label_of), user);
+                cursor.set(libgui_nav_cursor());
+                extend.set(libgui_nav_extend());
+                for i in 0..5u64 {
+                    libgui_selectable_keyed(u, i, c("row").as_ptr(), (cursor.get() == i) as u8);
+                }
+                libgui_close_collection(u);
+            })
+        };
+        step();
+        key(u, KEY_TAB, step);
+        libgui_push_text(u, c("br").as_ptr());
+        step();
+        assert_eq!(cursor.get(), 3, "br did not reach Bracket from C");
+
+        libgui_push_modifiers(u, LibguiModifiers { shift: 1, ctrl: 0, alt: 0, logo: 0 });
+        libgui_push_key(u, KEY_DOWN, 1, 0);
+        step();
+        assert_eq!((cursor.get(), extend.get()), (4, 1), "Shift+Down did not extend from C");
+        libgui_push_key(u, KEY_DOWN, 0, 0);
+        libgui_push_modifiers(u, LibguiModifiers::default());
+        step();
+
+        (*(user as *mut Labels)).misbehave = u;
+        libgui_push_text(u, c("a").as_ptr());
+        step();
+        let err = std::ffi::CStr::from_ptr(libgui_last_error()).to_str().unwrap();
+        assert!(err.contains("label callback"), "a label callback calling libgui was not refused: {err}");
+        assert_eq!(libgui_ui_poisoned(u), 0);
+        (*(user as *mut Labels)).misbehave = std::ptr::null_mut();
+        libgui_type_ahead(u, 5, None, std::ptr::null_mut());
+        libgui_ui_free(u);
+    }
+}

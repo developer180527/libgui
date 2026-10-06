@@ -378,9 +378,9 @@ pub unsafe extern "C" fn libgui_validated_input(
             let mut at = u64::MAX;
             // Everything through this handle is refused while the validator
             // runs: libgui holds `&mut Ui` across the call.
-            unsafe { (*ui).validating = true };
+            unsafe { (*ui).answering = true };
             let ok = unsafe { f(user, cstr.as_ptr() as *const c_char, t.len() as u64, why.as_mut_ptr(), why.len() as u64, &mut at) };
-            unsafe { (*ui).validating = false };
+            unsafe { (*ui).answering = false };
             if ok != 0 {
                 return Ok(());
             }
