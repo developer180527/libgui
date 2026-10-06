@@ -484,3 +484,60 @@ fn a_moving_layout_costs_what_a_still_one_does() {
         assert!(share < 5.0, "a frame with an edge being dragged costs {share:.1}% of a 60 fps frame");
     }
 }
+
+/// A tree with a hundred thousand open nodes costs what a small one does:
+/// only the rows in view are built, and the flattening is done when the tree
+/// changes, not every frame.
+#[test]
+fn a_huge_open_tree_costs_what_a_small_one_does() {
+    struct Flat {
+        groups: u32,
+        per: u32,
+        names: Vec<String>,
+    }
+    impl TreeSource for Flat {
+        type Key = u32;
+        fn roots(&self, out: &mut Vec<u32>) {
+            out.extend(0..self.groups);
+        }
+        fn children(&self, n: u32, out: &mut Vec<u32>) {
+            if n < self.groups {
+                out.extend((0..self.per).map(|p| self.groups + n * self.per + p));
+            }
+        }
+        fn has_children(&self, n: u32) -> bool {
+            n < self.groups
+        }
+        fn label(&self, n: u32) -> std::borrow::Cow<'_, str> {
+            self.names[(n as usize) % self.names.len()].as_str().into()
+        }
+    }
+    let names: Vec<String> = (0..64).map(|i| format!("Part {i}")).collect();
+    let cost = |groups: u32, per: u32| {
+        let src = Flat { groups, per, names: names.clone() };
+        let mut tree = TreeState::new();
+        for g in 0..groups {
+            tree.expand(g);
+        }
+        let mut ui = ui();
+        let info = FrameInfo { screen_size: Vec2::new(400.0, 600.0), scale: 1.0, dt: 1.0 / 60.0 };
+        let mut frame = || {
+            ui.begin_frame(info);
+            ui.tree_view("t", &mut tree, &src);
+            let _ = ui.end_frame();
+        };
+        for _ in 0..30 {
+            frame();
+        }
+        fastest(60, frame)
+    };
+    let small = cost(10, 9); // 100 nodes
+    let huge = cost(100, 1000); // 100,100 nodes
+    let ratio = huge.as_secs_f64() / small.as_secs_f64();
+    let share = huge.as_secs_f64() * 60.0 * 100.0;
+    println!("100-node tree {small:?}, 100,100-node tree {huge:?} ({ratio:.2}x) = {share:.2}% of a 60 fps frame");
+    assert!(ratio < 2.0, "a thousand times the nodes cost {ratio:.1}x the time");
+    if !cfg!(debug_assertions) {
+        assert!(share < 5.0, "a huge tree costs {share:.1}% of a frame");
+    }
+}

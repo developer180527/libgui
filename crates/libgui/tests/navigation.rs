@@ -360,3 +360,38 @@ fn the_last_move_in_a_frame_decides_whether_it_extends() {
     frame(&mut ui);
     assert!(last.get().unwrap().extend, "a plain move followed by an extending one was not reported as extending");
 }
+
+/// End in a long virtual list: the cursor goes to the last row, and the list
+/// must bring it into view though it was never built. Without `reveal`,
+/// `scroll_to` has no rect to scroll to and the view stays at the top.
+#[test]
+fn a_virtual_list_reveals_a_cursor_it_never_built() {
+    for reveal in [true, false] {
+        let mut ui = Ui::new(Theme::dark(), include_bytes!("../../../assets/Inter.ttf")).expect("font");
+        let built = std::cell::RefCell::new(0..0);
+        let cursor = std::cell::Cell::new(0usize);
+        let frame = |ui: &mut Ui| {
+            ui.begin_frame(FrameInfo { screen_size: Vec2::new(300.0, 300.0), scale: 1.0, dt: 1.0 / 60.0 });
+            let nav = ui.open_collection("rows", 5000);
+            ui.set_focus(Some(nav.id));
+            cursor.set(nav.cursor);
+            let opts = ListOptions { reveal: (reveal && nav.moved).then_some(nav.cursor), ..ListOptions::new(24.0) };
+            *built.borrow_mut() = ui.virtual_list_with("rows", 5000, opts, |ui, i| {
+                ui.selectable_keyed(i, "Row", nav.cursor == i);
+            });
+            ui.close_collection();
+            let _ = ui.end_frame();
+        };
+        for _ in 0..3 {
+            frame(&mut ui);
+        }
+        ui.push(InputEvent::Action(UiAction::Navigate(Nav::Last)));
+        for _ in 0..90 {
+            frame(&mut ui); // long enough for any easing to finish
+        }
+        assert_eq!(cursor.get(), 4999);
+        let rows = built.borrow().clone();
+        let shows_it = rows.contains(&4999);
+        assert_eq!(shows_it, reveal, "reveal {reveal}: the last row is built: {shows_it} (rows {rows:?})");
+    }
+}

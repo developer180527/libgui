@@ -131,6 +131,26 @@ void paint_delete(void* user) {
     delete static_cast<F*>(user);
 }
 
+// A tree source object reaches C as four function pointers and itself. An
+// exception from any of them reads as "nothing": no children, no arrow, no
+// label -- never an unwind through libgui.
+template <class S>
+uint64_t tree_children(void* user, uint64_t node, uint64_t* out, uint64_t cap) {
+    try { return static_cast<S*>(user)->children(node, out, cap); } catch (...) { return 0; }
+}
+template <class S>
+uint8_t tree_has_children(void* user, uint64_t node) {
+    try { return static_cast<S*>(user)->has_children(node) ? 1 : 0; } catch (...) { return 0; }
+}
+template <class S>
+const char* tree_label(void* user, uint64_t node) {
+    try { return static_cast<S*>(user)->label(node); } catch (...) { return nullptr; }
+}
+template <class S>
+uint8_t tree_selected(void* user, uint64_t node) {
+    try { return static_cast<S*>(user)->selected(node) ? 1 : 0; } catch (...) { return 0; }
+}
+
 // A label lambda for type-ahead: nothing escapes, so an exception reads as
 // a row with no label.
 template <class F>
@@ -206,6 +226,31 @@ public:
 private:
     explicit Units(LibguiUnits* h) : h_(h) {}
     LibguiUnits* h_;
+};
+
+// What a tree keeps between frames, freed when it goes out of scope.
+class Tree {
+public:
+    Tree() : h_(libgui_tree_new()) {}
+    ~Tree() { libgui_tree_free(h_); }
+    Tree(Tree&& o) noexcept : h_(o.h_) { o.h_ = nullptr; }
+    Tree& operator=(Tree&& o) noexcept {
+        if (this != &o) { libgui_tree_free(h_); h_ = o.h_; o.h_ = nullptr; }
+        return *this;
+    }
+    Tree(const Tree&) = delete;
+    Tree& operator=(const Tree&) = delete;
+
+    void expand(uint64_t k) { libgui_tree_expand(h_, k); }
+    void collapse(uint64_t k) { libgui_tree_collapse(h_, k); }
+    void toggle(uint64_t k) { libgui_tree_toggle(h_, k); }
+    bool is_expanded(uint64_t k) const { return libgui_tree_is_expanded(h_, k) != 0; }
+    void invalidate() { libgui_tree_invalidate(h_); }
+    bool cursor(uint64_t& out) const { return libgui_tree_cursor(h_, &out) != 0; }
+    LibguiTree* raw() const { return h_; }
+
+private:
+    LibguiTree* h_;
 };
 
 // What `canvas` reported: the background's response, the view, and the guard
@@ -455,6 +500,24 @@ public:
         nav.cursor = libgui_nav_cursor();
         nav.moved = libgui_nav_moved() != 0;
         nav.extend = libgui_nav_extend() != 0;
+    }
+
+    // A tree of any size, building only what is on screen. `source` is any
+    // object with:
+    //   uint64_t children(uint64_t node, uint64_t* out, uint64_t cap);
+    //   bool has_children(uint64_t node);
+    //   const char* label(uint64_t node);
+    //   bool selected(uint64_t node);
+    // children() of LIBGUI_TREE_ROOT are the roots. None may call libgui.
+    template <class S>
+    LibguiTreeViewResponse tree_view(const char* key, Tree& tree, S& source) {
+        LibguiTreeSource s;
+        s.children = &detail::tree_children<S>;
+        s.has_children = &detail::tree_has_children<S>;
+        s.label = &detail::tree_label<S>;
+        s.selected = &detail::tree_selected<S>;
+        s.user = &source;
+        return libgui_tree_view(h_, key, tree.raw(), &s);
     }
 
     // A text field over a std::string, grown as needed. The C form wants a

@@ -85,7 +85,7 @@ apps do with it. `no` = absent.
 | Dockable, tear-off panels | 9 | yes |
 | Splitter / resizable panes | 13 | yes |
 | Tree view | 12 | yes (`tree_row`) |
-| **Virtualised tree** | 6 | **no** — `virtual_list` is flat |
+| Virtualised tree | 6 | yes (`tree_view`) |
 | Breadcrumb | 8 | **no** |
 | Status bar | 12 | part — a container; no widget, and none needed |
 | Sidebar / rail navigation | 10 | yes (containers) |
@@ -199,7 +199,7 @@ application actually being built.
 | 3 | ~~Inline field validation~~ | **Done** — `validated_input`: commit, cancel, refused text kept with its reason, caret at the problem. | — |
 | 4 | Toast / notification | The standard way to report a non-modal failure. Twelve of fourteen. | 2 d |
 | 5 | **Decide on rotation** | Not build — decide. The cost falls on backend authors, and it gets worse the longer it waits. | — |
-| 6 | Virtualised tree | A CAD assembly browser is a tree with tens of thousands of nodes. Today it is a tree or it is virtual, not both. | 3 d |
+| 6 | ~~Virtualised tree~~ | **Done** — `tree_view`: 100,100 open nodes cost what 100 do. Building it fixed End and Page Down in every long virtual list. | — |
 | 7 | ~~Menu arrow keys, list type-ahead, Shift+Arrow selection~~ | **Done**, with two the survey missed: no focused control could be pressed from the keyboard at all, and sliders took no arrows. | — |
 | 8 | Searchable dropdown, command palette, search field, badge, split button | The compositions. Cheap, and worth having once rather than five times. | 4 d total |
 | 9 | Table cell editing behaviour + 2-D cursor | A parameters table. A field in a cell already works; what is missing is click-to-edit, commit/cancel, and Tab moving to the next cell. | 4 d |

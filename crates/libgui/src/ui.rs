@@ -190,6 +190,15 @@ impl Heights<'_> {
         }
     }
 
+    /// Where row `i` starts, in the list's content: O(1) for uniform rows,
+    /// a sum of the rows above it otherwise.
+    fn top(&self, i: usize, gap: f32) -> f32 {
+        match self {
+            Heights::Uniform(h) => i as f32 * (h + gap).max(0.5),
+            Heights::PerRow(f) => (0..i).map(|k| f(k).max(0.0) + gap).sum(),
+        }
+    }
+
     fn locate(&self, rows: usize, gap: f32, offset: f32, viewport: f32, overscan: usize) -> Span {
         let overscan = overscan.min(MAX_OVERSCAN);
         match *self {
@@ -328,6 +337,26 @@ pub struct ListOptions {
     pub stick_to_end: bool,
     /// Override [`Ui::scroll`] for this list. See [`ScrollConfig`].
     pub config: Option<ScrollConfig>,
+    /// Scroll this row into view, built or not.
+    ///
+    /// [`Ui::scroll_to`] needs a widget's rect, and a virtual list has none
+    /// for a row it did not build — which is every row far from the
+    /// viewport. So a keyboard cursor sent to the end of a long list with End
+    /// or Page Down used to leave the view where it was. The list knows where
+    /// every row is without building it, so it can bring one into view:
+    ///
+    /// ```no_run
+    /// # use libgui::*;
+    /// # fn f(ui: &mut Ui, rows: &[String]) {
+    /// let nav = ui.open_collection("rows", rows.len());
+    /// let opts = ListOptions { reveal: nav.moved.then_some(nav.cursor), ..ListOptions::new(24.0) };
+    /// ui.virtual_list_with("rows", rows.len(), opts, |ui, i| {
+    ///     ui.selectable_keyed(i, &rows[i], nav.cursor == i);
+    /// });
+    /// ui.close_collection();
+    /// # }
+    /// ```
+    pub reveal: Option<usize>,
 }
 
 impl ListOptions {
@@ -340,6 +369,7 @@ impl ListOptions {
             overscan: 2,
             stick_to_end: false,
             config: None,
+            reveal: None,
         }
     }
 }
@@ -3725,6 +3755,22 @@ impl Ui {
             config: opts.config,
             ..ScrollOptions::new(opts.height)
         };
+        // A row asked for by index: put it in view before the window is
+        // located, from where the list knows it is, so it need not be built.
+        // Served the way `scroll_to` is, and so it eases like any scroll.
+        if let (Some(i), Some(view)) = (opts.reveal.filter(|&i| i < rows), self.rects.get(&id).copied()) {
+            let mut st = self.scroll_states.get(&id).copied().unwrap_or_default();
+            // The content's height is last frame's measure, and rows may have
+            // been added since — a tree branch opened to reveal this one. The
+            // list knows its height now from the rows, so the target is not
+            // clamped to the list as it was.
+            let content = heights.top(rows, opts.gap) + opts.padding.top + opts.padding.bottom;
+            st.y.content = st.y.content.max(content);
+            let top = heights.top(i, opts.gap);
+            let want = Rect::new(view.x, view.y + opts.padding.top + top - st.y.offset, view.w, heights.at(i));
+            bring_into_view(&mut st, want, view, scroll);
+            self.scroll_states.insert(id, st);
+        }
         let mut built = 0..0;
         self.scroll_area_id(id, scroll, |ui| {
             // Read the state *inside*, so the range comes from this frame's

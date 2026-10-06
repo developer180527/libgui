@@ -662,6 +662,11 @@ void     libgui_dock_add_tab(LibguiDock* dock, uint64_t surface, uint64_t tab);
 void     libgui_dock_set_pointer(LibguiDock* dock, float x, float y, uint8_t down);
 void     libgui_dock_set_surface_frame(LibguiDock* dock, uint64_t surface, float origin_x, float origin_y, float scale);
 void     libgui_dock_update(LibguiDock* dock);
+/* Something changed that `surface` has not drawn: build its frame. Gate each
+ * window on this AND libgui_needs_frame -- a tab dragged back from a floating
+ * window lands in a window that saw no input, and would otherwise show up only
+ * when the mouse next came back. */
+uint8_t  libgui_dock_needs_frame(LibguiDock* dock, uint64_t surface);
 uint64_t libgui_dock_surface_count(LibguiDock* dock);
 int32_t  libgui_dock_surface_at(LibguiDock* dock, uint64_t i, LibguiSurface* out);
 void     libgui_dock_show(LibguiDock* dock, LibguiUi* ui, uint64_t surface, const LibguiTabViewer* viewer);
@@ -730,6 +735,69 @@ uint8_t     libgui_drag_source(LibguiUi* ui, uint64_t id, const char* kind, uint
 void        libgui_drop_zone(LibguiUi* ui, const char* const* kinds, uint64_t count, LibguiDropZone* out);
 const char* libgui_dragging(LibguiUi* ui);   /* NULL when nothing is */
 void        libgui_cancel_drag(LibguiUi* ui);
+
+/* --- A tree of any size ---------------------------------------------------- */
+
+/* A tree that builds only the rows on screen: a hundred thousand open parts
+ * cost what a screenful does. Your tree, as callbacks over uint64_t keys.
+ * They run while libgui builds, so NONE may call libgui -- refused if they do.
+ *
+ *   children     write node's children (the roots when node is
+ *                LIBGUI_TREE_ROOT) into out, at most cap, and return how
+ *                many there are; asked again with room if that was more.
+ *                Only asked of EXPANDED nodes, so children may load lazily.
+ *   has_children whether the row gets an arrow; asked of every visible row.
+ *   label        the row's text, valid until the next call.
+ *   selected     drawn selected? NULL: nothing is. Selection is yours. */
+#define LIBGUI_TREE_ROOT UINT64_MAX
+typedef struct {
+    uint64_t    (*children)(void* user, uint64_t node, uint64_t* out, uint64_t cap);
+    uint8_t     (*has_children)(void* user, uint64_t node);
+    const char* (*label)(void* user, uint64_t node);
+    uint8_t     (*selected)(void* user, uint64_t node);
+    void*       user;
+} LibguiTreeSource;
+
+/* What a tree keeps between frames: which nodes are open, and the visible
+ * rows that follow -- worked out again only when they change. */
+typedef struct LibguiTree LibguiTree;
+LibguiTree* libgui_tree_new(void);
+void        libgui_tree_free(LibguiTree* tree);
+void        libgui_tree_expand(LibguiTree* tree, uint64_t key);
+void        libgui_tree_collapse(LibguiTree* tree, uint64_t key);
+void        libgui_tree_toggle(LibguiTree* tree, uint64_t key);
+uint8_t     libgui_tree_is_expanded(const LibguiTree* tree, uint64_t key);
+/* The tree changed -- nodes added, removed, children loaded. */
+void        libgui_tree_invalidate(LibguiTree* tree);
+/* The node the keyboard is on; 0 if none. */
+uint8_t     libgui_tree_cursor(const LibguiTree* tree, uint64_t* out);
+/* Open every ancestor of key, put the keyboard on it, scroll it into view:
+ * how a node picked in the 3D view is shown. parent returns a node's parent,
+ * or LIBGUI_TREE_ROOT. */
+void        libgui_tree_reveal(LibguiTree* tree, uint64_t key,
+                               uint64_t (*parent)(void* user, uint64_t node), void* user);
+/* A click or move as keys, the range's anchor kept by key so opening a branch
+ * above it does not move it. kind: 0 replace, 1 toggle, 2 range (what
+ * libgui_select_kind returns). Writes up to cap keys, returns how many. */
+uint64_t    libgui_tree_select(LibguiTree* tree, uint64_t key, int32_t kind,
+                               uint64_t* out, uint64_t cap, int32_t* out_kind);
+
+typedef struct {
+    uint64_t        clicked, activated, moved, expanded, collapsed;
+    uint8_t         has_clicked, has_activated, has_moved, has_expanded, has_collapsed;
+    uint8_t         extend;        /* the move was Shift+arrow */
+    uint8_t         _pad[2];
+    LibguiModifiers modifiers;     /* with clicked: for libgui_select_kind */
+    uint32_t        _pad2;
+    uint64_t        rows;          /* visible rows in all */
+    uint64_t        built_first, built_end;
+} LibguiTreeViewResponse;
+
+/* The keyboard is the platform's: Up/Down move, Right opens or steps in, Left
+ * closes or steps out, Enter or a double click activates, Shift extends,
+ * typing jumps by label. */
+LibguiTreeViewResponse libgui_tree_view(LibguiUi* ui, const char* key, LibguiTree* tree,
+                                        const LibguiTreeSource* source);
 
 /* --- Colour ------------------------------------------------------------------ */
 
@@ -1027,6 +1095,8 @@ uint64_t libgui_sizeof_insets(void);
 uint64_t libgui_sizeof_table_response(void);
 uint64_t libgui_sizeof_drop_zone(void);
 uint64_t libgui_sizeof_var(void);
+uint64_t libgui_sizeof_tree_source(void);
+uint64_t libgui_sizeof_tree_view_response(void);
 uint64_t libgui_sizeof_color_picker_options(void);
 uint64_t libgui_sizeof_color_picker_response(void);
 uint64_t libgui_sizeof_validated_options(void);

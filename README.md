@@ -1084,6 +1084,7 @@ enforced by tests rather than left to a benchmark nobody runs
 | A static UI under a host redrawing at 120 Hz | **0** UI frames per second |
 | A cached 800-row panel beside a live widget | **0.044 ms** vs 0.487 (11x) |
 | A frame with a pane edge being dragged, vs a still one | **0.85x** — 57 µs, 0.34% of a 60 fps frame |
+| A fully open 100,100-node tree vs a 100-node one | **0.80x** — 13 µs a frame; only the rows in view are built |
 | A dragged edge, a dragged dock split, a live resize: border pixels vs at rest | **identical** every frame, 1x–2x, instanced and triangles |
 
 They assert properties that hold on any machine: deterministic counts, and

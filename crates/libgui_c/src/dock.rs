@@ -288,6 +288,26 @@ pub unsafe extern "C" fn libgui_dock_update(dock: *mut LibguiDock) {
     with_dock(dock, (), |d| d.update());
 }
 
+/// Something changed that `surface` has not drawn yet: build its frame.
+///
+/// Gate each window on this **and** `libgui_needs_frame`. A tab dragged back
+/// from a floating window docks into the main window, whose `Ui` saw no input
+/// — the pointer was over the other window — so `libgui_needs_frame` alone
+/// leaves the main window showing the tab missing until the mouse comes back.
+///
+/// ```c
+/// if (libgui_needs_frame(ui, idle) || libgui_dock_needs_frame(dock, surface)) {
+///     /* build: ... libgui_dock_show(...) ... */
+/// }
+/// ```
+///
+/// # Safety
+/// `dock` must be null or live.
+#[no_mangle]
+pub unsafe extern "C" fn libgui_dock_needs_frame(dock: *mut LibguiDock, surface: u64) -> u8 {
+    with_dock(dock, 0, |d| d.needs_frame(SurfaceId(surface)) as u8)
+}
+
 /// The user closed a window.
 ///
 /// # Safety

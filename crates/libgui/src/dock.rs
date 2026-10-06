@@ -276,6 +276,9 @@ pub struct Surface<T> {
     /// two: one for `show` to rebuild the geometry, and one more because it
     /// reads rects from the previous layout.
     stale_geom: u8,
+    /// The dock's revision when this surface was last shown. See
+    /// [`DockState::needs_frame`].
+    shown: u64,
 }
 
 impl<T> Surface<T> {
@@ -300,6 +303,8 @@ impl<T> Surface<T> {
             root_rect: Rect::default(),
             leaves: Vec::new(),
             stale_geom: 0,
+            // Never shown: a new window wants its first frame.
+            shown: u64::MAX,
         }
     }
 
@@ -381,6 +386,8 @@ pub struct DockState<T> {
     focused_leaf: Option<u64>,
     /// Tab that just got displaced by a live reorder: (leaf, index, start offset).
     reorder_shift: Option<(u64, usize, f32)>,
+    /// Moves whenever the dock changes in a way some surface must redraw for.
+    revision: u64,
 }
 
 enum Action {
@@ -398,6 +405,7 @@ impl<T> DockState<T> {
             drag: None,
             focused_leaf: None,
             reorder_shift: None,
+            revision: 0,
         }
     }
 
@@ -420,6 +428,7 @@ impl<T> DockState<T> {
     }
 
     pub fn set_root(&mut self, surface: SurfaceId, root: DockNode<T>) {
+        self.touch();
         if let Some(s) = self.surface_mut(surface) {
             s.root = Some(root);
         }
@@ -429,6 +438,7 @@ impl<T> DockState<T> {
     /// [`DockState::set_root`], e.g. for docking a panel a restored layout did
     /// not mention.
     pub fn take_root(&mut self, surface: SurfaceId) -> Option<DockNode<T>> {
+        self.touch();
         self.surface_mut(surface).and_then(|s| s.root.take())
     }
 
@@ -440,6 +450,7 @@ impl<T> DockState<T> {
     /// beats nowhere. Build a tree with [`DockState::leaf`] and
     /// [`DockState::split`] to put it somewhere specific.
     pub fn add_tab(&mut self, surface: SurfaceId, tab: T) {
+        self.touch();
         let id = self.next();
         if let Some(s) = self.surface_mut(surface) {
             match &mut s.root {
@@ -489,6 +500,7 @@ impl<T> DockState<T> {
     /// Drop every surface but the main one, and empty that: a restore
     /// replaces the whole dock rather than merging into it.
     pub(crate) fn reset_surfaces(&mut self) {
+        self.touch();
         self.surfaces.truncate(1);
         let main = &mut self.surfaces[0];
         main.root = None;
@@ -498,12 +510,46 @@ impl<T> DockState<T> {
         self.reorder_shift = None;
     }
 
+    /// Something changed that `surface` has not drawn yet: build its frame.
+    ///
+    /// A host that rebuilds a window's UI only when [`Ui::needs_frame`] says
+    /// so — the right thing, so an idle window costs nothing — misses every
+    /// change the dock makes on its own. A tab dragged back from a floating
+    /// window docks into the main window, whose `Ui` saw no input at all: the
+    /// pointer was over the other window. Gated on `needs_frame` alone, the
+    /// main window shows the tab missing until something happens to send it
+    /// input. So the gate is both:
+    ///
+    /// ```ignore
+    /// if ui.needs_frame_for(&info, idle) || dock.needs_frame(surface) {
+    ///     // build: … dock.show(ui, surface, &mut viewer) …
+    /// }
+    /// ```
+    ///
+    /// True for a surface never shown, for every surface while a tab drag is
+    /// in progress, and for every surface once after the dock changes — a
+    /// drop, a tear-off, a window closed, a tab added, a layout restored.
+    pub fn needs_frame(&self, surface: SurfaceId) -> bool {
+        self.surface(surface).is_some_and(|s| s.shown != self.revision)
+    }
+
+    fn touch(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
+        // Never equal to a new surface's "never shown".
+        if self.revision == u64::MAX {
+            self.revision = 0;
+        }
+    }
+
     pub fn is_dragging(&self) -> bool {
         self.drag.is_some_and(|d| d.phase != Phase::Pending)
     }
 
     /// Abort a drag. A torn-off window stays floating where it is; nothing docks.
     pub fn cancel_drag(&mut self) {
+        if self.drag.is_some() {
+            self.touch();
+        }
         if let Some(Drag { phase: Phase::Floating { surface, .. }, .. }) = self.drag {
             if let Some(s) = self.surface_mut(surface) {
                 s.visible = true;
@@ -544,6 +590,7 @@ impl<T> DockState<T> {
         if id == SurfaceId::MAIN {
             return;
         }
+        self.touch();
         let Some(i) = self.index_of(id) else { return };
         let surface = self.surfaces.remove(i);
         // `Phase` derives PartialEq, so comparing against a whole `Floating`
@@ -575,6 +622,11 @@ impl<T> DockState<T> {
     /// Advance dragging. Call once per loop iteration after input, before rendering.
     pub fn update(&mut self) {
         let Some(mut d) = self.drag else { return };
+        // A drag moves things in windows that get no input of their own: a
+        // preview in the window under the pointer, a tab arriving in the main
+        // window from a floating one. Every surface redraws while it lasts,
+        // and once more for the drop.
+        self.touch();
         let cfg = self.config.clone();
 
         if !self.pointer_down {
@@ -873,6 +925,17 @@ impl<T> DockState<T> {
                     s.has_frame = true;
                 }
                 self.show_floating_panel(ui, sid, viewer);
+            }
+        }
+        // Drawn as of this revision. In-app floating panels are drawn by the
+        // main window's frame, so it covers them too.
+        let rev = self.revision;
+        if let Some(s) = self.surface_mut(surface) {
+            s.shown = rev;
+        }
+        if inapp {
+            for s in self.surfaces.iter_mut().skip(1) {
+                s.shown = rev;
             }
         }
         if let Some(d) = self.drag {

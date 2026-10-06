@@ -250,6 +250,26 @@ for w in wins.values_mut() {
 not the outer frame. Getting this wrong makes tabs drop in the wrong place by
 exactly the title-bar height.
 
+**If you skip idle windows, ask the dock too.** A host that rebuilds a window
+only when `ui.needs_frame_for(...)` says so — which is how an idle window costs
+nothing — must also ask `dock.needs_frame(w.dock_id)`:
+
+```rust
+if w.ui.needs_frame_for(&info, idle) || dock.needs_frame(w.dock_id) {
+    // build the frame: … dock.show(&mut w.ui, w.dock_id, &mut my_viewer) …
+}
+```
+
+A window's `Ui` only knows about its own input. A tab dragged back from a
+floating window docks into the main window while the pointer is over the
+*other* window, so the main window's `Ui` saw nothing; gated on it alone, the
+main window shows the tab missing until the mouse comes back to it — which
+reads as docking being slow. `dock.needs_frame` is true for a window never
+drawn, for every window while a drag is in progress, and for every window once
+after the dock changes (a drop, a tear-off, a window closed, a tab added, a
+layout restored), and false otherwise, so it costs nothing at rest. In C it is
+`libgui_dock_needs_frame`.
+
 ### 4.4 Step 4 in full
 
 ```rust
@@ -379,7 +399,8 @@ Input: `button`, `button_primary`, `button_styled`, `toggle`, `checkbox`,
 `segmented`, `text_input`, `text_area`, `validated_input`, `color_picker`,
 `color_button`.
 
-Collections: `selectable`, `tree_row`, `table`, `virtual_list`, `virtual_rows`.
+Collections: `selectable`, `tree_row`, `tree_view`, `table`, `virtual_list`,
+`virtual_rows`.
 
 Chrome: `menu_button`, `menu_item`, `menu_item_shortcut`, `menu_separator`,
 `submenu`, `context_menu`, `tooltip`, `splitter`, `separator`, `progress`,
@@ -475,6 +496,53 @@ click and a toggle move the anchor; a range does **not**, so dragging a
 Shift-click up and down grows and shrinks one range instead of ratcheting.
 
 Keyboard range-extend (Shift+Arrow) is not implemented.
+
+### 5.4.1 Trees of any size
+
+`ui.tree_view` is a tree that builds only the rows on screen — a CAD assembly
+browser with a hundred thousand parts open costs what a screenful does (13 µs
+a frame, measured against a 100-node tree in `perf.rs`). You describe your
+tree; libgui never learns its shape:
+
+```rust
+impl TreeSource for Assembly {
+    type Key = PartId;
+    fn roots(&self, out: &mut Vec<PartId>) { out.extend(&self.top) }
+    fn children(&self, n: PartId, out: &mut Vec<PartId>) { out.extend(&self[n].kids) }
+    fn has_children(&self, n: PartId) -> bool { !self[n].kids.is_empty() }
+    fn label(&self, n: PartId) -> Cow<'_, str> { self[n].name.as_str().into() }
+    fn selected(&self, n: PartId) -> bool { self.picked.contains(&n) }
+}
+
+let r = ui.tree_view("assembly", &mut tree_state, &model);
+```
+
+- `children` is asked only of **expanded** nodes, so children can load on
+  demand: `r.expanded` says which node just opened.
+- The visible rows are worked out again only when something opens or closes,
+  or when you call `tree_state.invalidate()` because the tree changed — never
+  every frame.
+- The keyboard is the platform's: Up and Down, Right to open or step in, Left
+  to close or step out to the parent, Enter or a double click to activate,
+  Shift to extend, typing to jump by label. The cursor is held **by node**, so
+  opening a branch above it does not move it to a different part.
+- Selection is yours. `tree_state.select(key, kind)` turns a click or a move
+  into keys and keeps a range's anchor by key; a range is every row *shown*
+  between the two ends, open branches included.
+- `tree_state.reveal(key, parent)` opens every ancestor of a node, puts the
+  keyboard on it and scrolls it into view — how a part picked in the 3D view
+  is shown in the browser.
+
+For rows of your own — icons, a visibility toggle, a second column — use
+`tree_state.rows()` (each row's key, depth and branch) with `virtual_list` and
+`tree_row` directly. A `virtual_list` can now bring any row into view, built
+or not: `ListOptions::reveal`. That also fixes End and Page Down in a long
+flat list, which used to move the keyboard cursor somewhere the view never
+followed.
+
+From C, the tree is a `LibguiTreeSource` of callbacks over `uint64_t` keys and
+a `LibguiTree` handle; in C++, `ui.tree_view(key, tree, object)` takes any
+object with the four methods.
 
 ### 5.5 Layers
 

@@ -2073,3 +2073,130 @@ fn a_c_list_has_type_ahead_and_extends_with_shift() {
         libgui_ui_free(u);
     }
 }
+
+/// A C app's tree: 50 assemblies of 200 parts. Keys: assembly `a` is `a`,
+/// part `p` of it is `1000 + a * 200 + p`.
+struct CTree {
+    names: std::collections::HashMap<u64, CString>,
+    children_calls: u32,
+    misbehave: *mut LibguiUi,
+}
+
+unsafe extern "C" fn ct_children(user: *mut c_void, node: u64, out: *mut u64, cap: u64) -> u64 {
+    unsafe {
+        let t = &mut *(user as *mut CTree);
+        t.children_calls += 1;
+        if !t.misbehave.is_null() {
+            libgui_label(t.misbehave, c("from a tree callback").as_ptr());
+        }
+        let kids: Vec<u64> = if node == LIBGUI_TREE_ROOT {
+            (0..50).collect()
+        } else if node < 50 {
+            (0..200).map(|p| 1000 + node * 200 + p).collect()
+        } else {
+            Vec::new()
+        };
+        for (i, k) in kids.iter().take(cap as usize).enumerate() {
+            *out.add(i) = *k;
+        }
+        kids.len() as u64
+    }
+}
+unsafe extern "C" fn ct_has(_: *mut c_void, node: u64) -> u8 {
+    (node < 50) as u8
+}
+unsafe extern "C" fn ct_label(user: *mut c_void, node: u64) -> *const std::os::raw::c_char {
+    unsafe {
+        let t = &mut *(user as *mut CTree);
+        t.names
+            .entry(node)
+            .or_insert_with(|| if node < 50 { c(&format!("Assembly {node:02}")) } else { c(&format!("Part {node}")) })
+            .as_ptr()
+    }
+}
+unsafe extern "C" fn ct_parent(_: *mut c_void, node: u64) -> u64 {
+    if node < 50 { LIBGUI_TREE_ROOT } else { (node - 1000) / 200 }
+}
+
+#[test]
+fn a_c_tree_builds_a_screenful_of_a_large_tree() {
+    unsafe {
+        let u = ui();
+        assert_eq!(libgui_install_keymap(u, PLATFORM_WINDOWS), 0);
+        let mut ct = CTree { names: Default::default(), children_calls: 0, misbehave: std::ptr::null_mut() };
+        let user = &mut ct as *mut CTree as *mut c_void;
+        let src = LibguiTreeSource { children: Some(ct_children), has_children: Some(ct_has), label: Some(ct_label), selected: None, user };
+        let tree = libgui_tree_new();
+        let last = std::cell::Cell::new(LibguiTreeViewResponse::default());
+        let step = || {
+            frame(u, || last.set(libgui_tree_view(u, c("assembly").as_ptr(), tree, &src)));
+        };
+        step();
+        assert_eq!(last.get().rows, 50);
+
+        // Every assembly open: 10,050 rows, a screenful built, and each list
+        // of 200 children read whole though the first ask had room for 64.
+        for a in 0..50 {
+            libgui_tree_expand(tree, a);
+        }
+        step();
+        let r = last.get();
+        assert_eq!(r.rows, 50 + 50 * 200, "a child list longer than the first buffer was cut short");
+        assert!(r.built_end - r.built_first < 40, "{} rows built", r.built_end - r.built_first);
+        let calls = (*(user as *mut CTree)).children_calls;
+        step();
+        step();
+        assert_eq!((*(user as *mut CTree)).children_calls, calls, "a steady frame asked for children");
+
+        // The keyboard: Tab in, Left on an open assembly closes it.
+        key(u, KEY_TAB, step);
+        let mut cur = u64::MAX;
+        assert_eq!(libgui_tree_cursor(tree, &mut cur), 1);
+        assert_eq!(cur, 0);
+        libgui_push_key(u, 1, 1, 0); // ArrowLeft
+        step();
+        assert_eq!(last.get().has_collapsed, 1, "Left did not close the open assembly");
+        assert_eq!(libgui_tree_is_expanded(tree, 0), 0);
+        libgui_push_key(u, 1, 0, 0);
+        step();
+
+        // Reveal a part deep in the tree, through the parent callback.
+        libgui_tree_collapse(tree, 37);
+        libgui_tree_reveal(tree, 1000 + 37 * 200 + 150, Some(ct_parent), user);
+        for _ in 0..90 {
+            step();
+        }
+        assert_eq!(libgui_tree_is_expanded(tree, 37), 1, "reveal did not open the part's assembly");
+        assert_eq!(libgui_tree_cursor(tree, &mut cur), 1);
+        assert_eq!(cur, 1000 + 37 * 200 + 150);
+
+        // Selection as keys, with the anchor kept by key.
+        let mut out = [0u64; 8];
+        let mut kind = -1;
+        assert_eq!(libgui_tree_select(tree, 5, 0, out.as_mut_ptr(), 8, &mut kind), 1);
+        assert_eq!((kind, out[0]), (0, 5));
+        // A range is every row *shown* between the two: assemblies 5..=7 are
+        // open, so their 600 parts are in it, and only `cap` are written.
+        assert_eq!(libgui_tree_select(tree, 8, 2, out.as_mut_ptr(), 8, &mut kind), 4 + 3 * 200);
+        assert_eq!((kind, &out[..3]), (2, &[5u64, 1000 + 5 * 200, 1000 + 5 * 200 + 1][..]), "the range does not run through the open assembly");
+
+        // A callback that calls libgui is refused.
+        (*(user as *mut CTree)).misbehave = u;
+        libgui_tree_invalidate(tree);
+        step();
+        let err = std::ffi::CStr::from_ptr(libgui_last_error()).to_str().unwrap();
+        assert!(err.contains("callback"), "a tree callback calling libgui was not refused: {err}");
+        assert_eq!(libgui_ui_poisoned(u), 0);
+        (*(user as *mut CTree)).misbehave = std::ptr::null_mut();
+
+        libgui_tree_toggle(tree, 3);
+        assert_eq!(libgui_tree_is_expanded(tree, 3), 0);
+        // Nulls.
+        let r = libgui_tree_view(u, c("x").as_ptr(), std::ptr::null_mut(), &src);
+        assert_eq!(r.rows, 0);
+        libgui_tree_expand(std::ptr::null_mut(), 1);
+        libgui_tree_free(std::ptr::null_mut());
+        libgui_tree_free(tree);
+        libgui_ui_free(u);
+    }
+}

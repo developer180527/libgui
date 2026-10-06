@@ -47,6 +47,7 @@ mod number;
 mod popup;
 mod table_c;
 mod text;
+mod tree;
 mod theme_dnd;
 pub mod table;
 mod types;
@@ -64,6 +65,7 @@ pub use nav::*;
 pub use number::*;
 pub use popup::*;
 pub use table_c::*;
+pub use tree::*;
 pub use text::*;
 pub use theme_dnd::*;
 // The generated widget entry points. Exported for Rust callers and tests; a C

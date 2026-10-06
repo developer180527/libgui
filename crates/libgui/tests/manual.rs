@@ -81,6 +81,29 @@ fn colour(ui: &mut Ui, layer: &mut Color, push_undo: impl FnOnce()) {
         |p, r| p.gradient(r, Color::WHITE, Color::BLACK, Axis::X));
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct PartId(usize);
+struct PartNode { name: String, kids: Vec<PartId> }
+struct Assembly { top: Vec<PartId>, nodes: Vec<PartNode>, picked: std::collections::HashSet<PartId> }
+impl std::ops::Index<PartId> for Assembly {
+    type Output = PartNode;
+    fn index(&self, i: PartId) -> &PartNode { &self.nodes[i.0] }
+}
+impl TreeSource for Assembly {
+    type Key = PartId;
+    fn roots(&self, out: &mut Vec<PartId>) { out.extend(&self.top) }
+    fn children(&self, n: PartId, out: &mut Vec<PartId>) { out.extend(&self[n].kids) }
+    fn has_children(&self, n: PartId) -> bool { !self[n].kids.is_empty() }
+    fn label(&self, n: PartId) -> std::borrow::Cow<'_, str> { self[n].name.as_str().into() }
+    fn selected(&self, n: PartId) -> bool { self.picked.contains(&n) }
+}
+
+#[allow(dead_code)]
+fn tree(ui: &mut Ui, model: &Assembly, tree_state: &mut TreeState<PartId>) {
+    let r = ui.tree_view("assembly", tree_state, model);
+    let _ = r.expanded;
+}
+
 #[allow(dead_code)]
 fn custom_draw(ui: &mut Ui, color: Color, ink: Color) {
     let id = ui.make_id("custom");

@@ -241,9 +241,12 @@ impl Host {
 
         // Only rebuild when the frame would come out different. `needs_frame_for`
         // rather than `needs_frame`: a resize pushes no input, so the size-blind
-        // check would keep re-presenting batches built for the old window.
+        // check would keep re-presenting batches built for the old window. And
+        // the dock's own changes: a tab dragged in from another window lands
+        // here though this window saw no input, and would show up only when
+        // the mouse next came back.
         let mut platform = PlatformOutput::default();
-        if w.ui.needs_frame_for(&info, w.idle) {
+        if w.ui.needs_frame_for(&info, w.idle) || self.app.dock.needs_frame(w.dock_id) {
             w.idle = 0.0;
             w.ui.begin_frame(info);
             self.app.ui_for(&mut w.ui, w.dock_id);

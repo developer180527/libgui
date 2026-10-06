@@ -322,6 +322,17 @@ fn a_panel_draws_through_the_hosts_own_handle() {
         }
         assert!(PANELS > 0, "the panel callback never ran");
         assert_eq!(libgui_ui_poisoned(u), 0, "docking poisoned the handle");
+
+        // Shown as it is: nothing to draw for the dock's sake. A tab added
+        // from code is a change the window saw no input for.
+        assert_eq!(libgui_dock_needs_frame(dock, 0), 0, "a dock just shown asks for another frame");
+        libgui_dock_add_tab(dock, 0, 8);
+        assert_eq!(libgui_dock_needs_frame(dock, 0), 1, "a tab added did not ask for the frame that shows it");
+        libgui_begin_frame(u, 800.0, 600.0, 1.0, 1.0 / 60.0);
+        libgui_dock_show(dock, u, 0, &viewer);
+        libgui_end_frame(u);
+        assert_eq!(libgui_dock_needs_frame(dock, 0), 0, "showing it did not settle the dock");
+        assert_eq!(libgui_dock_needs_frame(std::ptr::null_mut(), 0), 0);
         libgui_dock_free(dock);
         libgui_ui_free(u);
     }

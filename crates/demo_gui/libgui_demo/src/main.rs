@@ -434,8 +434,11 @@ impl App {
         w.ui_idle += dt;
         let theme_changed = w.ui.theme != self.theme;
         // Size-aware: a resize pushes no input, so `needs_frame` alone would
-        // keep re-presenting batches built for the old window.
-        let run_ui = theme_changed || w.ui.needs_frame_for(&info, w.ui_idle);
+        // keep re-presenting batches built for the old window. And the dock's
+        // own changes: a tab dragged back from a floating window docks here
+        // though the pointer was over the other window, so this `Ui` saw no
+        // input and would show the tab missing until the mouse came back.
+        let run_ui = theme_changed || w.ui.needs_frame_for(&info, w.ui_idle) || self.dock.needs_frame(w.dock_id);
         if theme_changed {
             w.ui.theme = self.theme.clone();
         }

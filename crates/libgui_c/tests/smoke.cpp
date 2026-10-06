@@ -281,6 +281,36 @@ int main(int argc, char** argv) {
         CHECK(cursor == 3, "C++ type-ahead did not reach Bracket");
     }
 
+    // A tree from a plain C++ object: three folders of 500 files.
+    {
+        struct Files {
+            char name[32];
+            uint64_t children(uint64_t node, uint64_t* out, uint64_t cap) {
+                uint64_t n = node == LIBGUI_TREE_ROOT ? 3 : (node < 3 ? 500 : 0);
+                for (uint64_t i = 0; i < n && i < cap; i++)
+                    out[i] = node == LIBGUI_TREE_ROOT ? i : 100 + node * 500 + i;
+                return n;
+            }
+            bool has_children(uint64_t node) { return node < 3; }
+            const char* label(uint64_t node) {
+                std::snprintf(name, sizeof name, node < 3 ? "Folder %llu" : "File %llu", (unsigned long long)node);
+                return name;
+            }
+            bool selected(uint64_t) { return false; }
+        } files;
+        libgui::Tree tree;
+        tree.expand(1);
+        LibguiTreeViewResponse r{};
+        for (int i = 0; i < 2; i++) {
+            ui.begin_frame(400.0f, 300.0f, 1.0f, 1.0f / 60.0f);
+            r = ui.tree_view("files", tree, files);
+            ui.end_frame();
+        }
+        CHECK(r.rows == 3 + 500, "the C++ tree did not open the folder");
+        CHECK(r.built_end - r.built_first < 30, "the C++ tree built rows it could not show");
+        CHECK(!ui.poisoned(), "the tree poisoned the Ui");
+    }
+
     if (failures == 0) std::printf("ok: C++ wrapper test passed (%d paints)\n", painted);
     return failures == 0 ? 0 : 1;
 }

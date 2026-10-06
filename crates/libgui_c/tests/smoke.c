@@ -115,6 +115,8 @@ int main(int argc, char** argv) {
     CHECK_SIZE(LibguiTableResponse, libgui_sizeof_table_response);
     CHECK_SIZE(LibguiDropZone, libgui_sizeof_drop_zone);
     CHECK_SIZE(LibguiVar, libgui_sizeof_var);
+    CHECK_SIZE(LibguiTreeSource, libgui_sizeof_tree_source);
+    CHECK_SIZE(LibguiTreeViewResponse, libgui_sizeof_tree_view_response);
     CHECK_SIZE(LibguiColorPickerOptions, libgui_sizeof_color_picker_options);
     CHECK_SIZE(LibguiColorPickerResponse, libgui_sizeof_color_picker_response);
     CHECK_SIZE(LibguiValidatedOptions, libgui_sizeof_validated_options);
