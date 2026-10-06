@@ -419,6 +419,7 @@ public:
     }
     void set_anim(uint64_t wid, uint8_t slot, float v) { libgui_set_anim(h_, wid, slot, v); }
     void request_repaint() { libgui_request_repaint(h_); }
+    void request_repaint_in(float seconds) { libgui_request_repaint_in(h_, seconds); }
     void keep_id(uint64_t wid) { libgui_keep_id(h_, wid); }
 
     // A menu is a scope only when it opened, so this returns whether to build
@@ -573,6 +574,18 @@ public:
     LibguiColorPickerResponse color_button(const char* key, LibguiColor& color,
                                            const LibguiColorPickerOptions* opts = nullptr) {
         return libgui_color_button(h_, key, &color, opts);
+    }
+
+    // Notifications. duration < 0: the kind's own (4 s; errors stay); 0: until closed.
+    uint64_t toast(int32_t kind, const char* message, float duration = -1.0f,
+                   const char* action = nullptr) {
+        return libgui_toast(h_, kind, message, duration, action);
+    }
+    void dismiss_toast(uint64_t id) { libgui_dismiss_toast(h_, id); }
+    uint64_t toast_count() { return libgui_toast_count(h_); }
+    // Once a frame, last.
+    LibguiToastResponse show_toasts(const LibguiToastOptions* opts = nullptr) {
+        return libgui_show_toasts(h_, opts);
     }
 
     LibguiTextResponse text_area(const char* key, std::string& s, uint64_t rows = 6) {

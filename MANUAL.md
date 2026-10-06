@@ -95,7 +95,7 @@ apply_platform_output(&window, &out.platform);
 |---|---|
 | `screen_size` | drawable size in **logical** px |
 | `scale` | physical px per logical px (DPI) |
-| `dt` | seconds since the previous frame; clamped to 0.25 internally, so a stall does not make animations jump |
+| `dt` | the **real** seconds since the previous frame, however long the host slept. Animations step by at most 0.25 of it, so a stall does not make them jump; timing — double-click, type-ahead, a notification's life — uses all of it. Clamp only your own scene's step |
 
 Push input **before** `begin_frame`, or at any point during the frame — events
 queue up and are consumed by the widgets that want them.
@@ -112,7 +112,9 @@ if ui.needs_frame() { request_redraw(); }
 
 `FrameOutput::platform.repaint_after` is the same answer as a duration: `None`
 means "nothing is moving, sleep until an event", `Some(0.0)` means "keep going",
-`Some(t)` means "wake me in `t` seconds" (a blinking caret). An app that
+`Some(t)` means "wake me in `t` seconds" (a blinking caret, a notification
+due to leave). Something of yours that is due later asks the same way, with
+`ui.request_repaint_in(seconds)`. An app that
 redraws continuously anyway — a game engine, a 3D tool — can ignore both.
 
 ---
@@ -695,6 +697,30 @@ that HSV cannot reproduce bit for bit does not drift by being looked at.
 
 Tab reaches every part; the arrows adjust a focused part (§8.3.1), and the
 hex field takes an exact value.
+
+### 5.8.3 Notifications
+
+```rust
+// Anywhere — mid-frame, an event handler, between frames:
+let undo = ui.toast(Toast::info("Deleted 3 parts").action("Undo"));
+ui.toast(Toast::success("Saved bracket_v3.step"));
+ui.toast(Toast::error("Export failed: disk full")); // stays until closed
+
+// Once a frame, last, so the stack sits above everything:
+let r = ui.show_toasts();            // or show_toasts_with(ToastOptions { corner, .. })
+if r.action == Some(undo) { restore(); }
+```
+
+They slide in at a corner (bottom-right by default), stack, and leave after
+four seconds; an error stays until closed. Past `max_visible` (4) the rest
+wait, and their clocks do not start until they show. The pointer over one
+holds it. The kind only picks a colour from the palette — `accent`,
+`success`, `warning`, `danger`. The action and the close cross are
+focusable.
+
+A waiting notification does not keep the host drawing: it asks to be woken
+when it is due, and an idle window sleeps until then. That is why `dt` must be
+the real elapsed time (§2). C: `libgui_toast`, `libgui_show_toasts`.
 
 ### 5.9 Motion: springs
 

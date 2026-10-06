@@ -36,7 +36,7 @@ is not, and the order the gaps are worth closing in.
 | Version | 0.1.0, pre-1.0: the API still changes between releases |
 
 Not yet: multi-line text *editing* (wrapped read-only text and IME composition display are done),
-text undo, font fallback and complex shaping, accessibility, a colour picker, and rotated drawing —
+text undo, font fallback and complex shaping, accessibility, and rotated drawing —
 an image or a glyph cannot be turned, only vector paths the app rotates itself. See the roadmap.
 
 ## Crates

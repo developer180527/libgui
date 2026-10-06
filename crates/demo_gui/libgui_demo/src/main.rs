@@ -413,7 +413,8 @@ impl App {
             w.surface.configure(&g.device, &w.config);
         }
         let now = Instant::now();
-        let dt = (now - w.last).as_secs_f32().min(0.1);
+        let elapsed = (now - w.last).as_secs_f32();
+        let dt = elapsed.min(0.1); // the scene's step; libgui gets the real time
         w.last = now;
         let scale = w.window.scale_factor() as f32;
         let info = FrameInfo { screen_size: Vec2::new(w.config.width as f32 / scale, w.config.height as f32 / scale), scale, dt };
@@ -431,7 +432,7 @@ impl App {
 
         // 1. UI — but only when it would come out different. The scene below
         //    redraws regardless; the panels around it do not have to.
-        w.ui_idle += dt;
+        w.ui_idle += elapsed;
         let theme_changed = w.ui.theme != self.theme;
         // Size-aware: a resize pushes no input, so `needs_frame` alone would
         // keep re-presenting batches built for the old window. And the dock's

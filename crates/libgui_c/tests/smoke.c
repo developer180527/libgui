@@ -119,6 +119,8 @@ int main(int argc, char** argv) {
     CHECK_SIZE(LibguiTreeViewResponse, libgui_sizeof_tree_view_response);
     CHECK_SIZE(LibguiColorPickerOptions, libgui_sizeof_color_picker_options);
     CHECK_SIZE(LibguiColorPickerResponse, libgui_sizeof_color_picker_response);
+    CHECK_SIZE(LibguiToastOptions, libgui_sizeof_toast_options);
+    CHECK_SIZE(LibguiToastResponse, libgui_sizeof_toast_response);
     CHECK_SIZE(LibguiValidatedOptions, libgui_sizeof_validated_options);
     CHECK_SIZE(LibguiValidatedResponse, libgui_sizeof_validated_response);
 
@@ -565,6 +567,24 @@ int main(int argc, char** argv) {
         }
         CHECK(layer.r == 0.2f && layer.b == 0.9f, "an untouched picker wrote the colour");
         CHECK(libgui_ui_poisoned(ui) == 0, "the picker poisoned the handle");
+    }
+
+    /* Notifications. */
+    {
+        uint64_t t = libgui_toast(ui, LIBGUI_TOAST_SUCCESS, "Saved", 2.0f, NULL);
+        LibguiToastOptions to;
+        libgui_toast_options_default(&to);
+        to.corner = LIBGUI_TOAST_TOP_LEFT;
+        for (int pass = 0; pass < 3; pass++) {
+            libgui_begin_frame(ui, 400.0f, 400.0f, 1.0f, 1.0f / 60.0f);
+            LibguiToastResponse r = libgui_show_toasts(ui, &to);
+            CHECK(r.action == 0 && r.closed == 0, "an untouched toast reported a press");
+            libgui_end_frame(ui);
+        }
+        CHECK(t != 0 && libgui_toast_count(ui) == 1, "the toast did not stay");
+        libgui_dismiss_toast(ui, t);
+        CHECK(libgui_toast_count(ui) == 0, "dismissing did not take it away");
+        CHECK(libgui_ui_poisoned(ui) == 0, "toasts poisoned the handle");
     }
 
     libgui_ui_free(ui);

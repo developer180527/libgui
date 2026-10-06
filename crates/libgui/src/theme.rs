@@ -67,6 +67,8 @@ pub struct Palette {
     pub knob: Color,
     pub danger: Color,
     pub warning: Color,
+    /// Something went right: a saved file, a finished export.
+    pub success: Color,
 }
 }
 
@@ -750,6 +752,7 @@ impl Palette {
             knob: Color::hex(0xf2f4f8),
             danger: Color::hex(0xf87171),
             warning: Color::hex(0xf59e0b),
+            success: Color::hex(0x4ade80),
         }
     }
 
@@ -775,6 +778,7 @@ impl Palette {
             knob: Color::hex(0xf2f4f8),
             danger: Color::hex(0xf87171),
             warning: Color::hex(0xf59e0b),
+            success: Color::hex(0x4ade80),
         }
     }
 
@@ -800,6 +804,7 @@ impl Palette {
             knob: Color::hex(0xffffff),
             danger: Color::hex(0xdc2626),
             warning: Color::hex(0xd97706),
+            success: Color::hex(0x16a34a),
         }
     }
 }

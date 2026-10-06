@@ -859,6 +859,51 @@ LibguiColorPickerResponse libgui_color_picker(LibguiUi* ui, const char* key, Lib
 LibguiColorPickerResponse libgui_color_button(LibguiUi* ui, const char* key, LibguiColor* color,
                                               const LibguiColorPickerOptions* opts);
 
+/* --- Notifications ---------------------------------------------------------- */
+
+#define LIBGUI_TOAST_INFO    0
+#define LIBGUI_TOAST_SUCCESS 1
+#define LIBGUI_TOAST_WARNING 2
+#define LIBGUI_TOAST_ERROR   3
+
+#define LIBGUI_TOAST_BOTTOM_RIGHT 0
+#define LIBGUI_TOAST_BOTTOM_LEFT  1
+#define LIBGUI_TOAST_TOP_RIGHT    2
+#define LIBGUI_TOAST_TOP_LEFT     3
+
+typedef struct {
+    int32_t  corner;         /* LIBGUI_TOAST_BOTTOM_RIGHT by default */
+    uint32_t max_visible;    /* the rest wait their turn (4) */
+    float    width;          /* logical px (340) */
+    float    margin;         /* from the window's edges (16) */
+} LibguiToastOptions;
+
+void libgui_toast_options_default(LibguiToastOptions* out);
+
+typedef struct {
+    uint64_t action;         /* this one's action was pressed (it is dismissed too); 0 = none */
+    uint64_t closed;         /* this one was closed by hand; 0 = none */
+} LibguiToastResponse;
+
+/* Queue a notification; returns its id (never 0). Callable at any time,
+ * between frames too. duration: negative for the kind's own (4 s; an error
+ * stays until closed), 0 to stay until closed. action: a button label, or
+ * NULL. A waiting notification does not keep the host drawing: it asks to be
+ * woken when it is due, through repaint_after -- so pass the real time since
+ * the last frame as dt.
+ *
+ *     uint64_t t = libgui_toast(ui, LIBGUI_TOAST_INFO, "Deleted 3 parts", -1, "Undo");
+ *     ...
+ *     if (libgui_show_toasts(ui, NULL).action == t) undo();   // last, every frame
+ */
+uint64_t libgui_toast(LibguiUi* ui, int32_t kind, const char* message, float duration,
+                      const char* action);
+void     libgui_dismiss_toast(LibguiUi* ui, uint64_t id);
+/* Showing or waiting. */
+uint64_t libgui_toast_count(LibguiUi* ui);
+/* Draw the stack: once a frame, last, so it sits above the window. opts may be NULL. */
+LibguiToastResponse libgui_show_toasts(LibguiUi* ui, const LibguiToastOptions* opts);
+
 /* --- Fields the app validates -------------------------------------------------- */
 
 /* Asked, on commit, whether `text` is acceptable. Return 1 to accept. To
@@ -1061,6 +1106,9 @@ void  libgui_set_anim(LibguiUi* ui, uint64_t id, uint8_t slot, float value);
 /* Ask for another frame for a reason libgui cannot see: your own simulation is
  * running, a file finished loading, a tool is mid-gesture. */
 void  libgui_request_repaint(LibguiUi* ui);
+/* Ask for a frame in `seconds`, not now -- a countdown reaching zero. The
+ * host may sleep until then; it arrives as repaint_after. */
+void  libgui_request_repaint_in(LibguiUi* ui, float seconds);
 /* Keep an id's retained state alive for a frame in which no widget with that
  * id was built -- a row scrolled out of a list, a panel behind a tab. libgui
  * forgets an id it did not see. The libgui_animate* calls do this for you. */
@@ -1127,6 +1175,8 @@ uint64_t libgui_sizeof_tree_source(void);
 uint64_t libgui_sizeof_tree_view_response(void);
 uint64_t libgui_sizeof_color_picker_options(void);
 uint64_t libgui_sizeof_color_picker_response(void);
+uint64_t libgui_sizeof_toast_options(void);
+uint64_t libgui_sizeof_toast_response(void);
 uint64_t libgui_sizeof_validated_options(void);
 uint64_t libgui_sizeof_validated_response(void);
 "##;

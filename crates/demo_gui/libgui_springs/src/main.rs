@@ -107,7 +107,7 @@ impl Host {
         }
 
         let now = Instant::now();
-        w.idle += (now - w.last).as_secs_f32().min(0.1);
+        w.idle += (now - w.last).as_secs_f32(); // real time: libgui keeps its own clocks with it
         w.last = now;
 
         let scale = w.window.scale_factor() as f32;

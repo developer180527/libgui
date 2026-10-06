@@ -772,6 +772,9 @@ pub struct Ui {
     /// The hue and saturation each colour picker was showing, which RGB
     /// cannot hold for grey and black. See `color_picker.rs`.
     pub(crate) picker_states: FxMap<Id, crate::color_picker::PickerState>,
+    /// Notifications showing and waiting, oldest first. See `toast.rs`.
+    pub(crate) toasts: Vec<crate::toast::ToastEntry>,
+    pub(crate) next_toast: u64,
     pub(crate) copied: Option<String>,
     pub(crate) ime_rect: Option<Rect>,
     // Scrolling
@@ -814,7 +817,14 @@ pub struct Ui {
     /// What the last frame asked for, so [`Ui::needs_frame`] can answer before
     /// the next one starts. `Some(0.0)` until a frame has run, because a `Ui`
     /// that has never drawn has everything to do.
-    last_repaint: Option<f32>,
+    pub(crate) last_repaint: Option<f32>,
+    /// This frame's `dt` as the host gave it, unclamped: the clock for things
+    /// that are due at a time (a notification expiring), where the clamped
+    /// `input.dt` that keeps animations from leaping would lose the time.
+    pub(crate) elapsed: f32,
+    /// The soonest time something asked to be woken at — a toast's expiry —
+    /// for this frame's `repaint_after`. Cleared each frame.
+    wake_at: Option<f64>,
     /// Collect the extra counters in [`crate::testing::FrameCost`] that are
     /// not free (today: unkeyed duplicates). Off in a shipping app.
     pub audit: bool,
@@ -1016,6 +1026,8 @@ impl Ui {
             text_history: FxMap::default(),
             validated_edits: FxMap::default(),
             picker_states: FxMap::default(),
+            toasts: Vec::new(),
+            next_toast: 0,
             copied: None,
             ime_rect: None,
             scroll_states: FxMap::default(),
@@ -1033,6 +1045,8 @@ impl Ui {
             drop_hot: None,
             drag_threshold: 4.0,
             last_repaint: Some(0.0),
+            elapsed: 0.0,
+            wake_at: None,
             audit: false,
             dup_ids: FxSet::default(),
             too_deep: 0,
@@ -1604,6 +1618,20 @@ impl Ui {
         self.animating = true;
     }
 
+    /// Ask for a frame in `seconds`, not now: something will be due then — a
+    /// notification expiring, a countdown reaching zero. The host can sleep
+    /// until then rather than drawing every frame to watch the clock; it
+    /// arrives as [`PlatformOutput::repaint_after`], the soonest of every
+    /// request this frame.
+    ///
+    /// libgui has no clock of its own, so "in `seconds`" is measured by the
+    /// `dt` the host passes to [`Ui::begin_frame`] — which must be the real
+    /// time since the last frame for this, or anything timed, to keep time.
+    pub fn request_repaint_in(&mut self, seconds: f32) {
+        let at = self.time + seconds.max(0.0) as f64;
+        self.wake_at = Some(self.wake_at.map_or(at, |w| w.min(at)));
+    }
+
     /// Whether the next frame would differ from the last one, answered
     /// **before** building it.
     ///
@@ -1718,6 +1746,7 @@ impl Ui {
         // value would not merely draw a bad frame: `dt` drives animation, and
         // a NaN stored in retained state stays there. (A real one: a host that
         // times frames across a suspend, or divides by a zero refresh rate.)
+        let raw_dt = info.dt;
         let info = FrameInfo {
             screen_size: Vec2::new(sane(info.screen_size.x, 0.0).max(0.0), sane(info.screen_size.y, 0.0).max(0.0)),
             scale: {
@@ -1729,6 +1758,7 @@ impl Ui {
             // animation straight to its target.
             dt: sane(info.dt, 0.0).clamp(0.0, 0.25),
         };
+        self.elapsed = sane(raw_dt, 0.0).max(0.0);
         let mut input = self.input_state.frame(info);
         // Scroll units reach `FrameInput` unconverted, because what a notch is
         // worth is the app's to set. Everything that just wants a number in px
@@ -1811,7 +1841,7 @@ impl Ui {
             UiEvent::Action(UiAction::FocusPrevious) => Some(true),
             _ => None,
         });
-        self.time += input.dt as f64;
+        self.time += self.elapsed as f64;
         self.focus_order.clear();
         self.overlays.clear();
         self.ime_rect = None;
@@ -2023,12 +2053,15 @@ impl Ui {
         // an otherwise idle UI has to be asked for that one more frame.
         let busy =
             self.active.is_some() || self.touch_scroll.is_some() || self.animating || self.fonts.repack_pending();
+        let blink = self.focused.is_some().then_some(0.5f32); // caret blink
+        let wake = self.wake_at.take().map(|at| (at - self.time).max(0.0) as f32);
         let repaint_after = if busy {
             Some(0.0)
-        } else if self.focused.is_some() {
-            Some(0.5) // caret blink
         } else {
-            None
+            match (blink, wake) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            }
         };
         self.last_repaint = repaint_after;
         self.profile = crate::Profile {

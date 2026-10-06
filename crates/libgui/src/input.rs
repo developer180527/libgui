@@ -18,7 +18,18 @@ pub struct FrameInfo {
     pub screen_size: Vec2,
     /// Physical px per logical px.
     pub scale: f32,
-    /// Seconds since the previous frame.
+    /// Seconds since the previous frame — the **real** time, however long
+    /// that was.
+    ///
+    /// Everything timed in libgui runs on it: a double click's window, a
+    /// type-ahead's pause, a notification's lifetime, the caret's blink. A
+    /// host that sleeps while idle and then reports a clamped `dt` (0.1 s
+    /// after a two-second sleep, to keep its own physics stable) makes
+    /// libgui's clock run slow: clicks a second apart read as a double click,
+    /// and a four-second notification stays for forty. Clamp for your own
+    /// simulation if you need to; give libgui the real interval. Its own
+    /// motion takes any `dt` — eases are exponential and springs are solved
+    /// exactly — and a long one only follows a sleep, when nothing was moving.
     pub dt: f32,
 }
 

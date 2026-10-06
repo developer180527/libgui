@@ -256,6 +256,17 @@ int main(int argc, char** argv) {
         CHECK(!ui.poisoned(), "the picker poisoned the Ui");
     }
 
+    {
+        auto t = ui.toast(LIBGUI_TOAST_ERROR, "Export failed", -1.0f, "Retry");
+        ui.begin_frame(400.0f, 400.0f, 1.0f, 1.0f / 60.0f);
+        auto r = ui.show_toasts();
+        ui.request_repaint_in(1.0f);
+        ui.end_frame();
+        CHECK(r.action == 0 && ui.toast_count() == 1, "a C++ toast misbehaved");
+        ui.dismiss_toast(t);
+        CHECK(ui.toast_count() == 0 && !ui.poisoned(), "a C++ toast did not go");
+    }
+
     // Type-ahead with a lambda for the labels.
     {
         const char* parts[] = {"Axle", "bearing", "Bolt", "Bracket"};

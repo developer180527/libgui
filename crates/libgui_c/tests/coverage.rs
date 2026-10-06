@@ -2200,3 +2200,67 @@ fn a_c_tree_builds_a_screenful_of_a_large_tree() {
         libgui_ui_free(u);
     }
 }
+
+/// A notification from C: queued between frames, its action pressed through
+/// the host's pointer, and an idle wait that lets the host sleep until the
+/// next one is due.
+#[test]
+fn a_c_toast_reports_its_action_and_sleeps_until_due() {
+    unsafe {
+        let u = ui();
+        let mut opts = std::mem::zeroed::<LibguiToastOptions>();
+        libgui_toast_options_default(&mut opts);
+        assert_eq!((opts.corner, opts.max_visible), (0, 4));
+        let undo = libgui_toast(u, 0, c("Deleted 3 parts").as_ptr(), -1.0, c("Undo").as_ptr());
+        assert_ne!(undo, 0);
+        let timed = libgui_toast(u, 1, c("Saved").as_ptr(), 3.0, std::ptr::null());
+        let error = libgui_toast(u, 3, c("Disk full").as_ptr(), -1.0, std::ptr::null());
+        assert_eq!(libgui_toast_count(u), 3);
+        let mut resp = LibguiToastResponse::default();
+        let mut step = |u| {
+            frame(u, || {
+                let r = libgui_show_toasts(u, &opts);
+                resp.action |= r.action;
+                resp.closed |= r.closed;
+            })
+        };
+        for _ in 0..60 {
+            step(u);
+        }
+        let mut plat = std::mem::zeroed::<LibguiPlatformOutput>();
+        libgui_frame_platform(u, &mut plat);
+        assert!(plat.repaint_after > 1.0 && plat.repaint_after < 4.0, "an idle stack woke the host in {} s", plat.repaint_after);
+
+        let id = libgui::Id::new(("libgui_toast", undo)).with("action").0;
+        let mut b = LibguiRect::default();
+        assert_eq!(libgui_rect_of(u, id, &mut b), 1, "no action button");
+        libgui_push_pointer_moved(u, b.x + b.w / 2.0, b.y + b.h / 2.0);
+        libgui_push_pointer_button(u, 0, 1);
+        step(u);
+        libgui_push_pointer_button(u, 0, 0);
+        step(u);
+        assert_eq!(resp.action, undo, "the action did not reach C");
+
+        libgui_dismiss_toast(u, timed);
+        assert_eq!(libgui_toast_count(u), 1, "only the error should be left");
+        libgui_dismiss_toast(u, error);
+        assert_eq!(libgui_toast_count(u), 0);
+
+        // A host's own timer.
+        libgui_begin_frame(u, 400.0, 300.0, 1.0, 1.0);
+        libgui_request_repaint_in(u, 7.5);
+        libgui_end_frame(u);
+        libgui_frame_platform(u, &mut plat);
+        assert!(plat.repaint_after > 0.0 && plat.repaint_after <= 7.5, "{}", plat.repaint_after);
+
+        // Nulls.
+        libgui_show_toasts(u, std::ptr::null());
+        libgui_toast_options_default(std::ptr::null_mut());
+        assert_eq!(libgui_toast(std::ptr::null_mut(), 0, c("x").as_ptr(), -1.0, std::ptr::null()), 0);
+        libgui_dismiss_toast(std::ptr::null_mut(), 1);
+        libgui_request_repaint_in(std::ptr::null_mut(), 1.0);
+        assert_eq!(libgui_toast_count(std::ptr::null_mut()), 0);
+        assert_eq!(libgui_ui_poisoned(u), 0);
+        libgui_ui_free(u);
+    }
+}

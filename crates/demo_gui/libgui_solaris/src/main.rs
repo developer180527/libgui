@@ -228,9 +228,9 @@ impl Host {
         }
 
         let now = Instant::now();
-        let dt = (now - w.last).as_secs_f32().min(0.1);
+        let elapsed = (now - w.last).as_secs_f32();
         w.last = now;
-        w.idle += dt;
+        w.idle += elapsed;
 
         let scale = w.window.scale_factor() as f32;
         let info = FrameInfo {

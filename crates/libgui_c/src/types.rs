@@ -214,6 +214,8 @@ sizeof_fns! {
     libgui_sizeof_tree_view_response => crate::tree::LibguiTreeViewResponse,
     libgui_sizeof_color_picker_options => crate::color::LibguiColorPickerOptions,
     libgui_sizeof_color_picker_response => crate::color::LibguiColorPickerResponse,
+    libgui_sizeof_toast_options => crate::toast::LibguiToastOptions,
+    libgui_sizeof_toast_response => crate::toast::LibguiToastResponse,
     libgui_sizeof_validated_options => crate::text::LibguiValidatedOptions,
     libgui_sizeof_validated_response => crate::text::LibguiValidatedResponse,
 }

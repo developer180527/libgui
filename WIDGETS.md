@@ -111,7 +111,7 @@ apps do with it. `no` = absent.
 | Tooltip | 14 | yes |
 | Popup / dropdown surface | 14 | yes |
 | Modal dialog | 14 | part — **deliberately**: built from layers, see DESIGN §13 |
-| **Toast / notification** | 12 | **no** |
+| Toast / notification | 12 | yes (`toast`, `show_toasts`) |
 | Inline validation error on a field | 11 | yes (`validated_input`) |
 | Empty state | 12 | part — containers and a label; no widget needed |
 | Drag and drop with a drag preview | 11 | yes |
@@ -197,7 +197,7 @@ application actually being built.
 | 1 | ~~Numeric field with units and expressions~~ | **Done**, as #3: the app's evaluator behind `validated_input`. An evaluator in core was tried and withdrawn — see DESIGN §13. | — |
 | 2 | ~~Colour picker~~ | **Done** — `color_picker` and `color_button`, on a new `Painter::gradient` that needed no backend change. | — |
 | 3 | ~~Inline field validation~~ | **Done** — `validated_input`: commit, cancel, refused text kept with its reason, caret at the problem. | — |
-| 4 | Toast / notification | The standard way to report a non-modal failure. Twelve of fourteen. | 2 d |
+| 4 | ~~Toast / notification~~ | **Done** — `toast` and `show_toasts`. A waiting one costs nothing: it asks to be woken when due (`request_repaint_in`). Building it found `dt` clamped to 0.25 s before it reached libgui's clocks, so a slept-through second counted as a quarter — fixed for double-click and type-ahead too. | — |
 | 5 | **Decide on rotation** | Not build — decide. The cost falls on backend authors, and it gets worse the longer it waits. | — |
 | 6 | ~~Virtualised tree~~ | **Done** — `tree_view`: 100,100 open nodes cost what 100 do. Building it fixed End and Page Down in every long virtual list. | — |
 | 7 | ~~Menu arrow keys, list type-ahead, Shift+Arrow selection~~ | **Done**, with two the survey missed: no focused control could be pressed from the keyboard at all, and sliders took no arrows. | — |
