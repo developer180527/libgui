@@ -75,9 +75,15 @@ const PREAMBLE: &str = r##"/* libgui — C ABI.
  *           -> draw the UI
  *
  * A widget's rect exists only after layout, which happens inside
- * libgui_end_frame. Render your scene BEFORE that and you are sizing it from
- * last frame's rect, which shows as the viewport lagging a frame behind while
- * a window is resized.
+ * libgui_end_frame, and libgui_rect_of(ui, response.id, &r) reads it there.
+ * The rect in a response is last frame's: size your scene from it, or render
+ * before end_frame, and the viewport lags a frame behind while a window is
+ * resized or an edge dragged.
+ *
+ * Every laid-out edge is on the physical pixel grid, so a border at a moving
+ * edge draws the same crisp pixels at every position. Content inside a
+ * scroll that is moving, or inside a canvas, is the exception: it slides
+ * sub-pixel so text and its row move together.
  */
 #ifndef LIBGUI_H
 #define LIBGUI_H
@@ -463,6 +469,12 @@ void               libgui_frame_clear_color(LibguiUi* ui, LibguiColor* out);
 void               libgui_frame_platform(LibguiUi* ui, LibguiPlatformOutput* out);
 const char*        libgui_frame_copied_text(LibguiUi* ui);
 uint8_t            libgui_needs_frame(LibguiUi* ui, float elapsed);
+/* Where a widget is, from the most recent layout: after libgui_end_frame,
+ * THIS frame's rect (a response's rect is last frame's). Size your 3D view's
+ * target from this, or the scene renders a frame stale while an edge is
+ * dragged. Edges sit on the physical pixel grid, so w*scale is whole.
+ * Returns 0 for an id that was not built. */
+uint8_t            libgui_rect_of(LibguiUi* ui, uint64_t id, LibguiRect* out);
 uint64_t           libgui_instance_stride(void);
 uint32_t           libgui_vertices_per_instance(void);
 

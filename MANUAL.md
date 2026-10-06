@@ -778,6 +778,13 @@ bytes, which is the price of not having instancing.
 **opaque sRGB**: alpha ignored, no colour conversion, so convert a linear or HDR
 target before it gets here.
 
+**Sizing the target, and when.** Size it from the widget's rect *after*
+`end_frame` — `ui.rect_of(response.id)`, `libgui_rect_of` in C — not from
+`response.rect`, which is last frame's: a scene sized from that renders a
+frame stale and visibly stretches while an edge is dragged. Layout puts every
+edge on the physical pixel grid (DESIGN §17), so `rect.w * scale` is already a
+whole number of pixels.
+
 ---
 
 ## 10. Theming

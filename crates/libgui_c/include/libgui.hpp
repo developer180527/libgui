@@ -255,6 +255,9 @@ public:
     void begin_frame(float w, float h, float scale, float dt) { libgui_begin_frame(h_, w, h, scale, dt); }
     void end_frame() { libgui_end_frame(h_); }
     bool needs_frame(float elapsed) const { return libgui_needs_frame(h_, elapsed) != 0; }
+    // This frame's rect once end_frame has run -- what to size a 3D view's
+    // target from. A response's rect is last frame's.
+    bool rect_of(uint64_t wid, LibguiRect& out) const { return libgui_rect_of(h_, wid, &out) != 0; }
     int install_default_keymap() { return libgui_install_default_keymap(h_); }
     int set_theme(const char* name) { return libgui_set_theme(h_, name); }
 

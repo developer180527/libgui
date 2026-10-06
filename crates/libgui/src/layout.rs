@@ -324,8 +324,35 @@ pub(crate) fn fit(nodes: &mut [Node], kids: &[u32], root: usize) {
     measure(nodes, kids, root);
 }
 
-pub(crate) fn arrange(nodes: &mut [Node], kids: &[u32], root: usize, rect: Rect, s: &mut Scratch) {
-    place(nodes, kids, root, rect, s);
+/// `scale` is physical pixels per logical pixel. Every edge is put on the
+/// physical pixel grid — see [`snap_edges`] — except where that would be
+/// wrong: beneath a transform, whose children are in canvas space, and beneath
+/// a scroll that is moving, whose content slides sub-pixel on purpose.
+pub(crate) fn arrange(nodes: &mut [Node], kids: &[u32], root: usize, rect: Rect, scale: f32, s: &mut Scratch) {
+    let grid = if scale.is_finite() && scale > 0.0 { scale } else { 0.0 };
+    place(nodes, kids, root, snap_edges(rect, grid), grid, s);
+}
+
+/// Round a rect's **edges** to the physical pixel grid, `grid` pixels per
+/// logical pixel; 0 leaves it alone.
+///
+/// Edges rather than position and size, so two neighbours that share an edge
+/// still share it after rounding, and nothing gaps or overlaps. Unsnapped, a
+/// pane edge dragged by fractional pointer deltas lands between pixels, and
+/// every hairline on it — a border, a separator — alternates between one
+/// crisp pixel and two half-strength ones from frame to frame, which reads as
+/// the line flickering or breaking while it moves.
+pub(crate) fn snap_edges(r: Rect, grid: f32) -> Rect {
+    // A non-finite rect is the app's mistake, handled downstream; snapping it
+    // must not quietly turn a NaN size into a zero one and change how that
+    // goes.
+    if grid <= 0.0 || !(r.x.is_finite() && r.y.is_finite() && r.w.is_finite() && r.h.is_finite()) {
+        return r;
+    }
+    let snap = |v: f32| (v * grid).round() / grid;
+    let (x0, y0) = (snap(r.x), snap(r.y));
+    let (x1, y1) = (snap(r.x + r.w), snap(r.y + r.h));
+    Rect::new(x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0))
 }
 
 /// Bottom-up: minimum (fit) size of every node.
@@ -375,13 +402,21 @@ fn measure(nodes: &mut [Node], kids: &[u32], i: usize) -> Vec2 {
 }
 
 /// Top-down: distribute space and assign final rects.
-fn place(nodes: &mut [Node], kids: &[u32], i: usize, rect: Rect, s: &mut Scratch) {
+fn place(nodes: &mut [Node], kids: &[u32], i: usize, rect: Rect, grid: f32, s: &mut Scratch) {
     nodes[i].rect = rect;
     let all = nodes[i].children;
+    // What this node's children are snapped to. A transform's children are in
+    // canvas space, where the logical grid is not the pixel grid; a moving
+    // scroll's content slides sub-pixel so text and box move together.
+    let grid = match (nodes[i].xform, nodes[i].scroll) {
+        (Some(_), _) => 0.0,
+        (_, Some(sc)) if !sc.snap => 0.0,
+        _ => grid,
+    };
     for k in all.range() {
         let c = kids[k] as usize;
         if let Some(r) = nodes[c].absolute {
-            place(nodes, kids, c, r, s);
+            place(nodes, kids, c, snap_edges(r, grid), grid, s);
         }
     }
     // Flow children, into this call's slice of the shared scratch. Everything
@@ -484,7 +519,7 @@ fn place(nodes: &mut [Node], kids: &[u32], i: usize, rect: Rect, s: &mut Scratch
         };
         let pos = from_axes(axis, cursor, cross_start + cross_off);
         let size = from_axes(axis, main, cross);
-        place(nodes, kids, c, Rect::new(pos.x, pos.y, size.x, size.y), s);
+        place(nodes, kids, c, snap_edges(Rect::new(pos.x, pos.y, size.x, size.y), grid), grid, s);
         cursor += main + l.gap;
     }
     s.flow.truncate(base);
@@ -533,7 +568,7 @@ mod tests {
             }
             let mut scratch = Scratch::default();
             super::fit(&mut self.nodes, &kids, 0);
-            super::arrange(&mut self.nodes, &kids, 0, rect, &mut scratch);
+            super::arrange(&mut self.nodes, &kids, 0, rect, 0.0, &mut scratch);
             assert!(scratch.flow.is_empty() && scratch.mains.is_empty(), "place leaked scratch");
             &self.nodes
         }

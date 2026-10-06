@@ -1818,3 +1818,60 @@ fn springs_cross_to_c() {
         libgui_ui_free(u);
     }
 }
+
+/// After `end_frame`, `libgui_rect_of` is where the view was drawn **this**
+/// frame — what a host sizes its scene from — while the response's rect is
+/// last frame's, which is the one-frame lag the header warns about. And at a
+/// fractional scale the rect is whole physical pixels, so `w * scale` needs
+/// no rounding of its own.
+#[test]
+fn rect_of_is_this_frames_rect_and_on_the_pixel_grid() {
+    unsafe {
+        let u = ui();
+        let scale = 1.5f32;
+        let mut width = 300.0f32;
+        let step = |width: f32| -> (LibguiResponse, LibguiRect, LibguiRect) {
+            libgui_begin_frame(u, 600.0, 300.0, scale, 1.0 / 60.0);
+            let none = LibguiFrame {
+                fill: LibguiColor::default(),
+                border: LibguiColor::default(),
+                border_width: 0.0,
+                radius: 0.0,
+                clip: 0,
+                shadow: 0,
+                _pad: [0; 6],
+            };
+            libgui_open_container(u, 9, leaf_layout(width, 200.0), none);
+            let vp = libgui_viewport(u, c("scene").as_ptr(), 77);
+            libgui_close_container(u);
+            libgui_end_frame(u);
+            let mut now = LibguiRect::default();
+            assert_eq!(libgui_rect_of(u, vp.id, &mut now), 1, "a widget built this frame has no rect");
+            // Where the texture was drawn: the instance its batch starts at.
+            let mut nb = 0u64;
+            let batches = std::slice::from_raw_parts(libgui_frame_batches(u, &mut nb), nb as usize);
+            let b = batches.iter().find(|b| b.texture_kind == 1 && b.texture_index == 77).expect("the view was not drawn");
+            let mut ni = 0u64;
+            let base = libgui_frame_instances(u, &mut ni) as *const f32;
+            let stride = libgui_instance_stride() as usize / 4;
+            let r = std::slice::from_raw_parts(base.add(b.first as usize * stride), 4);
+            (vp, now, LibguiRect { x: r[0], y: r[1], w: r[2], h: r[3] })
+        };
+        for _ in 0..3 {
+            step(width);
+        }
+        // The view's container moves by a fraction this frame.
+        width -= 3.37;
+        let (vp, now, drawn) = step(width);
+        assert_eq!((now.w, now.h), (drawn.w, drawn.h), "rect_of is not where the view was drawn");
+        assert_ne!(vp.rect.w, now.w, "the response caught up already: the test did not move the view");
+        let phys = now.w * scale;
+        assert_eq!(phys, phys.round(), "the rect is not whole physical pixels: {phys}");
+
+        // An id that was not built, and nulls.
+        assert_eq!(libgui_rect_of(u, 0xdead, &mut LibguiRect::default()), 0);
+        assert_eq!(libgui_rect_of(u, vp.id, std::ptr::null_mut()), 1);
+        assert_eq!(libgui_rect_of(std::ptr::null_mut(), vp.id, std::ptr::null_mut()), 0);
+        libgui_ui_free(u);
+    }
+}

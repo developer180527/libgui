@@ -117,6 +117,10 @@ int main(int argc, char** argv) {
     }
     ui.end_frame();
 
+    {
+        LibguiRect r{};
+        CHECK(!ui.rect_of(0xdeadbeef, r), "rect_of found an id that was never built");
+    }
     bool found = false;
     for (auto& b : ui.batches()) {
         if (b.texture_kind == 1 && b.texture_index == 7) found = true;

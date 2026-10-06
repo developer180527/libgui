@@ -351,6 +351,15 @@ is why nobody should worry about it.
 - A benchmark that flatters is worse than none. The first C-boundary run said
   the ABI was *22% faster* than native Rust, which is impossible; it was
   ordering, and running both sides twice in reverse collapsed it to zero.
+- Steady frames are the flattering case: nothing moved, every cache hits. So
+  `libgui_bench --bin app` measures a CAD-shaped window — tree, viewport,
+  inspector, table — while a user drags an edge, resizes, scrolls, sweeps and
+  types, at 1x and 1.5x, and reports the worst frame beside the median. Every
+  one costs about 0.07 ms, half a percent of a 60 Hz frame, with the mesh a
+  bgfx host builds adding 0.01 ms; the first frame is 0.3 ms and a DPI change
+  0.15. Each scenario checks that it actually moved something, because a
+  benchmark of a drag that never dragged measures a still frame and calls it
+  a moving one — which the first version of the moving-frame test did.
 
 ---
 
@@ -476,7 +485,45 @@ slots on one id.
 
 ---
 
-## 17. Pre-1.0, and what that means for you
+## 17. Every edge sits on the pixel grid
+
+**Context.** A pane edge dragged by the pointer moves by fractional pixels —
+3.37, say — and so does a `Grow` split of an odd width during a live resize.
+Laid out as computed, the edge lands between pixels, and a 1 px border on it
+draws as one crisp pixel in one frame and two half-strength ones in the next.
+Reported from a bgfx host as a viewport's border "breaking for a moment"
+while its edge was dragged; at rest it looked fine, because at rest it was
+not alternating.
+
+**Decision.** Layout rounds every node's **edges** to the physical pixel grid
+as it places them: left, top, right and bottom independently, so neighbours
+that shared an edge before rounding share it after, and nothing gaps or
+overlaps. Two subtrees are exempt: a canvas's children, which live in canvas
+space where the logical grid is not the pixel grid, and the content of a
+scroll that is *moving*, which slides sub-pixel on purpose so text and its row
+move together (it snaps when the scroll stops, as before).
+
+**Consequences.**
+
+- A moving edge draws the same pixels as a still one. `moving_edge.rs`
+  drags a splitter, drags the dock's own split and live-resizes a `Grow`
+  split, at 1x, 1.25x, 1.5x and 2x, through both the instanced and the
+  triangle path, and requires every frame's border pixel to be the resting
+  one. Without the rounding it fails on the first moving frame.
+- `Response::rect` and `rect_of` report rounded values, and `w * scale` is a
+  whole number of pixels, so a host sizing a render target needs no rounding
+  of its own. The values changed; the API did not.
+- The golden images moved, mostly at 1.5x, by one physical pixel where an edge
+  had been fractional. Each was looked at before it was accepted.
+- The mesh-parity guard counted differing pixels, and one long anti-aliased
+  edge rounding one step apart along its length is hundreds of them on a
+  single line. It now allows that — and only that: differences confined to
+  one or two straight lines. A broken vertex stage still fails it by 112.
+- It costs nothing measurable: the app benchmark's medians did not move.
+
+---
+
+## 18. Pre-1.0, and what that means for you
 
 The Rust API changes. `Response` gained a field recently; `ShapedGlyph` gained
 one; a function's arity changed. That is what pre-1.0 means and it is fine:

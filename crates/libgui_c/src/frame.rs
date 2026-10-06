@@ -607,3 +607,37 @@ pub unsafe extern "C" fn libgui_mesh_chunks(ui: *mut LibguiUi, out_count: *mut u
     p
 }
 
+
+/// Where a widget is, from the most recent layout: called after
+/// `libgui_end_frame`, **this** frame's rect. Writes `*out` and returns 1, or
+/// returns 0 for an id that was not built.
+///
+/// This is the rect to size a render target from. A widget's `response.rect`
+/// is last frame's, because during the build this frame has not been laid out
+/// yet; a host that sizes its 3D view from it renders the scene one frame
+/// stale, which shows as the view stretching for a frame while an edge is
+/// dragged or the window resized. Edges are on the physical pixel grid, so
+/// `w * scale` and `h * scale` are whole numbers of pixels.
+///
+/// ```c
+/// LibguiResponse vp = libgui_viewport(ui, "scene", scene_tex);
+/// libgui_end_frame(ui);
+/// LibguiRect r;
+/// if (libgui_rect_of(ui, vp.id, &r)) resize_scene(r.w * scale, r.h * scale);
+/// render_scene();                      // then draw the UI
+/// ```
+///
+/// # Safety
+/// `ui` null or live; `out` null or writable.
+#[no_mangle]
+pub unsafe extern "C" fn libgui_rect_of(ui: *mut LibguiUi, id: u64, out: *mut crate::types::LibguiRect) -> u8 {
+    let r = with_ui(ui, None, |u| u.rect_of(libgui::Id(id)));
+    match (r, unsafe { out.as_mut() }) {
+        (Some(r), Some(o)) => {
+            *o = r.into();
+            1
+        }
+        (Some(_), None) => 1,
+        _ => 0,
+    }
+}

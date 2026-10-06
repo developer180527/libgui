@@ -1082,13 +1082,17 @@ enforced by tests rather than left to a benchmark nobody runs
 | An idle UI | `repaint_after: None` — the host sleeps |
 | A static UI under a host redrawing at 120 Hz | **0** UI frames per second |
 | A cached 800-row panel beside a live widget | **0.044 ms** vs 0.487 (11x) |
+| A frame with a pane edge being dragged, vs a still one | **0.85x** — 57 µs, 0.34% of a 60 fps frame |
+| A dragged edge, a dragged dock split, a live resize: border pixels vs at rest | **identical** every frame, 1x–2x, instanced and triangles |
 
 They assert properties that hold on any machine: deterministic counts, and
 *ratios* for complexity (4x the widgets must not cost more than 7x the time,
 where linear is 4x) rather than wall-clock times that flake on a loaded CI box.
 The one absolute budget is asserted in release only, since a debug build is an
-order of magnitude slower. `crates/libgui_bench` is the measuring tool;
-these are the regression guards.
+order of magnitude slower. `crates/libgui_bench` is the measuring tool —
+`--bin app` times a CAD-shaped window while a user drags, resizes, scrolls and
+types (about 0.07 ms a frame in every case) — and these are the regression
+guards.
 
 ### Torture tests
 

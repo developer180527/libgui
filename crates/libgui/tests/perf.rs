@@ -420,3 +420,67 @@ fn a_visible_panel_is_a_rounding_error_in_a_frame() {
     // for a slower or loaded machine while still catching a real regression.
     assert!(share < 5.0, "a single panel costs {share:.1}% of a frame");
 }
+
+/// A user is rarely still: they drag a pane edge, and the layout changes every
+/// frame. That frame must cost what a still one does — no cache that only
+/// pays off when nothing moves, no work proportional to how far it moved.
+///
+/// A ratio, so it holds on any machine; the absolute share is asserted in
+/// release only, as above.
+#[test]
+fn a_moving_layout_costs_what_a_still_one_does() {
+    let names = names(400);
+    let build = |ui: &mut Ui, side: &mut f32| {
+        ui.begin_frame(FrameInfo { screen_size: Vec2::new(1200.0, 800.0), scale: 1.5, dt: 1.0 / 60.0 });
+        let grow = Layout::row().width(Size::Grow(1.0)).height(Size::Grow(1.0));
+        let mut handle = Rect::default();
+        ui.container(grow, Frame::none(), |ui| {
+            ui.container(Layout::column().width(Size::Grow(1.0)).height(Size::Grow(1.0)), Frame::none(), |ui| {
+                ui.viewport("scene", TextureId::User(1), |_, _| {});
+            });
+            handle = ui.splitter("side", side, SplitterOptions::vertical_rule(100.0, 900.0).inverted()).rect;
+            let col = Layout::column().width(Size::Fixed(*side)).height(Size::Grow(1.0));
+            ui.container(col, Frame::none(), |ui| ui.scroll_area("inspector", |ui| panel(ui, 200, &names)));
+        });
+        let _ = ui.end_frame();
+        handle
+    };
+
+    // Still.
+    let mut ui = ui();
+    let mut side = 300.0;
+    for _ in 0..60 {
+        build(&mut ui, &mut side);
+    }
+    let still = fastest(60, || {
+        build(&mut ui, &mut side);
+    });
+
+    // Dragging the edge by fractional pixels, every frame.
+    let mut ui2 = self::ui();
+    let mut side2 = 300.0;
+    let mut handle = Rect::default();
+    for _ in 0..60 {
+        handle = build(&mut ui2, &mut side2);
+    }
+    let start = handle.center();
+    ui2.push(InputEvent::PointerMoved { pos: start });
+    ui2.push(InputEvent::PointerButton { button: PointerButton::Primary, pressed: true });
+    let mut x = start.x;
+    let mut i = 0;
+    let moving = fastest(60, || {
+        i += 1;
+        x += if (i / 20) % 2 == 0 { -3.37 } else { 3.37 };
+        ui2.push(InputEvent::PointerMoved { pos: Vec2::new(x, start.y) });
+        build(&mut ui2, &mut side2);
+    });
+    assert!(side2 != 300.0, "the drag never moved the edge (handle {handle:?}, x {x})");
+
+    let ratio = moving.as_secs_f64() / still.as_secs_f64();
+    let share = moving.as_secs_f64() * 60.0 * 100.0;
+    println!("still {still:?}, dragging {moving:?} ({ratio:.2}x) = {share:.2}% of a 60 fps frame");
+    assert!(ratio < 2.0, "a frame with an edge being dragged costs {ratio:.1}x a still one");
+    if !cfg!(debug_assertions) {
+        assert!(share < 5.0, "a frame with an edge being dragged costs {share:.1}% of a 60 fps frame");
+    }
+}

@@ -1660,14 +1660,14 @@ impl Ui {
         layout::fit(&mut self.nodes, &self.kids, 0);
         let measure_ms = t.ms();
         let t = crate::profile::Clock::start();
-        layout::arrange(&mut self.nodes, &self.kids, 0, screen, &mut self.scratch);
+        layout::arrange(&mut self.nodes, &self.kids, 0, screen, self.input.scale, &mut self.scratch);
         // A paragraph's height follows from the width it was given, which is
         // only known now. Where that changed the answer, the solve is worth
         // running again — once. In the steady state widths do not move, so
         // this costs a walk of the paragraphs and nothing else.
         if self.rewrap() {
             layout::fit(&mut self.nodes, &self.kids, 0);
-            layout::arrange(&mut self.nodes, &self.kids, 0, screen, &mut self.scratch);
+            layout::arrange(&mut self.nodes, &self.kids, 0, screen, self.input.scale, &mut self.scratch);
         }
         let place_ms = t.ms();
         // Floating nodes size themselves from their content, which `measure`
