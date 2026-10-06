@@ -19,6 +19,7 @@ mod input_state;
 mod layout;
 mod math;
 mod validated;
+mod color_picker;
 mod paint_arena;
 mod painter;
 mod profile;
@@ -61,6 +62,7 @@ pub use input::{
 pub use layout::{Align, Axis, Insets, Layout, Size};
 pub use math::{Color, Rect, Transform, Vec2};
 pub use validated::{FieldError, ValidatedOptions, ValidatedResponse};
+pub use color_picker::{ColorPickerOptions, ColorPickerResponse};
 pub use painter::{Chevron, Painter};
 pub use profile::{enabled as profile_enabled, Profile};
 pub use scroll::{ScrollConfig, Smoothing};

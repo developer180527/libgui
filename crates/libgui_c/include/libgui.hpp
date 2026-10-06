@@ -476,6 +476,17 @@ public:
         return r;
     }
 
+    // A colour picker, and a swatch that opens one. `color` is edited in
+    // place; `finished` is the frame to push an undo step on.
+    LibguiColorPickerResponse color_picker(const char* key, LibguiColor& color,
+                                           const LibguiColorPickerOptions* opts = nullptr) {
+        return libgui_color_picker(h_, key, &color, opts);
+    }
+    LibguiColorPickerResponse color_button(const char* key, LibguiColor& color,
+                                           const LibguiColorPickerOptions* opts = nullptr) {
+        return libgui_color_button(h_, key, &color, opts);
+    }
+
     LibguiTextResponse text_area(const char* key, std::string& s, uint64_t rows = 6) {
         return edit(s, [&](char* buf, uint64_t cap, uint64_t* need) {
             return libgui_text_area(h_, key, buf, cap, rows, need);

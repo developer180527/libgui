@@ -576,6 +576,10 @@ fn the_whole_painter_and_the_subtree_cache_reach_c() {
             libgui_painter_wire(p, r.x, r.y, r.x + 30.0, r.y + 20.0, 2.0, white);
             libgui_painter_chevron(p, r, 8.0, 1, white);
             libgui_painter_image_tinted(p, r, 0, 0.0, 0.0, 1.0, 1.0, 0.0, white);
+            let black = LibguiColor { r: 0.0, g: 0.0, b: 0.0, a: 1.0 };
+            libgui_painter_gradient(p, r, white, black, 0);
+            libgui_painter_gradient(p, r, LibguiColor::default(), black, 1);
+            libgui_painter_gradient(std::ptr::null_mut(), r, white, black, 0);
             // Nulls, which a host will pass eventually.
             libgui_painter_text(p, 0.0, 0.0, 13.0, white, std::ptr::null());
             libgui_painter_polyline(p, std::ptr::null(), 0, 1.0, white);
@@ -1872,6 +1876,79 @@ fn rect_of_is_this_frames_rect_and_on_the_pixel_grid() {
         assert_eq!(libgui_rect_of(u, 0xdead, &mut LibguiRect::default()), 0);
         assert_eq!(libgui_rect_of(u, vp.id, std::ptr::null_mut()), 1);
         assert_eq!(libgui_rect_of(std::ptr::null_mut(), vp.id, std::ptr::null_mut()), 0);
+        libgui_ui_free(u);
+    }
+}
+
+/// `axis` 0 runs the ramp across, 1 runs it down: read back from the ramp
+/// instance's uv, which spans the atlas along the gradient and is a single
+/// point across it.
+#[test]
+fn a_c_gradient_runs_the_way_its_axis_says() {
+    unsafe extern "C" fn paint(p: *mut LibguiPainter, r: LibguiRect, user: *mut c_void) {
+        let axis = unsafe { *(user as *const u32) };
+        let black = LibguiColor { r: 0.0, g: 0.0, b: 0.0, a: 1.0 };
+        unsafe { libgui_painter_gradient(p, r, LibguiColor::default(), black, axis) };
+    }
+    unsafe {
+        for mut axis in [0u32, 1] {
+            let u = ui();
+            let id = libgui_id_from_name(c("ramp").as_ptr());
+            libgui_begin_frame(u, 200.0, 200.0, 1.0, 1.0 / 60.0);
+            let cb = LibguiPaintFn { paint: Some(paint), drop_user: None, user: &mut axis as *mut u32 as *mut c_void };
+            libgui_add_leaf(u, id, leaf_layout(100.0, 50.0), 0, cb);
+            libgui_end_frame(u);
+            let mut n = 0u64;
+            let base = libgui_frame_instances(u, &mut n) as *const f32;
+            let stride = libgui_instance_stride() as usize / 4;
+            assert_eq!(n, 1, "a gradient from transparent is one instance");
+            let inst = std::slice::from_raw_parts(base, stride);
+            let uv = &inst[4..8];
+            let (across, down) = (uv[0] != uv[2], uv[1] != uv[3]);
+            assert_eq!((across, down), (axis == 0, axis == 1), "axis {axis} ran the other way: uv {uv:?}");
+            libgui_ui_free(u);
+        }
+    }
+}
+
+/// A click in the picker's square writes through to the host's own colour,
+/// and the drag that ends is the one `finished` names.
+#[test]
+fn a_c_colour_picker_edits_the_hosts_colour() {
+    unsafe {
+        let u = ui();
+        let mut color = LibguiColor { r: 1.0, g: 0.0, b: 0.0, a: 1.0 };
+        let mut opts = std::mem::zeroed::<LibguiColorPickerOptions>();
+        libgui_color_picker_options_default(&mut opts);
+        assert_eq!((opts.alpha, opts.hex), (1, 1));
+        let finished = std::cell::Cell::new(0);
+        let step = |color: &mut LibguiColor| {
+            frame(u, || {
+                libgui_open_container(u, 5, leaf_layout(240.0, 300.0), std::mem::zeroed());
+                let r = libgui_color_picker(u, c("layer").as_ptr(), color, &opts);
+                finished.set(finished.get() + r.finished as u32);
+                libgui_close_container(u);
+            });
+        };
+        for _ in 0..3 {
+            step(&mut color);
+        }
+        libgui_push_pointer_moved(u, 1.0, 1.0); // the square's top-left: white
+        libgui_push_pointer_button(u, 0, 1);
+        step(&mut color);
+        libgui_push_pointer_button(u, 0, 0);
+        step(&mut color);
+        assert!(color.r > 0.98 && color.g > 0.98 && color.b > 0.98, "the click did not reach the host's colour: {color:?}");
+        assert_eq!(finished.get(), 1, "one click, one finished edit");
+
+        // The swatch, and nulls.
+        frame(u, || {
+            libgui_color_button(u, c("swatch").as_ptr(), &mut color, std::ptr::null());
+        });
+        let r = libgui_color_picker(u, c("x").as_ptr(), std::ptr::null_mut(), std::ptr::null());
+        assert_eq!(r.changed, 0);
+        libgui_color_picker_options_default(std::ptr::null_mut());
+        assert_eq!(libgui_ui_poisoned(u), 0);
         libgui_ui_free(u);
     }
 }

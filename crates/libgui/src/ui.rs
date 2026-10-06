@@ -706,6 +706,9 @@ pub struct Ui {
     /// What a validated field holds while it is being edited, or while it
     /// holds text its validator refused. See `validated.rs`.
     pub(crate) validated_edits: FxMap<Id, crate::validated::ValidatedEdit>,
+    /// The hue and saturation each colour picker was showing, which RGB
+    /// cannot hold for grey and black. See `color_picker.rs`.
+    pub(crate) picker_states: FxMap<Id, crate::color_picker::PickerState>,
     pub(crate) copied: Option<String>,
     pub(crate) ime_rect: Option<Rect>,
     // Scrolling
@@ -941,6 +944,7 @@ impl Ui {
             text_states: FxMap::default(),
             text_history: FxMap::default(),
             validated_edits: FxMap::default(),
+            picker_states: FxMap::default(),
             copied: None,
             ime_rect: None,
             scroll_states: FxMap::default(),
@@ -1775,6 +1779,7 @@ impl Ui {
         self.text_states.retain(|id, _| seen.contains(id));
         self.text_history.retain(|id, _| seen.contains(id));
         self.validated_edits.retain(|id, _| seen.contains(id));
+        self.picker_states.retain(|id, _| seen.contains(id));
         self.scroll_states.retain(|id, _| seen.contains(id));
         self.in_scroll.retain(|id, _| seen.contains(id));
         self.nav_states.retain(|id, _| seen.contains(id));

@@ -216,6 +216,10 @@ void libgui_painter_hairline(LibguiPainter* p, float x, float y, float px, float
 void libgui_painter_snap_rect(LibguiPainter* p, LibguiRect r, LibguiRect* out);
 
 void libgui_painter_rect(LibguiPainter* p, LibguiRect r, LibguiColor fill, float radius);
+/* A linear gradient: axis 0 left to right, 1 top to bottom. Exact when `from`
+ * is opaque or fully transparent (a transparent `from` fades `to` in over what
+ * is beneath). Square corners. Needs nothing new from your renderer. */
+void libgui_painter_gradient(LibguiPainter* p, LibguiRect r, LibguiColor from, LibguiColor to, uint32_t axis);
 void libgui_painter_rect_bordered(LibguiPainter* p, LibguiRect r, LibguiColor fill, float radius,
                                   float border_width, LibguiColor border);
 void libgui_painter_line(LibguiPainter* p, float x0, float y0, float x1, float y1, float width, LibguiColor c);
@@ -715,6 +719,38 @@ void        libgui_drop_zone(LibguiUi* ui, const char* const* kinds, uint64_t co
 const char* libgui_dragging(LibguiUi* ui);   /* NULL when nothing is */
 void        libgui_cancel_drag(LibguiUi* ui);
 
+/* --- Colour ------------------------------------------------------------------ */
+
+typedef struct {
+    uint8_t alpha;           /* offer an alpha strip (1 by default) */
+    uint8_t hex;             /* show the hex field (1 by default) */
+    uint8_t _pad[2];
+    float   square_height;   /* the saturation/value square, logical px */
+} LibguiColorPickerOptions;
+
+void libgui_color_picker_options_default(LibguiColorPickerOptions* out);
+
+typedef struct {
+    uint8_t changed;         /* the colour changed this frame: every frame of a drag */
+    uint8_t finished;        /* an edit finished -- push an undo step on this one */
+    uint8_t dragging;
+    uint8_t _pad;
+} LibguiColorPickerResponse;
+
+/* A picker editing *color in place: a saturation/value square, a hue strip, an
+ * optional alpha strip and a hex field. HSV is computed on the colour as
+ * stored (sRGB-encoded), and the hue and saturation it was showing are kept
+ * across grey and black, which RGB cannot hold. opts may be NULL.
+ *
+ *     if (libgui_color_picker(ui, "layer", &layer_color, NULL).finished)
+ *         push_undo();
+ */
+LibguiColorPickerResponse libgui_color_picker(LibguiUi* ui, const char* key, LibguiColor* color,
+                                              const LibguiColorPickerOptions* opts);
+/* A swatch of *color that opens a picker in a popup when clicked. */
+LibguiColorPickerResponse libgui_color_button(LibguiUi* ui, const char* key, LibguiColor* color,
+                                              const LibguiColorPickerOptions* opts);
+
 /* --- Fields the app validates -------------------------------------------------- */
 
 /* Asked, on commit, whether `text` is acceptable. Return 1 to accept. To
@@ -979,6 +1015,8 @@ uint64_t libgui_sizeof_insets(void);
 uint64_t libgui_sizeof_table_response(void);
 uint64_t libgui_sizeof_drop_zone(void);
 uint64_t libgui_sizeof_var(void);
+uint64_t libgui_sizeof_color_picker_options(void);
+uint64_t libgui_sizeof_color_picker_response(void);
 uint64_t libgui_sizeof_validated_options(void);
 uint64_t libgui_sizeof_validated_response(void);
 

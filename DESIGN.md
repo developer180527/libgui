@@ -196,6 +196,14 @@ vertex stage.
 - Two paths to keep correct. `mesh_parity.rs` renders every golden scene × 2 themes × 3
   scales both ways and allows one 8-bit step of difference in at most one pixel
   in ten thousand.
+- The contract is expensive to grow — a new kind is a shader change in every
+  backend and in the conformance kit — so a feature that *can* be built from
+  the existing kinds is. Gradients are: a flat fill, and a 256-texel ramp of
+  coverage in the glyph atlas tinted with the second colour, stretched by the
+  same bilinear filter that samples glyphs. Exact for an opaque or transparent
+  start, two instances, one ramp for every gradient, and a bgfx host got them
+  without a line of its own. Rotation is the counter-example: it cannot be
+  built that way, which is why it is still a decision rather than a feature.
 
 ---
 

@@ -295,6 +295,28 @@ pub unsafe extern "C" fn libgui_painter_rect(p: *mut LibguiPainter, r: LibguiRec
     }
 }
 
+/// A linear gradient across `r`: `axis` 0 is left to right, 1 is top to
+/// bottom. Exact when `from` is opaque or fully transparent — a transparent
+/// `from` fades `to` in over whatever is beneath. Square corners. Two
+/// instances, through the glyph atlas: nothing new is asked of a backend.
+///
+/// # Safety
+/// `p` must be null or the painter handed to a `LibguiPaintFn` callback, used
+/// only for the duration of that call.
+#[no_mangle]
+pub unsafe extern "C" fn libgui_painter_gradient(
+    p: *mut LibguiPainter,
+    r: LibguiRect,
+    from: LibguiColor,
+    to: LibguiColor,
+    axis: u32,
+) {
+    if let Some(p) = painter(p) {
+        let axis = if axis == 1 { libgui::Axis::Y } else { libgui::Axis::X };
+        p.gradient(Rect::new(r.x, r.y, r.w, r.h), color(from), color(to), axis);
+    }
+}
+
 /// Fill a rounded rectangle and stroke its border.
 ///
 /// # Safety

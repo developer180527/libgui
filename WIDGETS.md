@@ -70,7 +70,7 @@ apps do with it. `no` = absent.
 | Segmented control | 11 | yes |
 | Searchable / filterable dropdown | 9 | **no** |
 | Search field with clear affordance | 13 | part — `text_input` plus your own button |
-| **Colour picker** | 10 | **no** |
+| Colour picker | 10 | yes (`color_picker`, `color_button`) |
 | Date / time picker | 5 | **no** |
 | File path field with a browse button | 11 | part — the field is yours; libgui opens no dialogs, by design |
 
@@ -193,7 +193,7 @@ application actually being built.
 | # | Item | Why now | Rough size |
 |---|---|---|---|
 | 1 | ~~Numeric field with units and expressions~~ | **Done**, as #3: the app's evaluator behind `validated_input`. An evaluator in core was tried and withdrawn — see DESIGN §13. | — |
-| 2 | Colour picker | Layer and appearance colour. Ten of fourteen apps; `to_hex`/`parse_hex` already exist, so the model is half-built. | 4–5 d |
+| 2 | ~~Colour picker~~ | **Done** — `color_picker` and `color_button`, on a new `Painter::gradient` that needed no backend change. | — |
 | 3 | ~~Inline field validation~~ | **Done** — `validated_input`: commit, cancel, refused text kept with its reason, caret at the problem. | — |
 | 4 | Toast / notification | The standard way to report a non-modal failure. Twelve of fourteen. | 2 d |
 | 5 | **Decide on rotation** | Not build — decide. The cost falls on backend authors, and it gets worse the longer it waits. | — |

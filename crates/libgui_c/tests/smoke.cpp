@@ -246,6 +246,16 @@ int main(int argc, char** argv) {
         CHECK(asked >= 2, "the lambda was never asked");
     }
 
+    {
+        LibguiColor c{1.0f, 0.0f, 0.0f, 1.0f};
+        ui.begin_frame(400.0f, 400.0f, 1.0f, 1.0f / 60.0f);
+        auto r = ui.color_picker("cpp", c);
+        ui.color_button("cpp_swatch", c);
+        ui.end_frame();
+        CHECK(!r.changed && c.r == 1.0f, "an untouched C++ picker changed the colour");
+        CHECK(!ui.poisoned(), "the picker poisoned the Ui");
+    }
+
     if (failures == 0) std::printf("ok: C++ wrapper test passed (%d paints)\n", painted);
     return failures == 0 ? 0 : 1;
 }

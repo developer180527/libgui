@@ -1,4 +1,4 @@
-use crate::{Color, DrawList, FontId, Fonts, Rect, TextureId, Theme, Vec2, PaintText};
+use crate::{Axis, Color, DrawList, FontId, Fonts, Rect, TextureId, Theme, Vec2, PaintText};
 
 /// Handed to paint callbacks after layout is solved. This is the
 /// "immediate" drawing layer: widgets and custom overlays (gizmo labels, graphs,
@@ -102,6 +102,63 @@ impl<'a> Painter<'a> {
         // Back into the coordinates the draw list expects; it applies the
         // transform itself.
         self.draw.glyph(t.inv_rect(window), uv, color);
+    }
+
+    /// A linear gradient from `from` to `to` across `r`: left to right for
+    /// [`Axis::X`], top to bottom for [`Axis::Y`].
+    ///
+    /// Built from what every backend already draws, so nothing new is asked
+    /// of one: `from` is a plain fill, and `to` is laid over it through a ramp
+    /// of coverage in the glyph atlas — 0 at the start, 1 at the end — drawn
+    /// the way text is. Over an opaque `from` that is exactly
+    /// `from·(1−t) + to·t`. The ramp is 256 texels, rasterised once and
+    /// stretched to any size by the same bilinear filter that samples glyphs,
+    /// so a gradient costs two instances and no allocation.
+    ///
+    /// **Exact when `from` is opaque or fully transparent.** A transparent
+    /// `from` gives `to` fading in over whatever is beneath — an alpha strip
+    /// over a checkerboard. A `from` that is partly transparent is drawn
+    /// first and then covered, which is close to an interpolation in alpha
+    /// but not equal to one.
+    ///
+    /// Square corners: the ramp has no rounded edge to match a radius. Outside
+    /// a canvas the rect is snapped to whole physical pixels, so the fill and
+    /// the ramp over it end at the same pixel.
+    pub fn gradient(&mut self, r: Rect, from: Color, to: Color, axis: Axis) {
+        let r = if self.draw.xform().is_identity() { self.snap_rect(r) } else { r };
+        if !(r.w > 0.0 && r.h > 0.0) {
+            return;
+        }
+        if from.a > 0.0 {
+            self.rect(r, from, 0.0);
+        }
+        if to.a <= 0.0 {
+            return;
+        }
+        const N: u32 = 256;
+        // Fixed keys: the ramp is the same at every size and in every window
+        // that shares this atlas. Hashed from a name so they cannot collide
+        // with a path's keys by accident.
+        let (w, h, key) = match axis {
+            Axis::X => (N, 1, ramp_key("gradient_ramp_x")),
+            Axis::Y => (1, N, ramp_key("gradient_ramp_y")),
+        };
+        let fill = |buf: &mut Vec<u8>| {
+            for (i, c) in buf.iter_mut().enumerate() {
+                *c = ((i as u32 * 255 + (N - 1) / 2) / (N - 1)) as u8;
+            }
+        };
+        let Some(uv) = self.fonts.coverage_mask(key, w, h, fill) else { return };
+        // Centre of the first texel to centre of the last, and the middle of
+        // the one texel across: the ends are exactly 0 and 1, and bilinear
+        // sampling never reaches a neighbour in the atlas.
+        let (du, dv) = ((uv[2] - uv[0]) / w as f32, (uv[3] - uv[1]) / h as f32);
+        let (u0, v0) = (uv[0] + du * 0.5, uv[1] + dv * 0.5);
+        let uv = match axis {
+            Axis::X => [u0, v0, uv[2] - du * 0.5, v0],
+            Axis::Y => [u0, v0, u0, uv[3] - dv * 0.5],
+        };
+        self.draw.glyph(r, uv, to);
     }
 
     /// Straight line with round caps.
@@ -264,4 +321,11 @@ fn cubic(p0: Vec2, c0: Vec2, c1: Vec2, p1: Vec2, t: f32) -> Vec2 {
         p0.x * a + c0.x * b + c1.x * c + p1.x * d,
         p0.y * a + c0.y * b + c1.y * c + p1.y * d,
     )
+}
+
+fn ramp_key(name: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = crate::id::StableHasher::new();
+    name.hash(&mut h);
+    h.finish()
 }

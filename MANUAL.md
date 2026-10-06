@@ -376,7 +376,8 @@ Text: `label`, `label_muted`, `heading`, `section`, `paragraph`, `text_with`.
 
 Input: `button`, `button_primary`, `button_styled`, `toggle`, `checkbox`,
 `radio`, `slider`, `slider_vertical`, `drag_value`, `drag_value_range`, `combo`,
-`segmented`, `text_input`, `text_area`, `validated_input`.
+`segmented`, `text_input`, `text_area`, `validated_input`, `color_picker`,
+`color_button`.
 
 Collections: `selectable`, `tree_row`, `table`, `virtual_list`, `virtual_rows`.
 
@@ -557,6 +558,75 @@ renderer filters in hardware, premultiply on upload** — straight alpha
 filtered first and multiplied after lets the transparent texels' colour bleed
 in, and every edge gets a dark halo.
 
+
+**Gradients.** `p.gradient(r, from, to, Axis::X)` — left to right, or
+`Axis::Y` top to bottom. A plain fill of `from` with `to` laid over it through
+a ramp of coverage in the glyph atlas, so it is two instances, one shared
+256-texel ramp for every gradient of every size, and nothing new for a
+backend. Exact when `from` is opaque or fully transparent (a transparent
+`from` fades `to` in over what is beneath — an alpha strip over a
+checkerboard); square corners.
+
+### 5.8.1 Writing your own widget
+
+Every built-in widget is made from five public pieces, so one of yours is
+first-class: it greys out in a disabled scope, sits on the pixel grid, works
+inside canvases and scroll areas, and can be cached, because it uses the calls
+a built-in does.
+
+1. **Identity.** `ui.make_id(("my_widget", key))`. Everything libgui
+   remembers between frames — hover, focus, drag, animation — is keyed by it.
+2. **Interaction.** `ui.interact(id)` for clicks, `interact_drag` to drag,
+   `interact_focusable_drag(id, FocusKind::Control)` to be reachable by Tab
+   with a focus ring too. The `Response` says `hovered`, `pressed`, `active`,
+   `released`, `drag_delta`, `mouse_pos`, `modifiers`; its rect is last
+   frame's, which is how immediate mode works.
+3. **State.** Your value is your own variable. Motion is `animate_bool` or a
+   spring. State that is the widget's own and not the app's — the picker's
+   remembered hue — goes in a map your app keeps by key; libgui offers no
+   general per-widget store.
+4. **Layout.** `ui.add_leaf(id, Layout::leaf(w, h), intrinsic, interactive,
+   paint)` takes space like any widget; nest containers for a compound one.
+5. **Paint.** The closure runs after layout with the final rect: shapes,
+   gradients, lines, paths, images, text, `measure` to size text, and
+   `hairline` / `snap_rect` for crisp edges.
+
+```rust
+let id = ui.make_id(("swatch", key));
+let r = ui.interact_focusable_drag(id, FocusKind::Control);
+if r.active { *value = pick(r.mouse_pos, r.rect); }
+let hot = ui.animate_bool(id, 0, r.hovered);
+let c = *value;
+ui.add_leaf(id, Layout::leaf(Size::Grow(1.0), Size::Fixed(24.0)), Vec2::ZERO, true,
+    move |p, rect| p.rect_bordered(rect, c, 4.0, 1.0 + hot, p.theme.palette.border));
+```
+
+`crates/libgui/src/color_picker.rs` is a full one to read: a square, two
+strips and a hex field from exactly these pieces plus `validated_input`. From
+C the shape is the same — `libgui_id_from_name`, `libgui_interact*`,
+`libgui_animate_bool`, `libgui_add_leaf` with a paint callback, and
+`libgui_painter_*` for every call above.
+
+### 5.8.2 Colour
+
+`ui.color_picker(key, &mut color)` edits a colour in place: a
+saturation/value square, a hue strip, an alpha strip and a hex field
+(`#rgb`, `#rrggbb`, `#rrggbbaa`, with or without the `#`).
+`ui.color_button(key, &mut color)` is a swatch that opens one in a popup —
+what an inspector row shows. `changed` is every frame of a drag, for a live
+preview; `finished` is once per gesture, on the frame it is let go, which is
+the one to push an undo step on.
+
+HSV is worked out on the colour as stored, sRGB-encoded — what every common
+picker does and what the gradients blend in, so the square shows exactly what
+a click picks (a test clicks it and compares). The picker remembers the hue
+and saturation it was showing, because RGB cannot hold them for grey and
+black: dragging to the bottom of the square and back, or an undo to grey,
+does not snap the hue to red. A still picker never writes your colour, so one
+that HSV cannot reproduce bit for bit does not drift by being looked at.
+
+Arrow keys do not nudge it, as they do not nudge a slider; Tab reaches every
+part, and the hex field takes an exact value.
 
 ### 5.9 Motion: springs
 
@@ -1103,7 +1173,8 @@ and text area over a caller-owned buffer, combo and segmented pickers,
 containers, scroll areas, the disabled scope, the collection cursor,
 multi-select, stable ids, custom painting, the full input set, the keymap, the
 viewport and painter image calls, the pan/zoom canvas and raw transforms,
-animation, validated fields (and the `libgui_units` evaluator), docking, tables, drag and drop, themes from
+animation, validated fields (and the `libgui_units` evaluator), the colour
+picker, gradients, docking, tables, drag and drop, themes from
 TOML, and the frame output — instances, batches, atlas, globals, platform
 requests, the expanded mesh and its chunks, the reference renderer and the
 conformance gallery, and a shared font system.
@@ -1262,7 +1333,7 @@ The honest list, as of now.
 [`WIDGETS.md`](WIDGETS.md) surveys fourteen applications against this list and
 puts it in the order the gaps are worth closing.
 
-- No colour picker. `plot` is a debug bar chart, not a real line/area chart.
+- `plot` is a debug bar chart, not a real line/area chart.
 - No modal/dialog primitive (build one on `ui.popup` / `Layer`).
 - No date picker, no toast/notification.
 - Tables have no 2-D cell cursor; menus have no arrow-key navigation; no

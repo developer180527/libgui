@@ -115,6 +115,8 @@ int main(int argc, char** argv) {
     CHECK_SIZE(LibguiTableResponse, libgui_sizeof_table_response);
     CHECK_SIZE(LibguiDropZone, libgui_sizeof_drop_zone);
     CHECK_SIZE(LibguiVar, libgui_sizeof_var);
+    CHECK_SIZE(LibguiColorPickerOptions, libgui_sizeof_color_picker_options);
+    CHECK_SIZE(LibguiColorPickerResponse, libgui_sizeof_color_picker_response);
     CHECK_SIZE(LibguiValidatedOptions, libgui_sizeof_validated_options);
     CHECK_SIZE(LibguiValidatedResponse, libgui_sizeof_validated_response);
 
@@ -543,6 +545,24 @@ int main(int argc, char** argv) {
         CHECK(strcmp(src, "w / 2") == 0, "an untouched field changed its source");
         CHECK(libgui_ui_poisoned(ui) == 0, "the validated field poisoned the handle");
         libgui_units_free(mm);
+    }
+
+    /* A colour picker over the host's own colour. */
+    {
+        LibguiColor layer = { 0.2f, 0.5f, 0.9f, 1.0f };
+        LibguiColorPickerOptions po;
+        libgui_color_picker_options_default(&po);
+        CHECK(po.alpha == 1 && po.square_height > 0.0f, "picker defaults did not arrive");
+        po.alpha = 0;
+        for (int pass = 0; pass < 2; pass++) {
+            libgui_begin_frame(ui, 400.0f, 400.0f, 1.0f, 1.0f / 60.0f);
+            LibguiColorPickerResponse r = libgui_color_picker(ui, "layer", &layer, &po);
+            CHECK(!r.changed, "an untouched picker changed the colour");
+            libgui_color_button(ui, "swatch", &layer, NULL);
+            libgui_end_frame(ui);
+        }
+        CHECK(layer.r == 0.2f && layer.b == 0.9f, "an untouched picker wrote the colour");
+        CHECK(libgui_ui_poisoned(ui) == 0, "the picker poisoned the handle");
     }
 
     libgui_ui_free(ui);

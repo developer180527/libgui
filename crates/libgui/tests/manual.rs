@@ -57,6 +57,30 @@ fn validated(ui: &mut Ui, param: &mut Param, doc: &mut Doc, shown: String) {
     if r.committed { doc.reevaluate(); }
 }
 
+fn pick(_at: Vec2, _r: Rect) -> Color { Color::WHITE }
+
+#[allow(dead_code)]
+fn own_widget(ui: &mut Ui, key: &str, value: &mut Color) {
+    let id = ui.make_id(("swatch", key));
+    let r = ui.interact_focusable_drag(id, FocusKind::Control);
+    if r.active { *value = pick(r.mouse_pos, r.rect); }
+    let hot = ui.animate_bool(id, 0, r.hovered);
+    let c = *value;
+    ui.add_leaf(id, Layout::leaf(Size::Grow(1.0), Size::Fixed(24.0)), Vec2::ZERO, true,
+        move |p, rect| p.rect_bordered(rect, c, 4.0, 1.0 + hot, p.theme.palette.border));
+}
+
+#[allow(dead_code)]
+fn colour(ui: &mut Ui, layer: &mut Color, push_undo: impl FnOnce()) {
+    if ui.color_picker("layer", layer).finished {
+        push_undo();
+    }
+    ui.color_button("swatch", layer);
+    let id = ui.make_id("g");
+    ui.add_leaf(id, Layout::leaf(Size::Grow(1.0), Size::Fixed(8.0)), Vec2::ZERO, false,
+        |p, r| p.gradient(r, Color::WHITE, Color::BLACK, Axis::X));
+}
+
 #[allow(dead_code)]
 fn custom_draw(ui: &mut Ui, color: Color, ink: Color) {
     let id = ui.make_id("custom");

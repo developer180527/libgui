@@ -1567,7 +1567,7 @@ lag, fling, easing) stay as frame-trace tests like
   shaped run, so a per-field width would have to be part of every cache key.
 - `FontStack` splits runs on a range check over the combining blocks and joiners, not a Unicode
   general-category lookup, so an exotic mark outside those ranges can be separated from its base.
-- No colour picker, and `plot` is a debug bar chart rather than a real line or area chart.
+- `plot` is a debug bar chart rather than a real line or area chart.
 
 ## Licence
 
