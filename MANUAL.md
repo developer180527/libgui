@@ -1156,7 +1156,21 @@ so building libgui as Release inside a Debug app is reasonable.
 Everything an application or a custom widget needs (§16 lists it all):
 - **Building:** widgets, containers, scroll areas, virtual lists, trees,
   tables, popups, menus, layers, canvases, caching.
-- **Custom widgets:** focusable custom widgets and the full Painter.
+- **Modal dialogs:** `libgui_open_modal` / `libgui_close_modal`, whose
+  `LibguiModalResponse` reports `cancelled`, `submitted` and
+  `clicked_outside`; `libgui_any_modal_open`. In C++, `ui.modal(key, title,
+  [&]{ … })` closes it even if the body throws.
+- **Scopes and meters:** `libgui_scope` over an array of `LibguiScopeTrace`
+  (a plain array, or a ring buffer with `start`); `libgui_meter` and
+  `libgui_meter_with_average`, with `libgui_meter_options_audio_db` for the
+  dBFS preset. libgui keeps the peak and the clip light, so pass only this
+  frame's value.
+- **Custom widgets:** focusable custom widgets and the full Painter, including
+  `libgui_painter_dashed_line` / `_dashed_polyline`,
+  `libgui_painter_image_rotated`, `libgui_painter_text_rotated`, and
+  `libgui_painter_trace` / `_trace_fill`. A host with its own port of the
+  shader checks `libgui_contract_version()`: version 4 added dashes and
+  rotation (see the rendering rules at the top of `libgui.h`).
 - **Input and state:** raw key and button state, animation and springs,
   validated fields, the colour picker, notifications, drag and drop (including
   from the OS).
