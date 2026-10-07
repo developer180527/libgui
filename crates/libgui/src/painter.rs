@@ -173,6 +173,75 @@ impl<'a> Painter<'a> {
         }
     }
 
+    /// A dashed straight line: `dash.on` drawn, `dash.off` skipped, from
+    /// `dash.phase` into the pattern at `a`. Dash ends are square. One
+    /// instance, like a solid line — the gaps are cut in the shader.
+    ///
+    /// ```ignore
+    /// p.dashed_line(a, b, 1.0, ink, Dash::even(4.0));          // construction line
+    /// p.dashed_line(a, b, 2.0, ink, Dash::dotted(2.0));        // dotted
+    /// p.dashed_line(a, b, 1.0, ink, Dash::even(4.0).phase(t * 20.0)); // marching ants
+    /// ```
+    pub fn dashed_line(&mut self, a: Vec2, b: Vec2, width: f32, color: Color, dash: crate::Dash) {
+        self.draw.dashed_line(a, b, width, color, dash);
+    }
+
+    /// [`Painter::polyline`] dashed, with the pattern running on across the
+    /// joins rather than restarting at each point. Returns the phase the last
+    /// point ends at, to continue the pattern into another call.
+    pub fn dashed_polyline(&mut self, points: &[Vec2], width: f32, color: Color, dash: crate::Dash) -> f32 {
+        let mut phase = dash.phase;
+        for w in points.windows(2) {
+            self.draw.dashed_line(w[0], w[1], width, color, dash.phase(phase));
+            phase += (w[1].x - w[0].x).hypot(w[1].y - w[0].y);
+        }
+        phase
+    }
+
+    /// An image turned by `radians` about the centre of `r`, clockwise on
+    /// screen: a knob's pointer, a compass needle, a spinner. `r` is the
+    /// upright rect; the turned image may reach outside it. The rounded
+    /// corners turn with the image.
+    #[allow(clippy::too_many_arguments)]
+    pub fn image_rotated(
+        &mut self,
+        r: Rect,
+        tex: TextureId,
+        uv: [f32; 4],
+        radius: f32,
+        tint: Color,
+        alpha: crate::ImageAlpha,
+        radians: f32,
+    ) {
+        self.draw.image_rotated(r, tex, uv, radius, tint, alpha, crate::Rotation::new(radians));
+    }
+
+    /// One line of text centred on `center` and turned by `radians` about it,
+    /// clockwise on screen: a vertical axis label (`-π/2` reads bottom to
+    /// top), a dimension written along the line it measures.
+    ///
+    /// ```ignore
+    /// // Along a line from a to b, readable from below:
+    /// let mut angle = (b.y - a.y).atan2(b.x - a.x);
+    /// if angle.abs() > FRAC_PI_2 { angle += PI; }
+    /// p.text_rotated((a + b) * 0.5, 12.0, ink, "42.0 mm", angle);
+    /// ```
+    ///
+    /// Upright text is snapped to the pixel grid; turned text cannot be, so it
+    /// is a shade softer. At an angle of exactly zero this is
+    /// [`Painter::text`] centred, and as crisp.
+    pub fn text_rotated(&mut self, center: Vec2, size: f32, color: Color, text: impl PaintText, radians: f32) {
+        let arena: &'a [u8] = self.strs;
+        let s = text.get(arena);
+        let rot = crate::Rotation::new(radians);
+        if rot.is_none() {
+            let m = self.fonts.measure(self.font, size, s);
+            self.fonts.draw(self.draw, self.font, size, Vec2::new(center.x - m.x * 0.5, center.y - m.y * 0.5), color, s);
+            return;
+        }
+        self.fonts.draw_rotated(self.draw, self.font, size, center, rot, color, s);
+    }
+
     /// Cubic bezier, flattened to segments. The number of segments follows the
     /// curve's size *on screen*, so it stays smooth when zoomed in and does not
     /// waste instances when zoomed out.

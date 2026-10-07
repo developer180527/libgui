@@ -3,7 +3,11 @@
 //   KIND_SHAPE: rounded-rect SDF (fills, borders, soft shadows)
 //   KIND_GLYPH: glyph (coverage from the R8 atlas)
 //   KIND_IMAGE: image with rounded-corner mask (e.g. engine viewport)
-//   KIND_LINE:  line segment with round caps (wires, curves, waveforms)
+//   KIND_LINE:  line segment with round caps (wires, curves, waveforms),
+//               optionally dashed
+// Images and glyphs may be rotated about their centre: the vertex stage turns
+// the quad, and `local` and `uv` stay those of the upright quad, so the
+// fragment stage does not know.
 // Output is premultiplied alpha.
 //
 // CONTRACT_VERSION and the KIND_* constants are generated from
@@ -52,19 +56,36 @@ fn vs_main(@builtin(vertex_index) vi: u32, i: Inst) -> VOut {
         vec2(0.0, 1.0), vec2(1.0, 0.0), vec2(1.0, 1.0),
     );
     let c = corners[vi];
+    let kind = u32(round(i.params.w));
+    // Rotation, as (cos - 1, sin) in border_color.xy: zero is upright, which
+    // is what every image and glyph from before rotation carries.
+    let turned = (kind == KIND_IMAGE || kind == KIND_GLYPH) && (i.border_color.x != 0.0 || i.border_color.y != 0.0);
     var pad = 0.0;
-    if (u32(round(i.params.w)) == KIND_SHAPE) {
+    if (kind == KIND_SHAPE) {
         pad = i.params.z + 1.0; // room for softness + AA
+    } else if (turned && kind == KIND_IMAGE) {
+        pad = 1.0; // a turned edge crosses pixels: room to anti-alias it
     }
     let half_size = i.rect.zw * 0.5;
     let center = i.rect.xy + half_size;
     let local = (c * 2.0 - 1.0) * (half_size + vec2(pad));
-    let world = center + local;
+    var world = center + local;
+    // Where on the texture: the corner, or for a padded turned image, the
+    // same mapping carried past the edge (the mask hides what is there).
+    var cuv = c;
+    if (turned) {
+        let cs = 1.0 + i.border_color.x;
+        let sn = i.border_color.y;
+        world = center + vec2(local.x * cs - local.y * sn, local.x * sn + local.y * cs);
+        if (kind == KIND_IMAGE) {
+            cuv = local / max(half_size, vec2(1e-6)) * 0.5 + 0.5;
+        }
+    }
 
     var o: VOut;
     o.pos = vec4(world.x / g.screen.x * 2.0 - 1.0, 1.0 - world.y / g.screen.y * 2.0, 0.0, 1.0);
     o.local = local;
-    o.uv = mix(i.uv.xy, i.uv.zw, c);
+    o.uv = mix(i.uv.xy, i.uv.zw, cuv);
     o.color = i.color;
     o.border_color = i.border_color;
     o.clip = i.clip;
@@ -135,7 +156,27 @@ fn fs_main(v: VOut) -> @location(0) vec4<f32> {
     // Sample only in the branches that need it: shapes are the bulk of UI
     // fragments and never read the texture.
     if (kind == KIND_LINE) {
-        let d = sd_segment(v.world, v.seg.xy, v.seg.zw) - v.params.x;
+        var d = sd_segment(v.world, v.seg.xy, v.seg.zw) - v.params.x;
+        // Dashes: params.y on, params.z off, from border_color.x into the
+        // pattern at seg.xy. A signed distance along the line to the nearest
+        // dash's end -- negative inside one -- intersected with the capsule,
+        // so dash ends are square and anti-aliased like the sides.
+        let on = v.params.y;
+        let off = v.params.z;
+        if (on > 0.0 && off > 0.0) {
+            let ba = v.seg.zw - v.seg.xy;
+            let len = max(length(ba), 1e-6);
+            let s = dot(v.world - v.seg.xy, ba) / len + v.border_color.x;
+            let period = on + off;
+            let m = s - floor(s / period) * period;
+            var along: f32;
+            if (m < on) {
+                along = -min(m, on - m);
+            } else {
+                along = min(m - on, period - m);
+            }
+            d = max(d, along);
+        }
         let m = clamp(0.5 - d / aa, 0.0, 1.0);
         return premul(v.color) * m;
     }

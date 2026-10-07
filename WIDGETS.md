@@ -42,7 +42,7 @@ apps do with it. `no` = absent.
 | Separator / rule | 14 | yes |
 | Inline link in text | 9 | **no** |
 | Rich text (bold/italic spans in one run) | 7 | **no** |
-| Rotated / angled text | 6 | **no** — see *The constraint underneath* |
+| Rotated / angled text | 6 | yes (`text_rotated`, `image_rotated`) — see *The constraint underneath* |
 
 ### Actions
 
@@ -165,6 +165,16 @@ why it belongs in this document rather than in a list of widgets to write: it
 is the one gap whose cost is paid by everyone who has already written a
 backend, so it wants deciding deliberately and early rather than late.
 
+**Decided (contract 4).** No new field was needed after all. Images and glyphs
+never used `border_color`, so a turn travels there as `(cos θ − 1, sin θ)`,
+and zero (what every older instance carries) means upright. The stride is
+unchanged at 96 bytes. The vertex stage turns the quad and leaves `local` and
+`uv` upright, so the fragment stage did not change. The expanded mesh turns
+its quads on the CPU, so a renderer on that path needed nothing new for
+rotation. What is turned is drawing, not layout: a widget's rect and hit area
+stay upright, which is what every application in the survey that turns text
+actually does.
+
 ## What the survey actually says
 
 Three things, beyond the table.
@@ -198,7 +208,7 @@ application actually being built.
 | 2 | ~~Colour picker~~ | **Done** — `color_picker` and `color_button`, on a new `Painter::gradient` that needed no backend change. | — |
 | 3 | ~~Inline field validation~~ | **Done** — `validated_input`: commit, cancel, refused text kept with its reason, caret at the problem. | — |
 | 4 | ~~Toast / notification~~ | **Done** — `toast` and `show_toasts`. A waiting one costs nothing: it asks to be woken when due (`request_repaint_in`). Building it found `dt` clamped to 0.25 s before it reached libgui's clocks, so a slept-through second counted as a quarter — fixed for double-click and type-ahead too. | — |
-| 5 | **Decide on rotation** | Not build — decide. The cost falls on backend authors, and it gets worse the longer it waits. | — |
+| 5 | ~~Decide on rotation~~ | **Done** — decided as draw-time turning of images and glyphs, not rotated layout; no stride change (see below). Dashed lines came with it. | — |
 | 6 | ~~Virtualised tree~~ | **Done** — `tree_view`: 100,100 open nodes cost what 100 do. Building it fixed End and Page Down in every long virtual list. | — |
 | 7 | ~~Menu arrow keys, list type-ahead, Shift+Arrow selection~~ | **Done**, with two the survey missed: no focused control could be pressed from the keyboard at all, and sliders took no arrows. | — |
 | 8 | Searchable dropdown, command palette, search field, badge, split button | The compositions. Cheap, and worth having once rather than five times. | 4 d total |

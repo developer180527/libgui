@@ -98,6 +98,7 @@ int main(int argc, char** argv) {
     }
     /* The ABI handshake a host does once at start-up. */
     CHECK(libgui_abi_version() == LIBGUI_ABI_VERSION, "header and library disagree on the ABI version");
+    CHECK(libgui_contract_version() >= 4u, "the render contract predates dashes and rotation");
 
     /* Every struct that crosses. A field added on one side only lands here. */
     CHECK_SIZE(LibguiVec2, libgui_sizeof_vec2);

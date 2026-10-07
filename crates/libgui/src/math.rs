@@ -207,3 +207,55 @@ impl Transform {
         }
     }
 }
+
+/// `(sin θ, cos θ)` from additions, multiplications and `floor` only, so it
+/// gives the same bits on every platform.
+///
+/// `f32::sin_cos` calls the platform's maths library, which may differ in the
+/// last bit between operating systems. A rotation is computed once, here, and
+/// travels in the instance as these two numbers, so every renderer —
+/// including the CPU reference, whose output is compared byte for byte across
+/// machines — rotates by exactly the same amount. Accurate to about one unit
+/// in the last place for angles within a few turns of zero.
+pub fn sin_cos(angle: f32) -> (f32, f32) {
+    if !angle.is_finite() {
+        return (0.0, 1.0);
+    }
+    // Reduce to r in [-π/4, π/4] and a quarter turn q, in f64 so that a few
+    // turns either way lose nothing.
+    const FRAC_2_PI: f64 = std::f64::consts::FRAC_2_PI;
+    const PI_2: f64 = std::f64::consts::FRAC_PI_2;
+    let a = angle as f64;
+    let k = (a * FRAC_2_PI + 0.5).floor();
+    let r = a - k * PI_2;
+    let r2 = r * r;
+    // Taylor series to r^13 / r^12: under 1e-12 error on [-π/4, π/4].
+    let s = r * (1.0 + r2 * (-1.0 / 6.0 + r2 * (1.0 / 120.0 + r2 * (-1.0 / 5040.0 + r2 * (1.0 / 362_880.0 + r2 * (-1.0 / 39_916_800.0 + r2 / 6_227_020_800.0))))));
+    let c = 1.0 + r2 * (-0.5 + r2 * (1.0 / 24.0 + r2 * (-1.0 / 720.0 + r2 * (1.0 / 40_320.0 + r2 * (-1.0 / 3_628_800.0 + r2 / 479_001_600.0)))));
+    let q = (k - (k * 0.25).floor() * 4.0) as i32;
+    let (s, c) = match q {
+        0 => (s, c),
+        1 => (c, -s),
+        2 => (-s, -c),
+        _ => (-c, s),
+    };
+    (s as f32, c as f32)
+}
+
+#[cfg(test)]
+mod sin_cos_tests {
+    #[test]
+    fn matches_the_platform_to_an_ulp_or_two() {
+        let mut a = -20.0f32;
+        while a < 20.0 {
+            let (s, c) = super::sin_cos(a);
+            let (s0, c0) = (a as f64).sin_cos();
+            assert!((s as f64 - s0).abs() < 3e-7 && (c as f64 - c0).abs() < 3e-7, "{a}: {s},{c} vs {s0},{c0}");
+            a += 0.0137;
+        }
+        assert_eq!(super::sin_cos(0.0), (0.0, 1.0));
+        assert_eq!(super::sin_cos(f32::NAN), (0.0, 1.0));
+        let (s, c) = super::sin_cos(std::f32::consts::FRAC_PI_2);
+        assert!((s - 1.0).abs() < 1e-7 && c.abs() < 1e-7);
+    }
+}

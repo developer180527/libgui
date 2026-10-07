@@ -487,11 +487,44 @@ fn paths(ui: &mut Ui) {
     });
 }
 
+/// Dashed lines and turned text: the dash pattern along straight, diagonal
+/// (split into strips, which must keep one pattern), thick and dotted lines,
+/// running on across a polyline's joins and through a canvas zoom; and text
+/// at the angles labels use.
+fn dashes_rotated(ui: &mut Ui) {
+    let id = ui.make_id("dashes_rotated");
+    let fill = Layout::leaf(Size::Grow(1.0), Size::Grow(1.0));
+    ui.add_leaf(id, fill, Vec2::ZERO, false, |p, r| {
+        let (x, y) = (r.x, r.y);
+        let white = Color::hex(0xffffff);
+        let accent = Color::hex(0x4c8dff);
+        p.dashed_line(Vec2::new(x + 12.0, y + 14.0), Vec2::new(x + 150.0, y + 14.0), 1.0, white, Dash::even(4.0));
+        p.dashed_line(Vec2::new(x + 12.0, y + 26.0), Vec2::new(x + 150.0, y + 26.0), 3.0, accent, Dash::new(10.0, 4.0).phase(3.0));
+        p.dashed_line(Vec2::new(x + 12.0, y + 38.0), Vec2::new(x + 150.0, y + 38.0), 2.0, white, Dash::dotted(2.0));
+        p.dashed_line(Vec2::new(x + 160.0, y + 8.0), Vec2::new(x + 160.0, y + 120.0), 1.5, white, Dash::new(6.0, 3.0));
+        // A long diagonal: drawn as several strips, one pattern across them.
+        p.dashed_line(Vec2::new(x + 12.0, y + 50.0), Vec2::new(x + 150.0, y + 150.0), 2.0, accent.with_alpha(0.8), Dash::new(8.0, 5.0));
+        let zig = [
+            Vec2::new(x + 12.0, y + 170.0),
+            Vec2::new(x + 50.0, y + 140.0),
+            Vec2::new(x + 90.0, y + 170.0),
+            Vec2::new(x + 130.0, y + 140.0),
+        ];
+        p.dashed_polyline(&zig, 2.0, white, Dash::new(7.0, 4.0));
+        // Text turned: up the side, at a slant, upside down, and small.
+        p.text_rotated(Vec2::new(x + 180.0, y + 90.0), 13.0, white, "Height (mm)", -std::f32::consts::FRAC_PI_2);
+        p.text_rotated(Vec2::new(x + 240.0, y + 40.0), 14.0, accent, "42.0 mm", 0.5);
+        p.text_rotated(Vec2::new(x + 240.0, y + 110.0), 13.0, white, "Upside", std::f32::consts::PI);
+        p.text_rotated(Vec2::new(x + 240.0, y + 160.0), 10.0, white, "R 12.5", -0.3);
+    });
+}
+
 pub const SCENES: &[Scene] = &[
     Scene { name: "widgets", size: (320.0, 640.0), pointer: Pointer::None, build: widgets },
     Scene { name: "tree", size: (240.0, 230.0), pointer: Pointer::None, build: tree },
     Scene { name: "shapes", size: (280.0, 200.0), pointer: Pointer::None, build: shapes },
     Scene { name: "paths", size: (260.0, 132.0), pointer: Pointer::None, build: paths },
+    Scene { name: "dashes_rotated", size: (290.0, 190.0), pointer: Pointer::None, build: dashes_rotated },
     Scene { name: "text", size: (360.0, 200.0), pointer: Pointer::None, build: text },
     Scene { name: "button_hover", size: (240.0, 90.0), pointer: Pointer::Hover, build: button_target },
     Scene { name: "button_pressed", size: (240.0, 90.0), pointer: Pointer::Press, build: button_target },

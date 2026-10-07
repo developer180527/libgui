@@ -46,7 +46,63 @@ use crate::Instance;
 ///
 /// 3: an image's `params[1]` is its [`ImageAlpha`]. Zero is what it always
 /// was, so a version-2 backend still draws every image — opaque.
-pub const CONTRACT_VERSION: u32 = 3;
+///
+/// 4: lines can be dashed (`params[1..3]` and `border_color[0]` of a
+/// [`PrimitiveKind::Line`]), and images and glyphs can be rotated
+/// (`border_color[0..2]`, see [`Rotation`]). Zero in every new field is what
+/// a version-3 instance carries and means what it always did: a solid line,
+/// an upright quad.
+pub const CONTRACT_VERSION: u32 = 4;
+
+/// How an image or glyph instance is rotated: about the centre of its `rect`,
+/// clockwise on screen (y points down) for a positive angle.
+///
+/// Carried in `border_color[0..2]` — a field images and glyphs never used —
+/// as `(cos θ − 1, sin θ)`, so the zeros an upright instance has always
+/// carried mean "not rotated". The vertex stage turns the quad's corners by
+/// it; `local` and `uv` stay those of the upright quad, so the fragment stage
+/// is unchanged. Cosine and sine travel rather than the angle so that no
+/// renderer evaluates a trigonometric function: every one of them rotates by
+/// exactly the same amount ([`crate::sin_cos`] makes them).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Rotation {
+    pub sin: f32,
+    pub cos: f32,
+}
+
+impl Rotation {
+    pub const NONE: Rotation = Rotation { sin: 0.0, cos: 1.0 };
+
+    /// A rotation by `radians`.
+    pub fn new(radians: f32) -> Rotation {
+        let (sin, cos) = crate::sin_cos(radians);
+        Rotation { sin, cos }
+    }
+
+    pub fn is_none(&self) -> bool {
+        self.sin == 0.0 && self.cos == 1.0
+    }
+
+    /// The two floats stored in `border_color[0..2]`.
+    pub fn code(&self) -> [f32; 2] {
+        [self.cos - 1.0, self.sin]
+    }
+
+    /// Read `border_color[0..2]` back.
+    pub fn from_code(c: [f32; 2]) -> Rotation {
+        Rotation { cos: 1.0 + c[0], sin: c[1] }
+    }
+
+    /// Turn `v` (relative to the centre) by this rotation.
+    pub fn apply(&self, v: [f32; 2]) -> [f32; 2] {
+        [v[0] * self.cos - v[1] * self.sin, v[0] * self.sin + v[1] * self.cos]
+    }
+
+    /// Turn `v` back: the inverse of [`Rotation::apply`].
+    pub fn unapply(&self, v: [f32; 2]) -> [f32; 2] {
+        [v[0] * self.cos + v[1] * self.sin, -v[0] * self.sin + v[1] * self.cos]
+    }
+}
 
 /// How an image draw reads its texture's alpha, stored in `params[1]` of a
 /// [`PrimitiveKind::Image`] instance.
@@ -103,14 +159,22 @@ pub enum PrimitiveKind {
     /// `params = [corner radius, border width, softness/blur, kind]`.
     Shape = 0,
     /// Glyph: atlas coverage (`.r`) × colour. `uv` = atlas rect (0..1).
+    /// `border_color[0..2]` is its [`Rotation`].
     Glyph = 1,
     /// Image with a rounded-corner mask: texture `.rgb` × colour.
-    /// `params = [corner radius, 0, 0, kind]`, `uv` = texture rect (0..1).
+    /// `params = [corner radius, ImageAlpha, 0, kind]`, `uv` = texture rect
+    /// (0..1), `border_color[0..2]` its [`Rotation`].
     Image = 2,
     /// Line segment with round caps, evaluated as a capsule SDF.
     /// `uv` = `[x0, y0, x1, y1]`, the endpoints in the same space as `rect`;
-    /// `params = [half width, 0, 0, kind]`. `rect` is the segment's bounding
+    /// `params = [half width, dash, gap, kind]`. `rect` is the segment's bounding
     /// box, already grown for the width and for anti-aliasing.
+    ///
+    /// **Dashes.** With `dash` and `gap` both above zero the line is drawn
+    /// `dash` on, `gap` off, measured along it from `uv.xy` starting
+    /// `border_color[0]` into the pattern (the phase, so a polyline's dashes
+    /// run on across its joins). Dash ends are square. Zero for either is a
+    /// solid line.
     ///
     /// Polylines and curves are many of these: overlapping round caps make a
     /// round join, so no join geometry is needed. (Overlap double-blends where
@@ -266,7 +330,7 @@ mod tests {
         assert_eq!(INSTANCE_STRIDE, 96);
         assert_eq!(INSTANCE_ATTRIBUTES.len(), 6);
         assert_eq!(std::mem::size_of::<Instance>(), INSTANCE_STRIDE);
-        assert_eq!(CONTRACT_VERSION, 3, "bump this when the contract changes meaning");
+        assert_eq!(CONTRACT_VERSION, 4, "bump this when the contract changes meaning");
     }
 
     #[test]

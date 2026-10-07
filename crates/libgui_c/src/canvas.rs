@@ -442,3 +442,15 @@ pub unsafe extern "C" fn libgui_pointer_velocity(ui: *mut LibguiUi, out_x: *mut 
     }
 }
 
+
+/// A line plot of `count` values from 0 to `max`, `height` logical px tall:
+/// a frame-time graph, a sensor trace.
+///
+/// # Safety
+/// `ui` null or live; `label` a string; `values` null or `count` floats.
+#[no_mangle]
+pub unsafe extern "C" fn libgui_plot(ui: *mut LibguiUi, label: *const std::os::raw::c_char, values: *const f32, count: u64, max: f32, height: f32) {
+    let label = unsafe { crate::convert::str_or_empty(label, "libgui_plot") };
+    let values: &[f32] = if values.is_null() { &[] } else { unsafe { std::slice::from_raw_parts(values, count as usize) } };
+    with_ui(ui, (), |ui| ui.plot(label, values, max, height));
+}

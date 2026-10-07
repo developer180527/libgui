@@ -39,6 +39,13 @@
  *    libgui_painter_image_uv (pass 1 then 0).
  *  - NO depth test, NO culling, NO scissor: clipping is per-instance, in the
  *    fragment shader.
+ *  - THE CONTRACT VERSION: libgui_contract_version(). A port of the shader is
+ *    a port of one version. Version 4 added dashed lines (a line's
+ *    params[1..3] and border_color[0]) and turned images and glyphs
+ *    (border_color[0..2] = cos-1, sin). The expanded mesh turns its quads on
+ *    the CPU, so a mesh-path port needs only the dash test in its fragment
+ *    stage; an instancing port also turns the quad in its vertex stage. Zero
+ *    in every new field means what it always did.
  *
  * And the order within a frame, which matters to anyone rendering a scene
  * into a texture the UI shows:
@@ -193,6 +200,7 @@ typedef struct {
 } LibguiPaintFn;
 
 uint64_t       libgui_id_from_name(const char* name);
+uint32_t       libgui_contract_version(void);
 void           libgui_open_container(LibguiUi* ui, uint64_t id, LibguiLayout layout, LibguiFrame frame);
 void           libgui_close_container(LibguiUi* ui);
 uint64_t       libgui_open_depth(LibguiUi* ui);
@@ -236,6 +244,19 @@ void libgui_painter_image_tinted(LibguiPainter* p, LibguiRect r, uint64_t textur
                                  float u0, float v0, float u1, float v1, float radius, LibguiColor tint);
 /* `points` is `count` pairs of floats. */
 void libgui_painter_polyline(LibguiPainter* p, const float* points, uint64_t count, float width, LibguiColor c);
+/* Dashed: `on` drawn, `off` skipped, from `phase` into the pattern at the
+ * first point. Zero for `on` or `off` is solid. The polyline's pattern runs on
+ * across its joins, and it returns the phase at its last point. Dash ends are
+ * square; one instance per segment, like a solid line. */
+void  libgui_painter_dashed_line(LibguiPainter* p, float x0, float y0, float x1, float y1, float width,
+                                 LibguiColor c, float on, float off, float phase);
+float libgui_painter_dashed_polyline(LibguiPainter* p, const float* points, uint64_t count, float width,
+                                     LibguiColor c, float on, float off, float phase);
+/* Turned by `radians` about the centre, clockwise on screen (-M_PI/2 reads
+ * bottom to top). Text is centred on (cx, cy); upright text is snapped to the
+ * pixel grid and turned text cannot be, so it is a shade softer. */
+void libgui_painter_text_rotated(LibguiPainter* p, float cx, float cy, float size, LibguiColor c,
+                                 const char* text, float radians);
 void libgui_painter_bezier(LibguiPainter* p, float x0, float y0, float cx0, float cy0,
                            float cx1, float cy1, float x1, float y1, float width, LibguiColor c);
 /* Leaves sideways and arrives sideways, the way a node graph draws a link. */
@@ -287,6 +308,11 @@ void libgui_painter_image_uv(LibguiPainter* p, LibguiRect r, uint64_t texture,
 void libgui_painter_image_alpha(LibguiPainter* p, LibguiRect r, uint64_t texture,
                                 float u0, float v0, float u1, float v1,
                                 float radius, LibguiColor tint, uint32_t alpha);
+/* libgui_painter_image_alpha turned by `radians` about the centre of r: a
+ * knob, a compass needle, a spinner. The rounded corners turn with it. */
+void libgui_painter_image_rotated(LibguiPainter* p, LibguiRect r, uint64_t texture,
+                                  float u0, float v0, float u1, float v1,
+                                  float radius, LibguiColor tint, uint32_t alpha, float radians);
 
 /* Fill an outline: an icon drawn rather than loaded. Coordinates run from
  * (0,0) to (view_w, view_h) -- a 24x24 box for a typical icon set -- and are
@@ -734,6 +760,11 @@ typedef struct {
 uint8_t     libgui_drag_source(LibguiUi* ui, uint64_t id, const char* kind, uint64_t value, const char* label);
 void        libgui_drop_zone(LibguiUi* ui, const char* const* kinds, uint64_t count, LibguiDropZone* out);
 const char* libgui_dragging(LibguiUi* ui);   /* NULL when nothing is */
+/* A drag from outside the app (a file from the OS) arriving over this window;
+ * drop zones that accept `kind` light up. End it with dropped 1 when it was
+ * dropped here, 0 when it left. */
+void        libgui_begin_external_drag(LibguiUi* ui, const char* kind, uint64_t value, const char* label);
+void        libgui_end_external_drag(LibguiUi* ui, uint8_t dropped);
 void        libgui_cancel_drag(LibguiUi* ui);
 
 /* --- A tree of any size ---------------------------------------------------- */
@@ -1081,6 +1112,8 @@ void  libgui_request_repaint(LibguiUi* ui);
 /* Ask for a frame in `seconds`, not now -- a countdown reaching zero. The
  * host may sleep until then; it arrives as repaint_after. */
 void  libgui_request_repaint_in(LibguiUi* ui, float seconds);
+/* A line plot of `count` values from 0 to `max`, `height` logical px tall. */
+void  libgui_plot(LibguiUi* ui, const char* label, const float* values, uint64_t count, float max, float height);
 /* Keep an id's retained state alive for a frame in which no widget with that
  * id was built -- a row scrolled out of a list, a panel behind a tab. libgui
  * forgets an id it did not see. The libgui_animate* calls do this for you. */
@@ -1303,6 +1336,92 @@ LibguiResponse     libgui_viewport_uv(LibguiUi* ui, const char* key, uint64_t te
  * the pointer left off.
  */
 void               libgui_set_cursor(LibguiUi* ui, uint64_t collection, uint64_t index);
+
+/* libgui_interact for a widget you draw yourself that should also be a
+ * **focus stop**: Tab reaches it, a click focuses it where the platform
+ * says clicks focus, and focused on the response says so — draw your
+ * focus ring from it. text is 1 for text entry, which every platform's
+ * keyboard visits; 0 for something pressed or adjusted.
+ */
+LibguiResponse     libgui_interact_focusable(LibguiUi* ui, uint64_t id, uint8_t text);
+
+/* libgui_interact for a widget that is dragged: a press holds the
+ * pointer from the first pixel, without waiting to tell a click from a
+ * drag. drag_delta on the response is the movement.
+ */
+LibguiResponse     libgui_interact_drag(LibguiUi* ui, uint64_t id);
+
+/* The widget with keyboard focus, or 0. */
+uint64_t           libgui_focused(LibguiUi* ui);
+
+/* Give id keyboard focus; 0 takes it from everything. */
+void               libgui_set_focus(LibguiUi* ui, uint64_t id);
+
+/* The key (a LIBGUI_KEY_* code) went down this frame. */
+uint8_t            libgui_key_pressed(LibguiUi* ui, uint64_t key);
+
+/* The key (a LIBGUI_KEY_* code) is held. */
+uint8_t            libgui_key_down(LibguiUi* ui, uint64_t key);
+
+/* The pointer button (0 primary, 1 secondary, 2 middle) is held. */
+uint8_t            libgui_pointer_button_down(LibguiUi* ui, uint64_t button);
+
+/* The pointer button went down this frame. */
+uint8_t            libgui_pointer_button_pressed(LibguiUi* ui, uint64_t button);
+
+/* Seconds the pointer has rested on id; 0 when it is elsewhere. For a
+ * hover card of your own that waits before it shows.
+ */
+float              libgui_hover_time(LibguiUi* ui, uint64_t id);
+
+/* A radio button: one of a group, selected when it is the group's
+ * value. clicked on the response means choose it.
+ */
+LibguiResponse     libgui_radio(LibguiUi* ui, const char* label, uint8_t selected);
+
+/* libgui_drag_value held between min and max. */
+LibguiResponse     libgui_drag_value_range(LibguiUi* ui, const char* label, float* value, float speed, float min, float max);
+
+/* A rule that resizes a pane: *value is the pane's size in logical px,
+ * kept between min and max. vertical 1 for a rule between
+ * side-by-side panes; invert 1 when the pane is on the far side (an
+ * inspector docked right, a console at the bottom).
+ */
+LibguiResponse     libgui_splitter(LibguiUi* ui, const char* key, float* value, uint8_t vertical, uint8_t invert, float min, float max);
+
+/* Hold the pointer still while the widget being dragged has it — an
+ * endless scrub, a 3-D orbit. Call each frame of the drag; the response's
+ * raw_delta is the motion. The host hides and recentres the cursor.
+ */
+void               libgui_request_pointer_lock(LibguiUi* ui);
+
+/* A line marking where a drop would land: before or after the widget
+ * over, across it (vertical 0, for a list) or beside it (1, for a
+ * row of tabs).
+ */
+void               libgui_insertion_line(LibguiUi* ui, uint64_t over, uint8_t vertical, uint8_t after);
+
+/* The label of what is being dragged, following the pointer. Call once a
+ * frame, after everything else, while libgui_dragging is not NULL.
+ */
+void               libgui_drag_ghost(LibguiUi* ui);
+
+/* A scrolling list that builds only the rows on screen: a million rows
+ * cost what a screenful does. Every row is row_height tall. Writes the
+ * rows to build, [*first, *end); build each between
+ * libgui_open_virtual_row and libgui_close_virtual_row, then call
+ * libgui_close_virtual_list. The rows are keyed by index.
+ */
+void               libgui_open_virtual_list(LibguiUi* ui, const char* key, uint64_t rows, float row_height, uint64_t* first, uint64_t* end);
+
+/* Open row index of the innermost virtual list. */
+void               libgui_open_virtual_row(LibguiUi* ui, uint64_t index);
+
+/* Close the row opened by libgui_open_virtual_row. */
+void               libgui_close_virtual_row(LibguiUi* ui);
+
+/* Close the innermost libgui_open_virtual_list. */
+void               libgui_close_virtual_list(LibguiUi* ui);
 
 
 /* === END GENERATED === */

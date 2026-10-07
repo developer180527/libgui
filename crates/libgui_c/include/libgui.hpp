@@ -420,6 +420,50 @@ public:
     void set_anim(uint64_t wid, uint8_t slot, float v) { libgui_set_anim(h_, wid, slot, v); }
     void request_repaint() { libgui_request_repaint(h_); }
     void request_repaint_in(float seconds) { libgui_request_repaint_in(h_, seconds); }
+
+    // Custom widgets: a focus stop, a drag sense, and the raw input state.
+    LibguiResponse interact_focusable(uint64_t id, bool text = false) {
+        return libgui_interact_focusable(h_, id, text);
+    }
+    LibguiResponse interact_drag(uint64_t id) { return libgui_interact_drag(h_, id); }
+    uint64_t focused() { return libgui_focused(h_); }
+    void set_focus(uint64_t id) { libgui_set_focus(h_, id); }
+    bool key_pressed(uint32_t key) { return libgui_key_pressed(h_, key) != 0; }
+    bool key_down(uint32_t key) { return libgui_key_down(h_, key) != 0; }
+    bool pointer_button_down(uint32_t b) { return libgui_pointer_button_down(h_, b) != 0; }
+    bool pointer_button_pressed(uint32_t b) { return libgui_pointer_button_pressed(h_, b) != 0; }
+    float hover_time(uint64_t id) { return libgui_hover_time(h_, id); }
+    void request_pointer_lock() { libgui_request_pointer_lock(h_); }
+
+    LibguiResponse radio(const char* label, bool selected) { return libgui_radio(h_, label, selected); }
+    LibguiResponse drag_value_range(const char* label, float& v, float speed, float min, float max) {
+        return libgui_drag_value_range(h_, label, &v, speed, min, max);
+    }
+    LibguiResponse splitter(const char* key, float& size, bool vertical, bool invert, float min, float max) {
+        return libgui_splitter(h_, key, &size, vertical, invert, min, max);
+    }
+    void plot(const char* label, const float* values, uint64_t count, float max, float height) {
+        libgui_plot(h_, label, values, count, max, height);
+    }
+    void insertion_line(uint64_t over, bool vertical, bool after) { libgui_insertion_line(h_, over, vertical, after); }
+    void drag_ghost() { libgui_drag_ghost(h_); }
+    void begin_external_drag(const char* kind, uint64_t value, const char* label) {
+        libgui_begin_external_drag(h_, kind, value, label);
+    }
+    void end_external_drag(bool dropped) { libgui_end_external_drag(h_, dropped); }
+
+    // A virtual list: `row(i)` builds row i, called only for the rows on screen.
+    template <class F>
+    void virtual_list(const char* key, uint64_t rows, float row_height, F&& row) {
+        uint64_t first = 0, end = 0;
+        libgui_open_virtual_list(h_, key, rows, row_height, &first, &end);
+        for (uint64_t i = first; i < end; i++) {
+            libgui_open_virtual_row(h_, i);
+            row(i);
+            libgui_close_virtual_row(h_);
+        }
+        libgui_close_virtual_list(h_);
+    }
     void keep_id(uint64_t wid) { libgui_keep_id(h_, wid); }
 
     // A menu is a scope only when it opened, so this returns whether to build

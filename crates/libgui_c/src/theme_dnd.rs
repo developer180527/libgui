@@ -204,3 +204,26 @@ fn nul_terminated(k: &'static str) -> *const c_char {
     map.insert(k, leaked);
     leaked.as_ptr()
 }
+
+/// A drag that started outside the app — a file from the OS file manager —
+/// arriving over this window. From here it is like any drag: drop zones that
+/// accept `kind` light up. End it with [`libgui_end_external_drag`].
+///
+/// # Safety
+/// `ui` null or live; `kind` and `label` strings.
+#[no_mangle]
+pub unsafe extern "C" fn libgui_begin_external_drag(ui: *mut LibguiUi, kind: *const c_char, value: u64, label: *const c_char) {
+    let kind = intern(unsafe { str_or_empty(kind, "libgui_begin_external_drag") });
+    let label = unsafe { str_or_empty(label, "libgui_begin_external_drag") }.to_string();
+    with_ui(ui, (), move |ui| ui.begin_external_drag(Payload::new(kind, value).with_label(label)));
+}
+
+/// The outside drag left the window (`dropped` 0) or was dropped on it (1),
+/// in which case the zone under the pointer receives it as usual.
+///
+/// # Safety
+/// `ui` null or live.
+#[no_mangle]
+pub unsafe extern "C" fn libgui_end_external_drag(ui: *mut LibguiUi, dropped: u8) {
+    with_ui(ui, (), |ui| ui.end_external_drag(dropped != 0));
+}

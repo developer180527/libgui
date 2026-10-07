@@ -737,6 +737,120 @@ pub unsafe extern "C" fn libgui_painter_polyline(
     }
 }
 
+/// A dashed line: `on` drawn, `off` skipped, starting `phase` into the
+/// pattern at `(x0, y0)`. Zero for `on` or `off` is a solid line.
+///
+/// # Safety
+/// As [`libgui_painter_measure`].
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn libgui_painter_dashed_line(
+    p: *mut LibguiPainter,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    width: f32,
+    c: LibguiColor,
+    on: f32,
+    off: f32,
+    phase: f32,
+) {
+    if let Some(p) = painter(p) {
+        p.dashed_line(Vec2::new(x0, y0), Vec2::new(x1, y1), width, color(c), libgui::Dash::new(on, off).phase(phase));
+    }
+}
+
+/// [`libgui_painter_polyline`] dashed, the pattern running on across the
+/// joins. Returns the phase at the last point, to continue the pattern in a
+/// later call.
+///
+/// # Safety
+/// As [`libgui_painter_polyline`].
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn libgui_painter_dashed_polyline(
+    p: *mut LibguiPainter,
+    points: *const f32,
+    count: u64,
+    width: f32,
+    c: LibguiColor,
+    on: f32,
+    off: f32,
+    phase: f32,
+) -> f32 {
+    if points.is_null() || count == 0 {
+        return phase;
+    }
+    // In place, as `libgui_painter_polyline` reads it.
+    let pts = unsafe { std::slice::from_raw_parts(points as *const Vec2, count as usize) };
+    match painter(p) {
+        Some(p) => p.dashed_polyline(pts, width, color(c), libgui::Dash::new(on, off).phase(phase)),
+        None => phase,
+    }
+}
+
+/// An image turned by `radians` about the centre of `r`, clockwise on screen.
+/// `alpha` as [`libgui_painter_image_alpha`].
+///
+/// # Safety
+/// As [`libgui_painter_measure`].
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn libgui_painter_image_rotated(
+    p: *mut LibguiPainter,
+    r: LibguiRect,
+    texture: u64,
+    u0: f32,
+    v0: f32,
+    u1: f32,
+    v1: f32,
+    radius: f32,
+    tint: LibguiColor,
+    alpha: u32,
+    radians: f32,
+) {
+    let mode = match alpha {
+        1 => libgui::ImageAlpha::Premultiplied,
+        2 => libgui::ImageAlpha::Straight,
+        _ => libgui::ImageAlpha::Opaque,
+    };
+    if let Some(p) = painter(p) {
+        let tex = libgui::TextureId::User(texture);
+        p.image_rotated(Rect::new(r.x, r.y, r.w, r.h), tex, [u0, v0, u1, v1], radius, color(tint), mode, radians);
+    }
+}
+
+/// One line of text centred on `(cx, cy)`, turned by `radians` about it,
+/// clockwise on screen: `-M_PI/2` reads bottom to top.
+///
+/// # Safety
+/// As [`libgui_painter_measure`].
+#[no_mangle]
+pub unsafe extern "C" fn libgui_painter_text_rotated(
+    p: *mut LibguiPainter,
+    cx: f32,
+    cy: f32,
+    size: f32,
+    c: LibguiColor,
+    text: *const std::os::raw::c_char,
+    radians: f32,
+) {
+    let text = unsafe { crate::convert::str_or_empty(text, "libgui_painter_text_rotated") };
+    if let Some(p) = painter(p) {
+        p.text_rotated(Vec2::new(cx, cy), size, color(c), text, radians);
+    }
+}
+
+/// The render contract this library draws to (`libgui::render_contract::
+/// CONTRACT_VERSION`). A host with its own port of the shader checks it at
+/// start-up, the way it checks `libgui_abi_version`: a new version means the
+/// instances carry something the port does not read yet.
+#[no_mangle]
+pub extern "C" fn libgui_contract_version() -> u32 {
+    libgui::render_contract::CONTRACT_VERSION
+}
+
 /// A cubic Bézier from `p0` to `p1` with controls `c0` and `c1`. For a curve
 /// in a node graph, a spline in a sketch, an easing preview.
 ///

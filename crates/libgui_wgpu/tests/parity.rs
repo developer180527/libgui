@@ -252,3 +252,69 @@ fn the_image_alpha_modes_match_the_gpu() {
         }
     }
 }
+
+/// Turned images, through the real shader, against the CPU reference: the
+/// vertex stage's rotation, the anti-aliasing pixel a turned edge is given,
+/// and the texture mapping carried past it, at angles that put edges on
+/// pixel centres (a quarter turn) and between them.
+#[test]
+fn rotated_images_match_the_gpu() {
+    let Some(g) = gpu() else {
+        eprintln!("parity: no GPU adapter, skipped");
+        return;
+    };
+    // A gradient with a hard bar, so a texture mapped wrongly shows.
+    let tex = {
+        let mut data = Vec::new();
+        for y in 0..16u32 {
+            for x in 0..16u32 {
+                let bar = (6..10).contains(&x);
+                data.extend_from_slice(&if bar { [240, 240, 40, 255] } else { [(x * 16) as u8, (y * 16) as u8, 160, 255] });
+            }
+        }
+        libgui_soft::Texture { width: 16, height: 16, data }
+    };
+    for angle in [0.3f32, -std::f32::consts::FRAC_PI_2, 2.5] {
+        for (alpha, radius) in [(libgui::ImageAlpha::Opaque, 0.0f32), (libgui::ImageAlpha::Straight, 10.0)] {
+            for scale in [1.0f32, 1.5] {
+                let mut soft = SoftRenderer::new();
+                let id = soft.register_texture(tex.clone());
+                let mut ui = libgui::Ui::new(libgui::Theme::dark(), SCENE_FONT).expect("font");
+                let size = libgui::Vec2::new(160.0, 160.0);
+                let info = libgui::FrameInfo { screen_size: size, scale, dt: 1.0 };
+                let build = |ui: &mut libgui::Ui| {
+                    ui.begin_frame(info);
+                    ui.add_leaf(
+                        libgui::Id::new("knob"),
+                        libgui::Layout::leaf(libgui::Size::Fixed(160.0), libgui::Size::Fixed(160.0)),
+                        libgui::Vec2::ZERO,
+                        false,
+                        move |p, _| {
+                            let r = libgui::Rect::new(40.3, 30.0, 80.0, 100.0);
+                            p.image_rotated(r, id, [0.0, 0.0, 1.0, 1.0], radius, libgui::Color::WHITE.with_alpha(0.9), alpha, angle);
+                        },
+                    );
+                };
+                build(&mut ui);
+                drop(ui.end_frame());
+                build(&mut ui);
+                let out = ui.end_frame();
+                let px = ((size.x * scale) as u32, (size.y * scale) as u32);
+                let cpu = soft.render_to_image(&out, px.0, px.1).data;
+                let gpu_px = render_gpu_with(&g, &out, px, &[(id, &tex)]);
+                let total = (px.0 * px.1) as usize;
+                let (cpu_px, _) = cpu.as_chunks::<4>();
+                let (gpu_chunks, _) = gpu_px.as_chunks::<4>();
+                let disagree = cpu_px
+                    .iter()
+                    .zip(gpu_chunks)
+                    .filter(|(a, b)| a.iter().zip(b.iter()).any(|(x, y)| x.abs_diff(*y) > CLOSE))
+                    .count();
+                assert!(
+                    (disagree as f64) <= total as f64 * MAX_DISAGREE,
+                    "{angle} rad {alpha:?}@{scale}x: {disagree} of {total} pixels differ between the shader and the CPU reference"
+                );
+            }
+        }
+    }
+}

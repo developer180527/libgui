@@ -119,6 +119,9 @@ macro_rules! c_ret {
     (u64) => {
         "uint64_t"
     };
+    (f32) => {
+        "float"
+    };
 }
 
 /// Declare the widget surface.
@@ -386,6 +389,116 @@ widgets! { ui =>
     fn libgui_set_cursor(collection: u64, index: usize) -> () {
         ui.set_cursor(libgui::Id(collection), index)
     }
+
+    /// `libgui_interact` for a widget you draw yourself that should also be a
+    /// **focus stop**: Tab reaches it, a click focuses it where the platform
+    /// says clicks focus, and `focused` on the response says so — draw your
+    /// focus ring from it. `text` is 1 for text entry, which every platform's
+    /// keyboard visits; 0 for something pressed or adjusted.
+    fn libgui_interact_focusable(id: u64, text: bool) -> LibguiResponse {
+        let kind = if text { libgui::FocusKind::Text } else { libgui::FocusKind::Control };
+        ui.interact_focusable(libgui::Id(id), kind)
+    }
+
+    /// `libgui_interact` for a widget that is dragged: a press holds the
+    /// pointer from the first pixel, without waiting to tell a click from a
+    /// drag. `drag_delta` on the response is the movement.
+    fn libgui_interact_drag(id: u64) -> LibguiResponse { ui.interact_drag(libgui::Id(id)) }
+
+    /// The widget with keyboard focus, or 0.
+    fn libgui_focused() -> u64 { ui.focused().map_or(0, |i| i.0) }
+
+    /// Give `id` keyboard focus; 0 takes it from everything.
+    fn libgui_set_focus(id: u64) -> () { ui.set_focus((id != 0).then_some(libgui::Id(id))) }
+
+    /// The key (a `LIBGUI_KEY_*` code) went down this frame.
+    fn libgui_key_pressed(key: usize) -> bool {
+        crate::input::key_from_code(key as u32).is_some_and(|k| ui.key_pressed(k))
+    }
+
+    /// The key (a `LIBGUI_KEY_*` code) is held.
+    fn libgui_key_down(key: usize) -> bool {
+        crate::input::key_from_code(key as u32).is_some_and(|k| ui.key_down(k))
+    }
+
+    /// The pointer button (0 primary, 1 secondary, 2 middle) is held.
+    fn libgui_pointer_button_down(button: usize) -> bool {
+        ui.button_down(crate::input::button(button as u32))
+    }
+
+    /// The pointer button went down this frame.
+    fn libgui_pointer_button_pressed(button: usize) -> bool {
+        ui.button_pressed(crate::input::button(button as u32))
+    }
+
+    /// Seconds the pointer has rested on `id`; 0 when it is elsewhere. For a
+    /// hover card of your own that waits before it shows.
+    fn libgui_hover_time(id: u64) -> f32 { ui.hover_time(libgui::Id(id)) }
+
+    /// A radio button: one of a group, `selected` when it is the group's
+    /// value. `clicked` on the response means choose it.
+    fn libgui_radio(label: str, selected: bool) -> LibguiResponse {
+        let mut on = selected;
+        ui.radio(label, &mut on, true)
+    }
+
+    /// `libgui_drag_value` held between `min` and `max`.
+    fn libgui_drag_value_range(label: str, value: out_f32, speed: f32, min: f32, max: f32) -> LibguiResponse {
+        let mut v = read_f32(value);
+        let r = ui.drag_value_range(label, &mut v, speed, min..=max);
+        write_f32(value, v);
+        r
+    }
+
+    /// A rule that resizes a pane: `*value` is the pane's size in logical px,
+    /// kept between `min` and `max`. `vertical` 1 for a rule between
+    /// side-by-side panes; `invert` 1 when the pane is on the far side (an
+    /// inspector docked right, a console at the bottom).
+    fn libgui_splitter(key: str, value: out_f32, vertical: bool, invert: bool, min: f32, max: f32) -> LibguiResponse {
+        let mut opts = if vertical { libgui::SplitterOptions::vertical_rule(min, max) } else { libgui::SplitterOptions::horizontal_rule(min, max) };
+        opts.invert = invert;
+        let mut v = read_f32(value);
+        let r = ui.splitter(key, &mut v, opts);
+        write_f32(value, v);
+        r
+    }
+
+    /// Hold the pointer still while the widget being dragged has it — an
+    /// endless scrub, a 3-D orbit. Call each frame of the drag; the response's
+    /// `raw_delta` is the motion. The host hides and recentres the cursor.
+    fn libgui_request_pointer_lock() -> () { ui.request_pointer_lock() }
+
+    /// A line marking where a drop would land: before or `after` the widget
+    /// `over`, across it (`vertical` 0, for a list) or beside it (1, for a
+    /// row of tabs).
+    fn libgui_insertion_line(over: u64, vertical: bool, after: bool) -> () {
+        let axis = if vertical { libgui::Axis::X } else { libgui::Axis::Y };
+        ui.insertion_line(libgui::Id(over), axis, after)
+    }
+
+    /// The label of what is being dragged, following the pointer. Call once a
+    /// frame, after everything else, while `libgui_dragging` is not NULL.
+    fn libgui_drag_ghost() -> () { ui.drag_ghost() }
+
+    /// A scrolling list that builds only the rows on screen: a million rows
+    /// cost what a screenful does. Every row is `row_height` tall. Writes the
+    /// rows to build, `[*first, *end)`; build each between
+    /// `libgui_open_virtual_row` and `libgui_close_virtual_row`, then call
+    /// `libgui_close_virtual_list`. The rows are keyed by index.
+    fn libgui_open_virtual_list(key: str, rows: usize, row_height: f32, first: out_usize, end: out_usize) -> () {
+        let r = ui.open_virtual_list(key, rows, libgui::ListOptions::new(row_height));
+        write_usize(first, r.start);
+        write_usize(end, r.end);
+    }
+
+    /// Open row `index` of the innermost virtual list.
+    fn libgui_open_virtual_row(index: usize) -> () { ui.open_virtual_row(index) }
+
+    /// Close the row opened by `libgui_open_virtual_row`.
+    fn libgui_close_virtual_row() -> () { ui.close_virtual_row() }
+
+    /// Close the innermost `libgui_open_virtual_list`.
+    fn libgui_close_virtual_list() -> () { ui.close_virtual_list() }
 }
 
 fn read_bool(p: *mut u8) -> bool {
@@ -411,5 +524,11 @@ fn read_f32(p: *mut f32) -> f32 {
 fn write_f32(p: *mut f32, v: f32) {
     if let Some(slot) = unsafe { p.as_mut() } {
         *slot = v;
+    }
+}
+
+fn write_usize(p: *mut u64, v: usize) {
+    if let Some(slot) = unsafe { p.as_mut() } {
+        *slot = v as u64;
     }
 }

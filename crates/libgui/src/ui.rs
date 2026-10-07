@@ -822,6 +822,8 @@ pub struct Ui {
     /// that are due at a time (a notification expiring), where the clamped
     /// `input.dt` that keeps animations from leaping would lose the time.
     pub(crate) elapsed: f32,
+    /// Open `open_virtual_list`s, innermost last.
+    virtual_lists: Vec<VirtualListFrame>,
     /// The soonest time something asked to be woken at — a toast's expiry —
     /// for this frame's `repaint_after`. Cleared each frame.
     wake_at: Option<f64>,
@@ -1046,6 +1048,7 @@ impl Ui {
             drag_threshold: 4.0,
             last_repaint: Some(0.0),
             elapsed: 0.0,
+            virtual_lists: Vec::new(),
             wake_at: None,
             audit: false,
             dup_ids: FxSet::default(),
@@ -1844,6 +1847,7 @@ impl Ui {
         self.time += self.elapsed as f64;
         self.focus_order.clear();
         self.overlays.clear();
+        self.virtual_lists.clear();
         self.ime_rect = None;
         self.cursor = Cursor::Default;
         self.input = input;
@@ -3144,9 +3148,6 @@ impl Ui {
         r
     }
 
-    /// Open a scroll area without a closure, for a binding that cannot hold
-    /// one. Close it with [`Ui::close_scroll_area`]; the same rules as
-    /// [`Ui::open_container`] apply.
     /// Give a list, tree or table's rows a **keyboard cursor**, and make the
     /// whole thing one focus stop instead of one per row.
     ///
@@ -3578,6 +3579,9 @@ impl Ui {
         }
     }
 
+    /// Open a scroll area without a closure, for a binding that cannot hold
+    /// one. Close it with [`Ui::close_scroll_area`]; the same rules as
+    /// [`Ui::open_container`] apply.
     pub fn open_scroll_area(&mut self, key: &str) {
         let gap = self.theme.metrics.space;
         let opts = ScrollOptions { gap, ..ScrollOptions::new(Size::Grow(1.0)) };
@@ -3780,17 +3784,67 @@ impl Ui {
     ) -> Range<usize> {
         let id = self.make_id(("scroll", key));
         let fallback_viewport = self.input.screen_size.y;
-        let scroll = ScrollOptions {
-            height: opts.height,
-            gap: opts.gap,
-            padding: opts.padding,
-            stick_to_end: opts.stick_to_end,
-            config: opts.config,
-            ..ScrollOptions::new(opts.height)
-        };
-        // A row asked for by index: put it in view before the window is
-        // located, from where the list knows it is, so it need not be built.
-        // Served the way `scroll_to` is, and so it eases like any scroll.
+        self.reveal_row(id, rows, &opts, heights);
+        self.open_scroll_area_id(id, Self::list_scroll(&opts));
+        let built = self.open_virtual_rows(id, rows, &opts, heights, fallback_viewport);
+        for i in built.clone() {
+            self.virtual_row_container(i, heights.at(i), |ui| row(ui, i));
+        }
+        self.close_virtual_list();
+        built
+    }
+
+    /// [`Ui::virtual_list`] as a pair, for a caller that cannot pass a
+    /// closure. Returns the rows to build; build each between
+    /// [`Ui::open_virtual_row`] and [`Ui::close_virtual_row`], then call
+    /// [`Ui::close_virtual_list`]. Everything [`Ui::virtual_list_with`]
+    /// documents applies.
+    ///
+    /// ```ignore
+    /// for i in ui.open_virtual_list("objects", scene.len(), ListOptions::new(24.0)) {
+    ///     ui.open_virtual_row(i);
+    ///     ui.label(&scene[i].name);
+    ///     ui.close_virtual_row();
+    /// }
+    /// ui.close_virtual_list();
+    /// ```
+    pub fn open_virtual_list(&mut self, key: &str, rows: usize, opts: ListOptions) -> Range<usize> {
+        let h = opts.row_height;
+        let id = self.make_id(("scroll", key));
+        let fallback_viewport = self.input.screen_size.y;
+        let heights = Heights::Uniform(h);
+        self.reveal_row(id, rows, &opts, &heights);
+        self.open_scroll_area_id(id, Self::list_scroll(&opts));
+        self.open_virtual_rows(id, rows, &opts, &heights, fallback_viewport)
+    }
+
+    /// Open row `i` of the innermost [`Ui::open_virtual_list`]: a row of the
+    /// list's height, keyed by its index.
+    pub fn open_virtual_row(&mut self, i: usize) {
+        let h = self.virtual_lists.last().map_or(0.0, |v| v.row_height);
+        let row_id = self.make_id(("vlist_row", i));
+        self.open_container(row_id, Self::virtual_row_layout(h), Frame { clip: true, ..Frame::none() });
+    }
+
+    /// Close the row opened by [`Ui::open_virtual_row`].
+    pub fn close_virtual_row(&mut self) {
+        self.close_container();
+    }
+
+    /// Close the innermost [`Ui::open_virtual_list`].
+    pub fn close_virtual_list(&mut self) {
+        if let Some(v) = self.virtual_lists.pop() {
+            if let Some(h) = v.tail {
+                self.list_spacer(1, h);
+            }
+        }
+        self.close_container();
+    }
+
+    /// A row asked for by index: put it in view before the window is located,
+    /// from where the list knows it is, so it need not be built. Served the
+    /// way `scroll_to` is, and so it eases like any scroll.
+    fn reveal_row(&mut self, id: Id, rows: usize, opts: &ListOptions, heights: &Heights<'_>) {
         if let (Some(i), Some(view)) = (opts.reveal.filter(|&i| i < rows), self.rects.get(&id).copied()) {
             let mut st = self.scroll_states.get(&id).copied().unwrap_or_default();
             // The content's height is last frame's measure, and rows may have
@@ -3801,43 +3855,61 @@ impl Ui {
             st.y.content = st.y.content.max(content);
             let top = heights.top(i, opts.gap);
             let want = Rect::new(view.x, view.y + opts.padding.top + top - st.y.offset, view.w, heights.at(i));
-            bring_into_view(&mut st, want, view, scroll);
+            bring_into_view(&mut st, want, view, Self::list_scroll(opts));
             self.scroll_states.insert(id, st);
         }
-        let mut built = 0..0;
-        self.scroll_area_id(id, scroll, |ui| {
-            // Read the state *inside*, so the range comes from this frame's
-            // offset (the one layout will use) rather than last frame's.
-            let st = ui.scroll_states.get(&id).copied().unwrap_or_default();
-            // The viewport is measured at the end of a frame, so it is 0 on the
-            // first one: fall back to the window rather than building nothing.
-            let viewport = if st.y.viewport > 1.0 { st.y.viewport } else { fallback_viewport };
-            let span = heights.locate(rows, opts.gap, st.y.offset, viewport, opts.overscan);
-            built = span.first..span.end;
+    }
 
-            // Spacers stand in for the rows that were not built, so layout, the
-            // scrollbar and the scroll maths still see the whole list. A row
-            // occupies `height + gap`; the spacer replaces `n` of those and the
-            // gap that follows it supplies the last one.
-            if span.first > 0 {
-                ui.list_spacer(0, span.first_y - opts.gap);
-            }
-            for i in built.clone() {
-                // Keyed by index, not by position among the built rows, so a
-                // row keeps its identity as the window slides over it.
-                let row_id = ui.make_id(("vlist_row", i));
-                let layout = Layout::row()
-                    .width(Size::Grow(1.0))
-                    .height(Size::Fixed(heights.at(i)))
-                    .align(Align::Start, Align::Center)
-                    .shrink();
-                ui.container_id(row_id, layout, Frame { clip: true, ..Frame::none() }, |ui| row(ui, i));
-            }
-            if span.end < rows {
-                ui.list_spacer(1, span.stride_total - span.end_y - opts.gap);
-            }
-        });
-        built
+    fn list_scroll(opts: &ListOptions) -> ScrollOptions {
+        ScrollOptions {
+            height: opts.height,
+            gap: opts.gap,
+            padding: opts.padding,
+            stick_to_end: opts.stick_to_end,
+            config: opts.config,
+            ..ScrollOptions::new(opts.height)
+        }
+    }
+
+    fn virtual_row_layout(h: f32) -> Layout {
+        Layout::row().width(Size::Grow(1.0)).height(Size::Fixed(h)).align(Align::Start, Align::Center).shrink()
+    }
+
+    fn virtual_row_container(&mut self, i: usize, h: f32, body: impl FnOnce(&mut Self)) {
+        // Keyed by index, not by position among the built rows, so a row
+        // keeps its identity as the window slides over it.
+        let row_id = self.make_id(("vlist_row", i));
+        self.container_id(row_id, Self::virtual_row_layout(h), Frame { clip: true, ..Frame::none() }, body);
+    }
+
+    /// Inside the list's scroll area: locate the window, place the leading
+    /// spacer and remember the trailing one for `close_virtual_list`.
+    fn open_virtual_rows(
+        &mut self,
+        id: Id,
+        rows: usize,
+        opts: &ListOptions,
+        heights: &Heights<'_>,
+        fallback_viewport: f32,
+    ) -> Range<usize> {
+        // Read the state *inside*, so the range comes from this frame's
+        // offset (the one layout will use) rather than last frame's.
+        let st = self.scroll_states.get(&id).copied().unwrap_or_default();
+        // The viewport is measured at the end of a frame, so it is 0 on the
+        // first one: fall back to the window rather than building nothing.
+        let viewport = if st.y.viewport > 1.0 { st.y.viewport } else { fallback_viewport };
+        let span = heights.locate(rows, opts.gap, st.y.offset, viewport, opts.overscan);
+
+        // Spacers stand in for the rows that were not built, so layout, the
+        // scrollbar and the scroll maths still see the whole list. A row
+        // occupies `height + gap`; the spacer replaces `n` of those and the
+        // gap that follows it supplies the last one.
+        if span.first > 0 {
+            self.list_spacer(0, span.first_y - opts.gap);
+        }
+        let tail = (span.end < rows).then_some(span.stride_total - span.end_y - opts.gap);
+        self.virtual_lists.push(VirtualListFrame { row_height: opts.row_height, tail });
+        span.first..span.end
     }
 
     /// Invisible stand-in for the rows a virtual list did not build.
@@ -4030,13 +4102,18 @@ fn paint(
             let mut inst = inst;
             inst.rect[0] += d.x;
             inst.rect[1] += d.y;
+            // A line's endpoints are positions too, carried in `uv`: left
+            // behind, a moved line is drawn where it was and clipped away.
+            if crate::render_contract::PrimitiveKind::from_code(inst.params[3]) == Some(crate::render_contract::PrimitiveKind::Line) {
+                inst.uv[0] += d.x;
+                inst.uv[1] += d.y;
+                inst.uv[2] += d.x;
+                inst.uv[3] += d.y;
+            }
             let Some(c) = inner.translate(d.x, d.y).intersect(&outer) else { continue };
             // Culled again here rather than trusted from the recording, so a
             // replay's draw list is the same size as the build's would be.
-            // The margin covers a shadow's blur and a border's width, the way
-            // `DrawList::push` bounds a shape.
-            let margin = inst.params[1] + inst.params[2] + 1.0;
-            let bounds = Rect::new(inst.rect[0], inst.rect[1], inst.rect[2], inst.rect[3]).expand(margin);
+            let bounds = crate::draw::instance_bounds(&inst);
             if c.intersect(&bounds).is_none() {
                 continue;
             }
@@ -5764,4 +5841,12 @@ impl Nudge {
         };
         if min <= max { v.clamp(min, max) } else { v }
     }
+}
+
+/// What an open virtual list still has to place when it closes.
+#[derive(Clone, Copy, Debug)]
+struct VirtualListFrame {
+    row_height: f32,
+    /// The trailing spacer, when rows past the window were not built.
+    tail: Option<f32>,
 }

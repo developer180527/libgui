@@ -12,7 +12,79 @@ pub enum TextureId {
     User(u64),
 }
 
-use crate::render_contract::PrimitiveKind;
+use crate::render_contract::{PrimitiveKind, Rotation};
+
+/// A dash pattern for [`DrawList::dashed_line`] and
+/// [`crate::Painter::dashed_polyline`]: `on` drawn, `off` skipped, repeating,
+/// in the same units as the line's width (so it scales with a canvas's zoom).
+///
+/// `phase` is how far into the pattern the line starts. A polyline carries it
+/// from segment to segment, so its dashes run on across the joins instead of
+/// restarting at every point; animate it for marching ants.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Dash {
+    pub on: f32,
+    pub off: f32,
+    pub phase: f32,
+}
+
+impl Dash {
+    pub const fn new(on: f32, off: f32) -> Dash {
+        Dash { on, off, phase: 0.0 }
+    }
+
+    /// `on` and `off` equal: the ordinary dashed rule.
+    pub const fn even(len: f32) -> Dash {
+        Dash::new(len, len)
+    }
+
+    /// Short dots with round-looking spacing for a line of `width`.
+    pub fn dotted(width: f32) -> Dash {
+        Dash::new(width, width * 1.5)
+    }
+
+    pub const fn phase(mut self, phase: f32) -> Dash {
+        self.phase = phase;
+        self
+    }
+
+    /// Whether this draws anything other than a solid line.
+    pub fn is_dashed(&self) -> bool {
+        self.on > 0.0 && self.off > 0.0 && self.on.is_finite() && self.off.is_finite()
+    }
+}
+
+/// Where `inst` can put pixels, in window coordinates: the rect, grown for a
+/// shape's blur and border, and turned for a rotated image or glyph. Culling
+/// and a moved cache replay both bound an instance by this.
+pub(crate) fn instance_bounds(inst: &Instance) -> Rect {
+    let [x, y, w, h] = inst.rect;
+    let r = Rect::new(x, y, w, h);
+    match PrimitiveKind::from_code(inst.params[3]) {
+        Some(PrimitiveKind::Shape) => r.expand(inst.params[1] + inst.params[2] + 1.0),
+        Some(PrimitiveKind::Image | PrimitiveKind::Glyph) => {
+            let rot = Rotation::from_code([inst.border_color[0], inst.border_color[1]]);
+            if rot.is_none() {
+                r
+            } else {
+                rotated_bounds(r, rot)
+            }
+        }
+        // A line's rect is already its grown bounding box (or strip).
+        _ => r,
+    }
+}
+
+/// The axis-aligned box around `r` turned about its centre.
+fn rotated_bounds(r: Rect, rot: Rotation) -> Rect {
+    let (hw, hh) = (r.w * 0.5, r.h * 0.5);
+    let ex = (hw * rot.cos).abs() + (hh * rot.sin).abs();
+    let ey = (hw * rot.sin).abs() + (hh * rot.cos).abs();
+    let c = r.center();
+    // Two pixels: a turned image's anti-aliasing pixel, itself turned, plus
+    // one for the edge it fades over.
+    Rect::new(c.x - ex, c.y - ey, ex * 2.0, ey * 2.0).expand(2.0)
+}
 
 const KIND_SHAPE: f32 = PrimitiveKind::Shape.code();
 const KIND_GLYPH: f32 = PrimitiveKind::Glyph.code();
@@ -294,19 +366,22 @@ impl DrawList {
     }
 
     pub(crate) fn glyph(&mut self, r: Rect, uv: [f32; 4], color: Color) {
+        self.glyph_rotated(r, uv, color, Rotation::NONE);
+    }
+
+    /// A glyph turned by `rot` about the centre of `r`.
+    pub(crate) fn glyph_rotated(&mut self, r: Rect, uv: [f32; 4], color: Color, rot: Rotation) {
         let r = self.xform().rect(r);
-        self.push(
-            TextureId::Atlas,
-            r,
-            Instance {
-                rect: [r.x, r.y, r.w, r.h],
-                uv,
-                color: color.to_array(),
-                border_color: [0.0; 4],
-                clip: [0.0; 4],
-                params: [0.0, 0.0, 0.0, KIND_GLYPH],
-            },
-        );
+        let [c0, c1] = rot.code();
+        let inst = Instance {
+            rect: [r.x, r.y, r.w, r.h],
+            uv,
+            color: color.to_array(),
+            border_color: [c0, c1, 0.0, 0.0],
+            clip: [0.0; 4],
+            params: [0.0, 0.0, 0.0, KIND_GLYPH],
+        };
+        self.push(TextureId::Atlas, instance_bounds(&inst), inst);
     }
 
     /// Line segment with round caps, in the current canvas's coordinates.
@@ -315,9 +390,21 @@ impl DrawList {
     /// these. `width` scales with the canvas zoom like every other dimension;
     /// divide by the zoom for a hairline that stays one pixel wide.
     pub fn line(&mut self, a: Vec2, b: Vec2, width: f32, color: Color) {
+        self.dashed_line(a, b, width, color, Dash::new(0.0, 0.0));
+    }
+
+    /// [`DrawList::line`] drawn `dash.on` on, `dash.off` off, starting
+    /// `dash.phase` into the pattern at `a`. Still one instance per segment
+    /// (or per strip of a long diagonal): the shader skips the gaps.
+    pub fn dashed_line(&mut self, a: Vec2, b: Vec2, width: f32, color: Color, dash: Dash) {
         let t = self.xform();
         let (a, b) = (t.point(a), t.point(b));
         let hw = (width * t.zoom * 0.5).max(0.05);
+        let pattern = if dash.is_dashed() {
+            [dash.on * t.zoom, dash.off * t.zoom, dash.phase * t.zoom]
+        } else {
+            [0.0; 3]
+        };
         // A segment's quad is its bounding box, which for a long diagonal is
         // enormous next to the line itself: an 800x600 diagonal rasterises
         // ~480k fragments to draw a 2px line, nearly all of them discarded.
@@ -332,7 +419,7 @@ impl DrawList {
         let pad = hw + 2.0;
         if k == 1 {
             let bounds = Rect::new(a.x.min(b.x) - pad, a.y.min(b.y) - pad, dx + pad * 2.0, dy + pad * 2.0);
-            self.segment(a, b, hw, color, bounds);
+            self.segment(a, b, hw, color, bounds, pattern);
             return;
         }
 
@@ -371,14 +458,14 @@ impl DrawList {
             let (n0, n1) = (across(e0 - pad), across(e1 + pad));
             let (c0, c1) = (n0.min(n1) - pad, n0.max(n1) + pad);
             let bounds = if along_x { Rect::new(e0, c0, e1 - e0, c1 - c0) } else { Rect::new(c0, e0, c1 - c0, e1 - e0) };
-            self.segment(a, b, hw, color, bounds);
+            self.segment(a, b, hw, color, bounds, pattern);
             e0 = e1;
         }
     }
 
     /// One `Line` instance for the segment `a`-`b`, drawn over `bounds`
     /// (already in window coordinates).
-    fn segment(&mut self, a: Vec2, b: Vec2, hw: f32, color: Color, bounds: Rect) {
+    fn segment(&mut self, a: Vec2, b: Vec2, hw: f32, color: Color, bounds: Rect, [on, off, phase]: [f32; 3]) {
         self.push(
             TextureId::Atlas,
             bounds,
@@ -386,9 +473,9 @@ impl DrawList {
                 rect: [bounds.x, bounds.y, bounds.w, bounds.h],
                 uv: [a.x, a.y, b.x, b.y],
                 color: color.to_array(),
-                border_color: [0.0; 4],
+                border_color: [phase, 0.0, 0.0, 0.0],
                 clip: [0.0; 4],
-                params: [hw, 0.0, 0.0, KIND_LINE],
+                params: [hw, on, off, KIND_LINE],
             },
         );
     }
@@ -415,19 +502,34 @@ impl DrawList {
         tint: Color,
         alpha: crate::render_contract::ImageAlpha,
     ) {
+        self.image_rotated(r, texture, uv, radius, tint, alpha, Rotation::NONE);
+    }
+
+    /// [`DrawList::image_alpha`] turned by `rot` about the centre of `r`: a
+    /// knob, a compass needle, a spinner. The rounded-corner mask turns with
+    /// it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn image_rotated(
+        &mut self,
+        r: Rect,
+        texture: TextureId,
+        uv: [f32; 4],
+        radius: f32,
+        tint: Color,
+        alpha: crate::render_contract::ImageAlpha,
+        rot: Rotation,
+    ) {
         let t = self.xform();
         let (r, radius) = (t.rect(r), radius * t.zoom);
-        self.push(
-            texture,
-            r,
-            Instance {
-                rect: [r.x, r.y, r.w, r.h],
-                uv,
-                color: tint.to_array(),
-                border_color: [0.0; 4],
-                clip: [0.0; 4],
-                params: [radius, alpha.code(), 0.0, KIND_IMAGE],
-            },
-        );
+        let [c0, c1] = rot.code();
+        let inst = Instance {
+            rect: [r.x, r.y, r.w, r.h],
+            uv,
+            color: tint.to_array(),
+            border_color: [c0, c1, 0.0, 0.0],
+            clip: [0.0; 4],
+            params: [radius, alpha.code(), 0.0, KIND_IMAGE],
+        };
+        self.push(texture, instance_bounds(&inst), inst);
     }
 }

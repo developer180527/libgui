@@ -14,7 +14,7 @@ fn info() -> FrameInfo {
     FrameInfo { screen_size: Vec2::new(600.0, 400.0), scale: 2.0, dt: 1.0 / 60.0 }
 }
 
-/// A panel written the way the README says to write one.
+/// A panel written the way IN_DEPTH.md ("The same guards, for your panels") says to write one.
 fn good(ui: &mut Ui, names: &[String]) {
     ui.heading("Outliner");
     ui.virtual_list("objects", names.len(), 24.0, |ui, i| {

@@ -50,7 +50,7 @@
 use std::ops::Range;
 
 use crate::draw::{DrawList, Instance, TextureId};
-use crate::render_contract::PrimitiveKind;
+use crate::render_contract::{PrimitiveKind, Rotation};
 
 /// Vertices and indices per expanded primitive.
 pub const VERTICES_PER_QUAD: usize = 4;
@@ -250,7 +250,21 @@ impl Mesh {
         // `vs_main`, exactly: shapes grow by their softness plus a pixel of
         // room for anti-aliasing, and nothing else does. Getting this wrong is
         // how a hand-written expansion clips the edge off every shadow.
-        let pad = if kind == PrimitiveKind::Shape { inst.params[2] + 1.0 } else { 0.0 };
+        // A rotated image or glyph turns its corners about the centre; `local`
+        // and `uv` stay the upright quad's, as `vs_main` leaves them. A turned
+        // image also gets a pixel of room to anti-alias its edge.
+        let rot = match kind {
+            PrimitiveKind::Image | PrimitiveKind::Glyph => Rotation::from_code([inst.border_color[0], inst.border_color[1]]),
+            _ => Rotation::NONE,
+        };
+        let turned_image = kind == PrimitiveKind::Image && !rot.is_none();
+        let pad = if kind == PrimitiveKind::Shape {
+            inst.params[2] + 1.0
+        } else if turned_image {
+            1.0
+        } else {
+            0.0
+        };
         let [rx, ry, rw, rh] = inst.rect;
         let half_size = [rw * 0.5, rh * 0.5];
         let center = [rx + half_size[0], ry + half_size[1]];
@@ -261,10 +275,12 @@ impl Mesh {
         // bottom-left, bottom-right.
         for (cx, cy) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
             let local = [(cx * 2.0 - 1.0) * ext[0], (cy * 2.0 - 1.0) * ext[1]];
+            let turned = if rot.is_none() { local } else { rot.apply(local) };
+            let (ux, uy) = if turned_image { uv_at(local, half_size) } else { (cx, cy) };
             self.vertices.push(Vertex {
-                pos: [center[0] + local[0], center[1] + local[1]],
+                pos: [center[0] + turned[0], center[1] + turned[1]],
                 local,
-                uv: [mix(inst.uv[0], inst.uv[2], cx), mix(inst.uv[1], inst.uv[3], cy)],
+                uv: [mix(inst.uv[0], inst.uv[2], ux), mix(inst.uv[1], inst.uv[3], uy)],
                 color: inst.color,
                 border_color: inst.border_color,
                 clip: inst.clip,
@@ -279,6 +295,20 @@ impl Mesh {
 
 fn mix(a: f32, b: f32, t: f32) -> f32 {
     a * (1.0 - t) + b * t
+}
+
+/// Where on the texture a point `local` from the centre falls, as a 0..1
+/// fraction across the upright rect: `vs_main`'s `cuv` for a padded turned
+/// image.
+fn uv_at(local: [f32; 2], half: [f32; 2]) -> (f32, f32) {
+    (local[0] / half[0].max(1e-6) * 0.5 + 0.5, local[1] / half[1].max(1e-6) * 0.5 + 0.5)
+}
+
+/// `vs_main`'s texture fraction for a padded turned image, for a renderer
+/// that ports the vertex stage (the CPU reference does).
+pub fn uv_fraction(local: [f32; 2], half: [f32; 2]) -> [f32; 2] {
+    let (u, v) = uv_at(local, half);
+    [u, v]
 }
 
 #[cfg(test)]

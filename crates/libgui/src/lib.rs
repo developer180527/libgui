@@ -53,8 +53,8 @@ pub use backend::{Backend, Globals, INSTANCE_STRIDE, VERTICES_PER_INSTANCE};
 pub use dock::{DockConfig, FloatingMode, DockNode, DockState, DropKind, DropTarget, Side, Surface, SurfaceId, TabViewer};
 pub use dock_layout::{DockLayout, LayoutError, NodeLayout, Restored, SurfaceLayout};
 pub use dnd::{DragSource, DropZone, Payload};
-pub use draw::{Batch, DrawList, Instance, TextureId};
-pub use render_contract::ImageAlpha;
+pub use draw::{Batch, Dash, DrawList, Instance, TextureId};
+pub use render_contract::{ImageAlpha, Rotation};
 pub use path::{FillRule, Path};
 pub use id::{Id, StableHasher};
 pub use input::{
@@ -62,7 +62,7 @@ pub use input::{
     PointerKind, Shortcut, Touch, TouchPhase, UiAction, VirtualCursor, WheelUnit,
 };
 pub use layout::{Align, Axis, Insets, Layout, Size};
-pub use math::{Color, Rect, Transform, Vec2};
+pub use math::{sin_cos, Color, Rect, Transform, Vec2};
 pub use validated::{FieldError, ValidatedOptions, ValidatedResponse};
 pub use color_picker::{ColorPickerOptions, ColorPickerResponse};
 pub use toast::{Toast, ToastCorner, ToastId, ToastKind, ToastOptions, ToastResponse};

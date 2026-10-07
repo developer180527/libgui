@@ -2264,3 +2264,170 @@ fn a_c_toast_reports_its_action_and_sleeps_until_due() {
         libgui_ui_free(u);
     }
 }
+
+/// What a C caller could not reach before: a custom widget that is a Tab
+/// stop, focus itself, raw key and button state, and the rest of the gaps a
+/// parity sweep found against the Rust API.
+#[test]
+fn a_c_custom_widget_is_a_focus_stop_and_reads_the_keyboard() {
+    unsafe {
+        let u = ui();
+        // Tab means "next focus stop" only because a keymap says so — and on
+        // a Mac by default it skips controls, so ask for Windows rules.
+        assert_eq!(libgui_install_keymap(u, PLATFORM_WINDOWS), 0);
+        let knob = 77u64;
+        let mut seen_focus = false;
+        let mut tab_pressed = false;
+        for pass in 0..4 {
+            if pass == 2 {
+                libgui_push_key(u, KEY_TAB, 1, std::mem::zeroed());
+            }
+            frame(u, || {
+                libgui_add_leaf(u, knob, leaf_layout(40.0, 40.0), 1, LibguiPaintFn { paint: None, drop_user: None, user: std::ptr::null_mut() });
+                let r = libgui_interact_focusable(u, knob, 0);
+                seen_focus |= r.focused != 0;
+                tab_pressed |= libgui_key_pressed(u, KEY_TAB as u64) != 0;
+            });
+        }
+        assert!(tab_pressed, "a pressed key was not visible to C");
+        libgui_push_key(u, KEY_TAB, 0, 0);
+        assert!(seen_focus && libgui_focused(u) == knob, "Tab did not reach a focusable C widget");
+        libgui_set_focus(u, 0);
+        assert_eq!(libgui_focused(u), 0);
+        libgui_set_focus(u, knob);
+        assert_eq!(libgui_focused(u), knob);
+
+        // Pointer state, hover time and a drag sense.
+        libgui_push_pointer_moved(u, 20.0, 20.0);
+        libgui_push_pointer_button(u, 0, 1);
+        let (mut down, mut pressed, mut active) = (0, 0, 0);
+        frame(u, || {
+            libgui_add_leaf(u, knob, leaf_layout(40.0, 40.0), 1, LibguiPaintFn { paint: None, drop_user: None, user: std::ptr::null_mut() });
+            active = libgui_interact_drag(u, knob).active;
+            down = libgui_pointer_button_down(u, 0);
+            pressed = libgui_pointer_button_pressed(u, 0);
+            assert_eq!(libgui_key_down(u, KEY_TAB as u64), 0);
+        });
+        assert_eq!((down, pressed, active), (1, 1, 1), "the press did not reach C");
+        libgui_push_pointer_button(u, 0, 0);
+        for _ in 0..30 {
+            frame(u, || {
+                libgui_add_leaf(u, knob, leaf_layout(40.0, 40.0), 1, LibguiPaintFn { paint: None, drop_user: None, user: std::ptr::null_mut() });
+                libgui_interact(u, knob);
+            });
+        }
+        let mut rest = 0.0;
+        frame(u, || {
+            libgui_add_leaf(u, knob, leaf_layout(40.0, 40.0), 1, LibguiPaintFn { paint: None, drop_user: None, user: std::ptr::null_mut() });
+            rest = libgui_hover_time(u, knob);
+        });
+        assert!(rest > 0.3, "hover time {rest}");
+
+        // The widgets that had no C name.
+        let mut drag = 5.0f32;
+        let mut pane = 200.0f32;
+        let trace = [1.0f32, 3.0, 2.0];
+        frame(u, || {
+            let r = libgui_radio(u, c("Metric").as_ptr(), 1);
+            assert_eq!(r.clicked, 0);
+            libgui_drag_value_range(u, c("Depth").as_ptr(), &mut drag, 1.0, 0.0, 10.0);
+            libgui_splitter(u, c("side").as_ptr(), &mut pane, 1, 0, 100.0, 300.0);
+            libgui_plot(u, c("ms").as_ptr(), trace.as_ptr(), 3, 4.0, 40.0);
+            libgui_plot(u, c("none").as_ptr(), std::ptr::null(), 0, 1.0, 20.0);
+            libgui_insertion_line(u, knob, 0, 1);
+            libgui_request_pointer_lock(u);
+        });
+        assert_eq!((drag, pane), (5.0, 200.0), "untouched widgets wrote their values");
+
+        // A drag from outside the app.
+        libgui_begin_external_drag(u, c("file").as_ptr(), 9, c("part.step").as_ptr());
+        frame(u, || {
+            assert!(!libgui_dragging(u).is_null(), "the outside drag is not visible");
+            libgui_drag_ghost(u);
+        });
+        libgui_end_external_drag(u, 0);
+        frame(u, || assert!(libgui_dragging(u).is_null()));
+        assert_eq!(libgui_ui_poisoned(u), 0);
+        libgui_ui_free(u);
+    }
+}
+
+/// A virtual list from C builds only the window it reports.
+#[test]
+fn a_c_virtual_list_builds_only_what_shows() {
+    unsafe {
+        let u = ui();
+        let (mut first, mut end) = (0u64, 0u64);
+        let mut built = 0;
+        for _ in 0..3 {
+            built = 0;
+            frame(u, || {
+                libgui_open_virtual_list(u, c("rows").as_ptr(), 1_000_000, 24.0, &mut first, &mut end);
+                for i in first..end {
+                    libgui_open_virtual_row(u, i);
+                    libgui_label(u, c("row").as_ptr());
+                    libgui_close_virtual_row(u);
+                    built += 1;
+                }
+                libgui_close_virtual_list(u);
+            });
+        }
+        assert_eq!(first, 0);
+        assert!(end > 5 && end < 40, "a 300 px window built {end} of a million rows");
+        assert_eq!(built, end);
+        frame(u, || {
+            libgui_open_virtual_list(u, c("x").as_ptr(), 3, 24.0, std::ptr::null_mut(), std::ptr::null_mut());
+            libgui_close_virtual_list(u);
+        });
+        libgui_ui_free(u);
+    }
+}
+
+/// Dashes and rotation from C: the calls reach the draw list with the pattern
+/// and the turn encoded as the render contract says, and the contract
+/// version a hand-ported shader checks is the library's.
+#[test]
+fn c_dashes_and_rotation_reach_the_instances() {
+    extern "C" fn paint(p: *mut LibguiPainter, r: LibguiRect, user: *mut c_void) {
+        let white = LibguiColor { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
+        let pts = [r.x, r.y + 20.0, r.x + 30.0, r.y + 20.0, r.x + 30.0, r.y + 60.0];
+        unsafe {
+            libgui_painter_dashed_line(p, r.x, r.y + 4.0, r.x + 100.0, r.y + 4.0, 2.0, white, 6.0, 3.0, 1.5);
+            let end = libgui_painter_dashed_polyline(p, pts.as_ptr(), 3, 1.0, white, 4.0, 4.0, 0.0);
+            *(user as *mut f32) = end;
+            let img = LibguiRect { x: r.x + 120.0, y: r.y, w: 40.0, h: 20.0 };
+            libgui_painter_image_rotated(p, img, 3, 0.0, 0.0, 1.0, 1.0, 4.0, white, 2, std::f32::consts::FRAC_PI_2);
+            libgui_painter_text_rotated(p, r.x + 200.0, r.y + 40.0, 13.0, white, c("Height").as_ptr(), -std::f32::consts::FRAC_PI_2);
+            // Nulls.
+            assert_eq!(libgui_painter_dashed_polyline(p, std::ptr::null(), 3, 1.0, white, 4.0, 4.0, 2.5), 2.5);
+            libgui_painter_dashed_line(std::ptr::null_mut(), 0.0, 0.0, 1.0, 1.0, 1.0, white, 1.0, 1.0, 0.0);
+            libgui_painter_image_rotated(std::ptr::null_mut(), img, 3, 0.0, 0.0, 1.0, 1.0, 0.0, white, 0, 1.0);
+            libgui_painter_text_rotated(p, 0.0, 0.0, 13.0, white, std::ptr::null(), 1.0);
+        }
+    }
+    assert_eq!(libgui_contract_version(), libgui::render_contract::CONTRACT_VERSION);
+    unsafe {
+        let u = ui();
+        let mut end = 0.0f32;
+        frame(u, || {
+            let cb = LibguiPaintFn { paint: Some(paint), drop_user: None, user: &mut end as *mut f32 as *mut c_void };
+            libgui_add_leaf(u, 9, leaf_layout(300.0, 100.0), 0, cb);
+        });
+        assert_eq!(end, 70.0, "the dashed polyline did not return the length it drew");
+        let mut n = 0u64;
+        let inst = libgui_frame_instances(u, &mut n) as *const libgui::Instance;
+        let inst = std::slice::from_raw_parts(inst, n as usize);
+        let kind = |i: &libgui::Instance| libgui::render_contract::PrimitiveKind::from_code(i.params[3]);
+        use libgui::render_contract::PrimitiveKind::*;
+        let dashed: Vec<_> = inst.iter().filter(|i| kind(i) == Some(Line) && i.params[1] > 0.0).collect();
+        assert!(dashed.iter().any(|i| i.params[1] == 6.0 && i.params[2] == 3.0 && i.border_color[0] == 1.5), "the dashed line's pattern did not reach its instance");
+        assert!(dashed.iter().any(|i| i.params[1] == 4.0 && i.border_color[0] == 30.0), "the polyline's second segment did not start where the first left off");
+        let image = inst.iter().find(|i| kind(i) == Some(Image)).expect("no image instance");
+        let rot = libgui::Rotation::from_code([image.border_color[0], image.border_color[1]]);
+        assert!((rot.sin - 1.0).abs() < 1e-6 && rot.cos.abs() < 1e-6, "the image is not a quarter turn: {rot:?}");
+        let turned_glyphs = inst.iter().filter(|i| kind(i) == Some(Glyph) && i.border_color[1] < -0.99).count();
+        assert_eq!(turned_glyphs, "Height".len(), "the turned text's glyphs are not all turned");
+        assert_eq!(libgui_ui_poisoned(u), 0);
+        libgui_ui_free(u);
+    }
+}

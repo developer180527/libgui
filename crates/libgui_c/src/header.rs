@@ -67,6 +67,13 @@ const PREAMBLE: &str = r##"/* libgui — C ABI.
  *    libgui_painter_image_uv (pass 1 then 0).
  *  - NO depth test, NO culling, NO scissor: clipping is per-instance, in the
  *    fragment shader.
+ *  - THE CONTRACT VERSION: libgui_contract_version(). A port of the shader is
+ *    a port of one version. Version 4 added dashed lines (a line's
+ *    params[1..3] and border_color[0]) and turned images and glyphs
+ *    (border_color[0..2] = cos-1, sin). The expanded mesh turns its quads on
+ *    the CPU, so a mesh-path port needs only the dash test in its fragment
+ *    stage; an instancing port also turns the quad in its vertex stage. Zero
+ *    in every new field means what it always did.
  *
  * And the order within a frame, which matters to anyone rendering a scene
  * into a texture the UI shows:
@@ -221,6 +228,7 @@ typedef struct {
 } LibguiPaintFn;
 
 uint64_t       libgui_id_from_name(const char* name);
+uint32_t       libgui_contract_version(void);
 void           libgui_open_container(LibguiUi* ui, uint64_t id, LibguiLayout layout, LibguiFrame frame);
 void           libgui_close_container(LibguiUi* ui);
 uint64_t       libgui_open_depth(LibguiUi* ui);
@@ -264,6 +272,19 @@ void libgui_painter_image_tinted(LibguiPainter* p, LibguiRect r, uint64_t textur
                                  float u0, float v0, float u1, float v1, float radius, LibguiColor tint);
 /* `points` is `count` pairs of floats. */
 void libgui_painter_polyline(LibguiPainter* p, const float* points, uint64_t count, float width, LibguiColor c);
+/* Dashed: `on` drawn, `off` skipped, from `phase` into the pattern at the
+ * first point. Zero for `on` or `off` is solid. The polyline's pattern runs on
+ * across its joins, and it returns the phase at its last point. Dash ends are
+ * square; one instance per segment, like a solid line. */
+void  libgui_painter_dashed_line(LibguiPainter* p, float x0, float y0, float x1, float y1, float width,
+                                 LibguiColor c, float on, float off, float phase);
+float libgui_painter_dashed_polyline(LibguiPainter* p, const float* points, uint64_t count, float width,
+                                     LibguiColor c, float on, float off, float phase);
+/* Turned by `radians` about the centre, clockwise on screen (-M_PI/2 reads
+ * bottom to top). Text is centred on (cx, cy); upright text is snapped to the
+ * pixel grid and turned text cannot be, so it is a shade softer. */
+void libgui_painter_text_rotated(LibguiPainter* p, float cx, float cy, float size, LibguiColor c,
+                                 const char* text, float radians);
 void libgui_painter_bezier(LibguiPainter* p, float x0, float y0, float cx0, float cy0,
                            float cx1, float cy1, float x1, float y1, float width, LibguiColor c);
 /* Leaves sideways and arrives sideways, the way a node graph draws a link. */
@@ -315,6 +336,11 @@ void libgui_painter_image_uv(LibguiPainter* p, LibguiRect r, uint64_t texture,
 void libgui_painter_image_alpha(LibguiPainter* p, LibguiRect r, uint64_t texture,
                                 float u0, float v0, float u1, float v1,
                                 float radius, LibguiColor tint, uint32_t alpha);
+/* libgui_painter_image_alpha turned by `radians` about the centre of r: a
+ * knob, a compass needle, a spinner. The rounded corners turn with it. */
+void libgui_painter_image_rotated(LibguiPainter* p, LibguiRect r, uint64_t texture,
+                                  float u0, float v0, float u1, float v1,
+                                  float radius, LibguiColor tint, uint32_t alpha, float radians);
 
 /* Fill an outline: an icon drawn rather than loaded. Coordinates run from
  * (0,0) to (view_w, view_h) -- a 24x24 box for a typical icon set -- and are
@@ -762,6 +788,11 @@ typedef struct {
 uint8_t     libgui_drag_source(LibguiUi* ui, uint64_t id, const char* kind, uint64_t value, const char* label);
 void        libgui_drop_zone(LibguiUi* ui, const char* const* kinds, uint64_t count, LibguiDropZone* out);
 const char* libgui_dragging(LibguiUi* ui);   /* NULL when nothing is */
+/* A drag from outside the app (a file from the OS) arriving over this window;
+ * drop zones that accept `kind` light up. End it with dropped 1 when it was
+ * dropped here, 0 when it left. */
+void        libgui_begin_external_drag(LibguiUi* ui, const char* kind, uint64_t value, const char* label);
+void        libgui_end_external_drag(LibguiUi* ui, uint8_t dropped);
 void        libgui_cancel_drag(LibguiUi* ui);
 
 /* --- A tree of any size ---------------------------------------------------- */
@@ -1109,6 +1140,8 @@ void  libgui_request_repaint(LibguiUi* ui);
 /* Ask for a frame in `seconds`, not now -- a countdown reaching zero. The
  * host may sleep until then; it arrives as repaint_after. */
 void  libgui_request_repaint_in(LibguiUi* ui, float seconds);
+/* A line plot of `count` values from 0 to `max`, `height` logical px tall. */
+void  libgui_plot(LibguiUi* ui, const char* label, const float* values, uint64_t count, float max, float height);
 /* Keep an id's retained state alive for a frame in which no widget with that
  * id was built -- a row scrolled out of a list, a panel behind a tab. libgui
  * forgets an id it did not see. The libgui_animate* calls do this for you. */

@@ -202,8 +202,13 @@ vertex stage.
   coverage in the glyph atlas tinted with the second colour, stretched by the
   same bilinear filter that samples glyphs. Exact for an opaque or transparent
   start, two instances, one ramp for every gradient, and a bgfx host got them
-  without a line of its own. Rotation is the counter-example: it cannot be
-  built that way, which is why it is still a decision rather than a feature.
+  without a line of its own. Rotation could not be built that way, but it
+  did not need a new kind or a wider instance either. A turn rides in
+  `border_color`, which images and glyphs never used, as `(cos − 1, sin)`, so
+  an old instance's zeros mean upright. Cosine and sine travel instead of the
+  angle so no renderer evaluates a trigonometric function, and every one turns
+  by exactly the same amount. Dashes ride in a line's spare `params` the same
+  way (contract 4).
 
 ---
 

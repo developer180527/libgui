@@ -30,13 +30,13 @@
 pub mod scenes;
 
 
-use libgui::render_contract::{PrimitiveKind, CONTRACT_VERSION};
+use libgui::render_contract::{PrimitiveKind, Rotation, CONTRACT_VERSION};
 use libgui::{Backend, Color, FrameOutput, Globals, Instance, TextureId};
 use std::collections::HashMap;
 use std::ops::Range;
 
 // This file is a port of the shader for one version of the contract.
-const _: () = assert!(CONTRACT_VERSION == 3, "the contract changed: update libgui_soft to match ui.wgsl");
+const _: () = assert!(CONTRACT_VERSION == 4, "the contract changed: update libgui_soft to match ui.wgsl");
 
 /// An RGBA8 image: what the UI is drawn into. Pixels are premultiplied, like
 /// a GPU framebuffer after the UI pass; with an opaque clear colour (the usual
@@ -294,6 +294,32 @@ fn draw_instance(target: &mut Target, g: &Globals, inst: &Instance, tex: &TexRef
     let (qx0, qx1) = (center[0] - ext[0], center[0] + ext[0]);
     let (qy0, qy1) = (center[1] - ext[1], center[1] + ext[1]);
 
+    // A rotated image or glyph: the quad `vs_main` turns, corner by corner,
+    // exactly as `Mesh` builds it, so the two paths share one rasteriser.
+    if matches!(kind, PrimitiveKind::Image | PrimitiveKind::Glyph) {
+        let rot = Rotation::from_code([inst.border_color[0], inst.border_color[1]]);
+        if !rot.is_none() {
+            // A turned image gets a pixel of room to anti-alias its edge,
+            // with the texture mapping carried past it, as `vs_main` does.
+            let image = kind == PrimitiveKind::Image;
+            let ext = if image { [half[0] + 1.0, half[1] + 1.0] } else { ext };
+            let mut corners = [Corner::default(); 4];
+            for (k, (cx, cy)) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)].into_iter().enumerate() {
+                let local = [(cx * 2.0f32 - 1.0) * ext[0], (cy * 2.0f32 - 1.0) * ext[1]];
+                let turned = rot.apply(local);
+                let [ux, uy] = if image { libgui::mesh::uv_fraction(local, half) } else { [cx, cy] };
+                corners[k] = Corner {
+                    pos: [center[0] + turned[0], center[1] + turned[1]],
+                    local,
+                    uv: [mix(inst.uv[0], inst.uv[2], ux), mix(inst.uv[1], inst.uv[3], uy)],
+                };
+            }
+            let flat = Flat { color: inst.color, border_color: inst.border_color, clip: inst.clip, params: inst.params, half_size: half, seg: inst.uv };
+            draw_turned(target, g, kind, &corners, &flat, tex);
+            return;
+        }
+    }
+
     // Logical to physical pixels, as the viewport transform does it.
     let (w, h) = (target.width as f32, target.height as f32);
     let (sx, sy) = (w / g.screen_size[0], h / g.screen_size[1]);
@@ -368,7 +394,17 @@ fn fragment(kind: PrimitiveKind, v: &Varyings, aa: f32, tex: &TexRef) -> [f32; 4
     match kind {
         PrimitiveKind::Line => {
             let [x0, y0, x1, y1] = v.seg;
-            let d = sd_segment(v.world, [x0, y0], [x1, y1]) - p[0];
+            let mut d = sd_segment(v.world, [x0, y0], [x1, y1]) - p[0];
+            let (on, off) = (p[1], p[2]);
+            if on > 0.0 && off > 0.0 {
+                let ba = [x1 - x0, y1 - y0];
+                let len = length(ba).max(1e-6);
+                let s = ((v.world[0] - x0) * ba[0] + (v.world[1] - y0) * ba[1]) / len + v.border_color[0];
+                let period = on + off;
+                let m = s - (s / period).floor() * period;
+                let along = if m < on { -(m.min(on - m)) } else { (m - on).min(period - m) };
+                d = d.max(along);
+            }
             let m = clamp01(0.5 - d / aa);
             scale4(premul(v.color), m)
         }
@@ -428,6 +464,20 @@ fn draw_quad(target: &mut Target, g: &Globals, verts: &[libgui::mesh::Vertex], t
     // Corners in `Mesh::build`'s order: top-left, top-right, bottom-left,
     // bottom-right.
     let (v0, v3) = (&verts[0], &verts[3]);
+    // Turned: not an upright axis-aligned rectangle any more. The order counts
+    // as well as the alignment: a half turn's corners line up again, but the
+    // first one is then the bottom-right.
+    let upright = verts[1].pos[1] == v0.pos[1]
+        && verts[2].pos[0] == v0.pos[0]
+        && verts[1].pos[0] > v0.pos[0]
+        && verts[2].pos[1] > v0.pos[1];
+    if !upright {
+        let corner = |v: &libgui::mesh::Vertex| Corner { pos: v.pos, local: v.local, uv: v.uv };
+        let corners = [corner(&verts[0]), corner(&verts[1]), corner(&verts[2]), corner(&verts[3])];
+        let flat = Flat { color: v0.color, border_color: v0.border_color, clip: v0.clip, params: v0.params, half_size: v0.half_size, seg: v0.seg };
+        draw_turned(target, g, kind, &corners, &flat, tex);
+        return;
+    }
     let (qx0, qy0) = (v0.pos[0], v0.pos[1]);
     let (qx1, qy1) = (v3.pos[0], v3.pos[1]);
     let (dx, dy) = (qx1 - qx0, qy1 - qy0);
@@ -473,6 +523,96 @@ fn draw_quad(target: &mut Target, g: &Globals, verts: &[libgui::mesh::Vertex], t
                 params: v0.params,
                 half_size: v0.half_size,
                 seg: v0.seg,
+            };
+            let src = fragment(kind, &vary, aa, tex);
+            if src[3] <= 0.0 && src[0] <= 0.0 && src[1] <= 0.0 && src[2] <= 0.0 {
+                continue;
+            }
+            blend(&mut target.data[row + px as usize * 4..row + px as usize * 4 + 4], src);
+        }
+    }
+}
+
+/// One corner of a quad that is not axis-aligned: where it is, and the
+/// varyings that interpolate across it.
+#[derive(Clone, Copy, Default)]
+struct Corner {
+    pos: [f32; 2],
+    local: [f32; 2],
+    uv: [f32; 2],
+}
+
+/// The varyings that are the same at every corner.
+struct Flat {
+    color: [f32; 4],
+    border_color: [f32; 4],
+    clip: [f32; 4],
+    params: [f32; 4],
+    half_size: [f32; 2],
+    seg: [f32; 4],
+}
+
+/// Rasterise a turned quad — corners top-left, top-right, bottom-left,
+/// bottom-right of the upright quad — interpolating `local` and `uv` the way
+/// a GPU does across a parallelogram: as an affine function of position.
+///
+/// A pixel is drawn when its centre is inside, with the two edges leaving the
+/// first corner inclusive and the other two exclusive, which is the top-left
+/// rule restated for edges that are not horizontal or vertical.
+fn draw_turned(target: &mut Target, g: &Globals, kind: PrimitiveKind, c: &[Corner; 4], f: &Flat, tex: &TexRef) {
+    let p0 = c[0].pos;
+    let e1 = [c[1].pos[0] - p0[0], c[1].pos[1] - p0[1]];
+    let e2 = [c[2].pos[0] - p0[0], c[2].pos[1] - p0[1]];
+    let det = e1[0] * e2[1] - e1[1] * e2[0];
+    if det == 0.0 || !det.is_finite() {
+        return;
+    }
+    let (w, h) = (target.width as f32, target.height as f32);
+    let (sx, sy) = (w / g.screen_size[0], h / g.screen_size[1]);
+    let xs_all = [c[0].pos[0], c[1].pos[0], c[2].pos[0], c[3].pos[0]];
+    let ys_all = [c[0].pos[1], c[1].pos[1], c[2].pos[1], c[3].pos[1]];
+    let fold = |v: [f32; 4], min: bool| v.into_iter().fold(v[0], |a, b| if min { a.min(b) } else { a.max(b) });
+    let span = |a: f32, b: f32, n: u32| -> Range<u32> {
+        let lo = (a - 0.5).ceil().max(0.0);
+        let hi = (b - 0.5).ceil().min(n as f32);
+        if hi <= lo {
+            0..0
+        } else {
+            lo as u32..hi as u32
+        }
+    };
+    let xs = span(fold(xs_all, true) * sx, fold(xs_all, false) * sx, target.width);
+    let ys = span(fold(ys_all, true) * sy, fold(ys_all, false) * sy, target.height);
+    let clip = f.clip;
+    let aa = 1.0 / g.scale;
+    for py in ys {
+        let wy = (py as f32 + 0.5) / sy;
+        if wy < clip[1] || wy > clip[3] {
+            continue;
+        }
+        let row = (py * target.width) as usize * 4;
+        for px in xs.clone() {
+            let wx = (px as f32 + 0.5) / sx;
+            if wx < clip[0] || wx > clip[2] {
+                continue;
+            }
+            // Where the pixel is in the quad's own frame: world - p0 = a e1 + b e2.
+            let (dx, dy) = (wx - p0[0], wy - p0[1]);
+            let a = (dx * e2[1] - dy * e2[0]) / det;
+            let b = (e1[0] * dy - e1[1] * dx) / det;
+            if !(0.0..1.0).contains(&a) || !(0.0..1.0).contains(&b) {
+                continue;
+            }
+            let lerp2 = |p: [f32; 2], q: [f32; 2], r: [f32; 2]| [p[0] + a * (q[0] - p[0]) + b * (r[0] - p[0]), p[1] + a * (q[1] - p[1]) + b * (r[1] - p[1])];
+            let vary = Varyings {
+                world: [wx, wy],
+                local: lerp2(c[0].local, c[1].local, c[2].local),
+                uv: lerp2(c[0].uv, c[1].uv, c[2].uv),
+                color: f.color,
+                border_color: f.border_color,
+                params: f.params,
+                half_size: f.half_size,
+                seg: f.seg,
             };
             let src = fragment(kind, &vary, aa, tex);
             if src[3] <= 0.0 && src[0] <= 0.0 && src[1] <= 0.0 && src[2] <= 0.0 {

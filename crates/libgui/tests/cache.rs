@@ -475,3 +475,54 @@ fn closing_a_popup_body_that_never_opened_is_refused() {
     ui.open_container(Id::new("panel"), Layout::column(), Frame::none());
     ui.close_popup_body();
 }
+
+/// Lines carry their endpoints in `uv`, not just in their rect. A moved
+/// replay that shifted only the rect drew every line at its old place, where
+/// the new rect's quad no longer covers it: the lines of a cached panel
+/// vanished the moment it moved. Dashed lines, whose pattern is measured from
+/// the first endpoint, and turned text go through the same path.
+///
+/// Compared to a thousandth of a pixel rather than to the byte: a turned
+/// glyph's corner is worked out from absolute coordinates, and the same sum
+/// 32 px lower can round differently in the last bit.
+#[test]
+fn a_moved_replay_takes_its_lines_and_turned_text_with_it() {
+    let frame = |ui: &mut Ui, pad: f32, cache: bool| -> Vec<Instance> {
+        ui.begin_frame(info());
+        ui.space(pad);
+        let build = |ui: &mut Ui| {
+            ui.add_leaf(Id::new("drawing"), Layout::leaf(Size::Fixed(120.0), Size::Fixed(60.0)), Vec2::ZERO, false, |p, r| {
+                p.line(Vec2::new(r.x + 4.0, r.y + 4.0), Vec2::new(r.right() - 4.0, r.y + 4.0), 2.0, Color::WHITE);
+                p.dashed_line(Vec2::new(r.x + 4.0, r.y + 12.0), Vec2::new(r.right() - 4.0, r.bottom() - 4.0), 1.0, Color::WHITE, Dash::even(4.0));
+                p.text_rotated(Vec2::new(r.x + 60.0, r.y + 40.0), 12.0, Color::WHITE, "label", 0.4);
+            });
+        };
+        if cache {
+            ui.cached("drawing", 0, build);
+        } else {
+            ui.container(Layout::column().width(Size::Fit).height(Size::Fit), Frame::none(), build);
+        }
+        ui.end_frame().draw.instances.clone()
+    };
+    let same = |a: &[Instance], b: &[Instance]| {
+        assert_eq!(a.len(), b.len(), "the moved replay drew a different number of instances");
+        for (i, (x, y)) in a.iter().zip(b).enumerate() {
+            let fields = [("rect", x.rect, y.rect), ("uv", x.uv, y.uv), ("color", x.color, y.color), ("border_color", x.border_color, y.border_color), ("params", x.params, y.params)];
+            for (name, p, q) in fields {
+                for k in 0..4 {
+                    assert!((p[k] - q[k]).abs() < 1e-3, "instance {i} (kind {}): {name} is {p:?} replayed, {q:?} built", x.params[3]);
+                }
+            }
+        }
+    };
+    let (mut a, mut b) = (ui(), ui());
+    for _ in 0..6 {
+        same(&frame(&mut a, 10.0, true), &frame(&mut b, 10.0, false));
+    }
+    assert_eq!(a.profile().cached_hits, 1, "expected it to be caching before it moved");
+    for step in 1..4 {
+        let pad = 10.0 + 32.0 * step as f32;
+        same(&frame(&mut a, pad, true), &frame(&mut b, pad, false));
+        assert_eq!(a.profile().cached_hits, 1);
+    }
+}

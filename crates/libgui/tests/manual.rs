@@ -224,3 +224,31 @@ fn springs(ui: &mut Ui, id: Id, drawer_open: bool, target_x: f32, x: f32, r: Res
     }
     let _ = Spring::SNAPPY.value_at(0.1);
 }
+
+#[allow(dead_code)]
+fn virtual_pair(ui: &mut Ui, names: &[String]) {
+    for i in ui.open_virtual_list("objects", names.len(), ListOptions::new(24.0)) {
+        ui.open_virtual_row(i);
+        ui.label(&names[i]);
+        ui.close_virtual_row();
+    }
+    ui.close_virtual_list();
+}
+
+#[allow(dead_code)]
+fn dashes(p: &mut Painter, a: Vec2, b: Vec2, outline: &[Vec2], ink: Color, t: f32) {
+    p.dashed_line(a, b, 1.0, ink, Dash::even(4.0));                  // construction line
+    p.dashed_line(a, b, 2.0, ink, Dash::dotted(2.0));                // dotted
+    p.dashed_polyline(outline, 1.0, ink, Dash::new(6.0, 3.0));       // hidden edge
+    p.dashed_line(a, b, 1.0, ink, Dash::even(4.0).phase(t * 20.0));  // marching ants
+}
+
+fn angle_of(a: Vec2, b: Vec2) -> f32 { (b.y - a.y).atan2(b.x - a.x) }
+
+#[allow(dead_code, clippy::too_many_arguments)]
+fn turned(p: &mut Painter, r: Rect, knob_tex: TextureId, axis_mid: Vec2, a: Vec2, b: Vec2, ink: Color, angle: f32) {
+    use std::f32::consts::FRAC_PI_2;
+    p.image_rotated(r, knob_tex, [0.0, 0.0, 1.0, 1.0], 0.0, Color::WHITE, ImageAlpha::Straight, angle);
+    p.text_rotated(axis_mid, 12.0, ink, "Height (mm)", -FRAC_PI_2);   // reads bottom to top
+    p.text_rotated((a + b) * 0.5, 11.0, ink, "42.0 mm", angle_of(a, b)); // along a dimension line
+}

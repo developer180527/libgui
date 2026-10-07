@@ -884,6 +884,47 @@ impl FontsInner {
             x += sg.advance;
         }
     }
+
+    /// One line of text centred on `center` and turned by `rot` about it.
+    ///
+    /// Each glyph is placed where it would sit in the upright line, that
+    /// position is turned about the centre, and the glyph is drawn there
+    /// turned by the same amount. Nothing is snapped: a turned glyph has no
+    /// pixel grid to sit on, and is resampled by the atlas's bilinear filter,
+    /// which reads well for labels but is a shade softer than upright text.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_rotated(&mut self, dl: &mut DrawList, font: FontId, size: f32, center: Vec2, rot: crate::Rotation, color: Color, text: &str) {
+        let s = self.text_scale();
+        let px = self.px(size);
+        let r = self.fit(size, px);
+        let (asc, _) = self.line(font, px);
+        let m = self.measure(font, size, text);
+        self.text_draws += 1;
+        // The upright box's top-left and baseline, in raster px from the centre.
+        let x0 = -m.x * 0.5 * s;
+        let baseline = -m.y * 0.5 * s + asc * r;
+        let mut x = 0.0;
+        let run = self.run(font, px, text);
+        for sg in run.glyphs.iter() {
+            let g = self.glyph(font, sg.face, sg.glyph, px);
+            if g.w > 0.0 {
+                let gx = x0 + (x + sg.offset.x) * r + g.left;
+                let gy = baseline + sg.offset.y * r - (g.bottom + g.h);
+                let (w, h) = (g.w / s, g.h / s);
+                let at = rot.apply([gx / s + w * 0.5, gy / s + h * 0.5]);
+                let c = Vec2::new(center.x + at[0], center.y + at[1]);
+                // Half a texel more on every side, into the empty gutter the
+                // atlas leaves around each glyph: a turned edge then fades to
+                // nothing instead of being cut off mid-texel, and never
+                // samples the glyph packed next to this one.
+                let (du, dv) = ((g.uv[2] - g.uv[0]) / g.w * 0.5, (g.uv[3] - g.uv[1]) / g.h * 0.5);
+                let uv = [g.uv[0] - du, g.uv[1] - dv, g.uv[2] + du, g.uv[3] + dv];
+                let (w, h) = (w + 1.0 / s, h + 1.0 / s);
+                dl.glyph_rotated(Rect::new(c.x - w * 0.5, c.y - h * 0.5, w, h), uv, color, rot);
+            }
+            x += sg.advance;
+        }
+    }
 }
 
 impl Default for FontsInner {
@@ -1029,6 +1070,12 @@ impl Fonts {
 
     pub fn draw(&self, dl: &mut DrawList, font: FontId, size: f32, pos: Vec2, color: Color, text: &str) {
         self.0.borrow_mut().draw(dl, font, size, pos, color, text);
+    }
+
+    /// One line of text centred on `center`, turned by `rot` about it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_rotated(&self, dl: &mut DrawList, font: FontId, size: f32, center: Vec2, rot: crate::Rotation, color: Color, text: &str) {
+        self.0.borrow_mut().draw_rotated(dl, font, size, center, rot, color, text);
     }
 
     // ---- crate-internal ---------------------------------------------------

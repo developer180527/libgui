@@ -27,7 +27,7 @@ pub const LIBGUI_TOUCH_MOVED: u32 = 1;
 pub const LIBGUI_TOUCH_ENDED: u32 = 2;
 pub const LIBGUI_TOUCH_CANCELLED: u32 = 3;
 
-fn button(b: u32) -> PointerButton {
+pub(crate) fn button(b: u32) -> PointerButton {
     match b {
         1 => PointerButton::Secondary,
         2 => PointerButton::Middle,

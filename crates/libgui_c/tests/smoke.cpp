@@ -62,6 +62,9 @@ int main(int argc, char** argv) {
             ui.add_leaf(libgui::id("gizmo"), leaf, true, [&painted](LibguiPainter* p, LibguiRect r) {
                 painted++;
                 libgui_painter_rect(p, r, LibguiColor{1.0f, 0.2f, 0.2f, 1.0f}, 2.0f);
+                LibguiColor ink{1.0f, 1.0f, 1.0f, 1.0f};
+                libgui_painter_dashed_line(p, r.x, r.y, r.x + r.w, r.y, 1.0f, ink, 4.0f, 2.0f, 0.0f);
+                libgui_painter_text_rotated(p, r.x + r.w * 0.5f, r.y + r.h * 0.5f, 11.0f, ink, "dim", 0.3f);
             });
 
             CHECK(ui.open_depth() == 1, "the container stack is wrong inside the guard");
@@ -265,6 +268,19 @@ int main(int argc, char** argv) {
         CHECK(r.action == 0 && ui.toast_count() == 1, "a C++ toast misbehaved");
         ui.dismiss_toast(t);
         CHECK(ui.toast_count() == 0 && !ui.poisoned(), "a C++ toast did not go");
+    }
+
+    {
+        int rows_built = 0;
+        float pane = 200.0f;
+        for (int pass = 0; pass < 2; pass++) {
+            ui.begin_frame(400.0f, 400.0f, 1.0f, 1.0f / 60.0f);
+            ui.splitter("side", pane, true, false, 100.0f, 300.0f);
+            ui.virtual_list("rows", 100000, 24.0f, [&](uint64_t) { ui.label("row"); rows_built++; });
+            ui.end_frame();
+        }
+        CHECK(rows_built > 0 && rows_built < 100, "the C++ virtual list built the wrong rows");
+        CHECK(pane == 200.0f && ui.focused() == 0 && !ui.poisoned(), "the parity calls misbehaved");
     }
 
     // Type-ahead with a lambda for the labels.
