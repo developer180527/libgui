@@ -127,6 +127,8 @@ int main(int argc, char** argv) {
     CHECK_SIZE(LibguiScopeResponse, libgui_sizeof_scope_response);
     CHECK_SIZE(LibguiMeterOptions, libgui_sizeof_meter_options);
     CHECK_SIZE(LibguiMeterResponse, libgui_sizeof_meter_response);
+    CHECK_SIZE(LibguiModalOptions, libgui_sizeof_modal_options);
+    CHECK_SIZE(LibguiModalResponse, libgui_sizeof_modal_response);
     CHECK_SIZE(LibguiValidatedOptions, libgui_sizeof_validated_options);
     CHECK_SIZE(LibguiValidatedResponse, libgui_sizeof_validated_response);
 
@@ -573,6 +575,25 @@ int main(int argc, char** argv) {
         }
         CHECK(layer.r == 0.2f && layer.b == 0.9f, "an untouched picker wrote the colour");
         CHECK(libgui_ui_poisoned(ui) == 0, "the picker poisoned the handle");
+    }
+
+    /* A modal dialog. */
+    {
+        LibguiModalOptions mo;
+        libgui_modal_options_default(&mo);
+        CHECK(mo.width > 0.0f && mo.dim == 1, "modal defaults did not arrive");
+        LibguiModalResponse r = {0};
+        for (int pass = 0; pass < 3; pass++) {
+            libgui_begin_frame(ui, 400.0f, 400.0f, 1.0f, 1.0f / 60.0f);
+            libgui_open_modal(ui, "confirm", "Delete?", &mo);
+            libgui_label(ui, "This cannot be undone.");
+            r = libgui_close_modal(ui);
+            libgui_end_frame(ui);
+        }
+        CHECK(libgui_any_modal_open(ui) == 1 && !r.cancelled && !r.opened, "the modal did not register as open");
+        libgui_begin_frame(ui, 400.0f, 400.0f, 1.0f, 1.0f / 60.0f);
+        libgui_end_frame(ui);
+        CHECK(libgui_ui_poisoned(ui) == 0, "the modal poisoned the handle");
     }
 
     /* A scope and a meter. */

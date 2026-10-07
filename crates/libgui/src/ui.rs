@@ -731,6 +731,17 @@ pub struct Ui {
     pub(crate) focused: Option<Id>,
     pub(crate) focus_order: Vec<Id>,
     pending_tab: Option<bool>,
+    /// Modals being built now, innermost last.
+    pub(crate) modal_build: Vec<crate::modal::ModalBuild>,
+    /// Modals built this frame, in build order, with the focus stops each
+    /// one's body produced.
+    pub(crate) modals_built: Vec<(Id, std::ops::Range<usize>)>,
+    /// Last frame's, in build order: the last is on top and has the keys.
+    pub(crate) modals_last: Vec<Id>,
+    /// Where focus was when each open modal first appeared, to give it back.
+    pub(crate) modal_return: FxMap<Id, Option<Id>>,
+    /// Shortcuts built outside the top modal still fire (its option).
+    pub(crate) modal_lets_shortcuts: bool,
     /// Which kinds of widget the keyboard visits, and whether a click moves
     /// focus. Platform convention, so libgui has no opinion: see
     /// [`crate::FocusPolicy`] and `libgui_keymap`.
@@ -889,6 +900,9 @@ pub enum Layer {
     /// In-app floating windows and torn-off dock panels.
     #[default]
     Window,
+    /// Modal dialogs and their scrim: above every window, below the popups a
+    /// dialog opens (a combo inside it), so those still draw on top.
+    Modal,
     /// Menus, popups and context menus, and the invisible sheet that closes
     /// them when you click away.
     Popup,
@@ -1017,6 +1031,11 @@ impl Ui {
             focused: None,
             focus_order: Vec::new(),
             pending_tab: None,
+            modal_build: Vec::new(),
+            modals_built: Vec::new(),
+            modals_last: Vec::new(),
+            modal_return: FxMap::default(),
+            modal_lets_shortcuts: false,
             focus_policy: crate::FocusPolicy::default(),
             double_click_time: 0.5,
             type_ahead_pause: 1.0,
@@ -1143,6 +1162,10 @@ impl Ui {
         if !self.shortcut_scopes.iter().all(|&a| a) {
             return false;
         }
+        // Behind a modal, unless it lets them through.
+        if !self.inside_top_modal() && !self.modal_lets_shortcuts {
+            return false;
+        }
         if self.typing && (sc.types_text() || self.input.keys_bound.contains(&sc.key)) {
             // …unless the focused field met that action this frame and had
             // nothing to do with it. An undo chord over a field with an empty
@@ -1234,6 +1257,45 @@ impl Ui {
         let idx = self.nodes.len();
         self.nodes.push(n);
         self.root_kids.push(idx as u32);
+    }
+
+    pub(crate) fn open_chain_is_empty(&self) -> bool {
+        self.open_chain.is_empty()
+    }
+
+    /// Close the layer `id`, which must be the innermost open container:
+    /// closing anything else would close the wrong thing quietly, and the
+    /// panic would come later and name the wrong call.
+    pub(crate) fn close_layer_checked(&mut self, id: Id, who: &str) {
+        assert_eq!(
+            self.stack.last().map(|&(i, _)| self.nodes[i].id),
+            Some(id),
+            "libgui: {who} with a container still open inside it"
+        );
+        self.close();
+    }
+
+    /// A modal's scrim: the whole window, in `color`, at [`Layer::Modal`], and
+    /// a barrier — nothing painted before it can be hit. Its response is a
+    /// click on the dimmed window outside the dialog.
+    pub(crate) fn modal_scrim(&mut self, id: Id, color: Color) -> Response {
+        self.mark_seen(id);
+        let resp = self.interact(id);
+        let s = self.input.screen_size;
+        let mut n = Node::new(id, Layout::leaf(Size::Fixed(s.x), Size::Fixed(s.y)));
+        n.absolute = Some(Rect::new(0.0, 0.0, s.x, s.y));
+        n.z = Layer::Modal;
+        n.interactive = true;
+        n.barrier = true;
+        n.paint = Some(self.paints.push(move |p: &mut Painter, r: Rect| {
+            if color.a > 0.0 {
+                p.rect(r, color, 0.0);
+            }
+        }));
+        let idx = self.nodes.len();
+        self.nodes.push(n);
+        self.root_kids.push(idx as u32);
+        resp
     }
 
     /// Show `body` in a popup panel if `id` is open, positioned near its anchor
@@ -1441,7 +1503,16 @@ impl Ui {
     /// is open and this is outside it: a context menu over a focused list owns
     /// the arrows, whichever was built first.
     pub(crate) fn keys_reach(&self) -> bool {
-        self.open_chain.is_empty() || !self.popup_stack.is_empty()
+        (self.open_chain.is_empty() || !self.popup_stack.is_empty()) && self.inside_top_modal()
+    }
+
+    /// True unless a modal is up and what is being built now is not inside
+    /// the one on top: everything else is behind it.
+    pub(crate) fn inside_top_modal(&self) -> bool {
+        match self.modals_last.last() {
+            None => true,
+            Some(top) => self.modal_build.iter().any(|m| m.id == *top),
+        }
     }
 
     /// Close the panel opened by [`Ui::open_popup_body`]. Only call this when
@@ -1846,6 +1917,9 @@ impl Ui {
         });
         self.time += self.elapsed as f64;
         self.focus_order.clear();
+        self.modals_last.clear();
+        self.modals_last.extend(self.modals_built.drain(..).map(|(id, _)| id));
+        self.modal_build.clear();
         self.overlays.clear();
         self.virtual_lists.clear();
         self.ime_rect = None;
@@ -2002,10 +2076,15 @@ impl Ui {
             }
         }
 
-        // Tab / Shift+Tab cycles focus through text fields in build order.
+        self.end_modals();
+        // Tab / Shift+Tab cycles focus through text fields in build order —
+        // only through the top modal's, while one is up.
         if let Some(back) = self.pending_tab.take() {
             self.focus_visible = true;
-            let order = &self.focus_order;
+            let order = match self.modals_built.last() {
+                Some((_, r)) => &self.focus_order[r.clone()],
+                None => &self.focus_order[..],
+            };
             if !order.is_empty() {
                 let pos = self.focused.and_then(|f| order.iter().position(|&i| i == f));
                 let n = order.len();
@@ -2274,7 +2353,7 @@ impl Ui {
 
     /// Take a pending [`UiAction`] if one arrived this frame, so two widgets
     /// cannot both act on it.
-    fn take_action(&mut self, want: UiAction) -> bool {
+    pub(crate) fn take_action(&mut self, want: UiAction) -> bool {
         let at = self.input.events.iter().position(|e| *e == UiEvent::Action(want));
         match at {
             Some(i) => {
@@ -3033,10 +3112,8 @@ impl Ui {
     /// [`Ui::layer_in`] without a closure, for a binding that cannot hold one.
     /// Close it with [`Ui::close_layer`].
     ///
-    /// This is the building block for a modal: a layer over the window at
-    /// [`Layer::Popup`] or above, with a scrim drawn under it. libgui has no
-    /// modal of its own — what a modal *blocks* is an app's question, not a
-    /// layout one.
+    /// For a dialog that blocks the window behind it, use [`Ui::modal`],
+    /// which adds the scrim, the focus trap and Escape to this.
     pub fn open_layer(&mut self, id: Id, z: Layer, rect: Rect, frame: Frame) {
         self.open_layer_with(id, z, rect, Layout::column().shrink(), frame);
     }
@@ -3054,7 +3131,7 @@ impl Ui {
 
     /// The opening half of [`Ui::layer_with`], so the closure form and the
     /// open/close pair cannot drift apart.
-    fn open_layer_with(&mut self, id: Id, z: Layer, rect: Rect, layout: Layout, frame: Frame) {
+    pub(crate) fn open_layer_with(&mut self, id: Id, z: Layer, rect: Rect, layout: Layout, frame: Frame) {
         self.mark_seen(id);
         let mut n = Node::new(id, layout);
         n.absolute = Some(rect);
@@ -4157,6 +4234,16 @@ fn paint(
     let visible = p.draw.clip().intersect(&win);
     if visible.is_none() {
         sink.offscreen += 1;
+    }
+    if nodes[i].barrier {
+        // A modal's scrim: everything painted before it is beneath it, and
+        // out of reach — no hover, no click, no wheel, no drop. Dropping
+        // their hit rects is the whole of it; the widgets themselves never
+        // learn a modal exists.
+        sink.hits.clear();
+        sink.top_hits.clear();
+        sink.scroll_hits.clear();
+        sink.drop_hits.clear();
     }
     if nodes[i].interactive {
         let pad = nodes[i].hit_pad * t.zoom;

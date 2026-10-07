@@ -380,10 +380,15 @@ is why nobody should worry about it.
 
 Some things look like gaps and are deliberate.
 
-- **Modals.** There is no modal widget. What a modal *blocks* — whether the
-  menu bar still works, whether Escape cancels, whether the 3D view keeps
-  orbiting — is the application's question. libgui supplies layers and
-  stacking; the policy is yours.
+- **Modals.** `Ui::modal` does the mechanics and stops there. What it does:
+  blocks every hit beneath it (a barrier in the hit lists, so even widgets
+  that hit-test first are covered), keeps keys and Tab inside, moves focus in
+  and gives it back. Escape, Enter and a click outside are *reported*. Whether
+  Escape discards an edit, whether a click outside cancels, and whether the
+  dialog is open at all stay the application's: it is open on the frames the
+  app builds it. Its own input (a 3-D view orbiting behind) the app gates on
+  `any_modal_open`, and app shortcuts are held back by default with an option
+  to let them through.
 - **Trees.** `tree_row` draws a row at a depth with a disclosure arrow. Which
   nodes are expanded, what a child is, how deep it goes — the app's.
 - **Fonts.** libgui reads no files and enumerates no system fonts, because both

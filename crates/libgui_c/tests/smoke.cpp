@@ -298,6 +298,21 @@ int main(int argc, char** argv) {
         CHECK(!ui.poisoned(), "scopes poisoned the Ui");
     }
 
+    {
+        bool clicked = false;
+        LibguiModalResponse r{};
+        for (int pass = 0; pass < 3; pass++) {
+            ui.begin_frame(400.0f, 400.0f, 1.0f, 1.0f / 60.0f);
+            r = ui.modal("confirm", "Delete?", [&] {
+                ui.label("This cannot be undone.");
+                if (ui.button("Delete").clicked) clicked = true;
+            });
+            ui.end_frame();
+        }
+        CHECK(!clicked && !r.cancelled && ui.any_modal_open(), "a C++ modal misbehaved");
+        CHECK(ui.open_depth() == 0 && !ui.poisoned(), "the C++ modal left something open");
+    }
+
     // Type-ahead with a lambda for the labels.
     {
         const char* parts[] = {"Axle", "bearing", "Bolt", "Bracket"};

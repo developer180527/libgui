@@ -620,6 +620,22 @@ public:
         return libgui_color_button(h_, key, &color, opts);
     }
 
+    // A modal dialog: `body()` builds what is inside it. Closed however the
+    // body ends, a throw included; the response says what happened this frame.
+    template <class F>
+    LibguiModalResponse modal(const char* key, const char* title, F&& body,
+                              const LibguiModalOptions* opts = nullptr) {
+        libgui_open_modal(h_, key, title, opts);
+        try {
+            body();
+        } catch (...) {
+            libgui_close_modal(h_);
+            throw;
+        }
+        return libgui_close_modal(h_);
+    }
+    bool any_modal_open() { return libgui_any_modal_open(h_) != 0; }
+
     // A scope over `count` traces; opts may be null.
     LibguiScopeResponse scope(const char* key, const LibguiScopeTrace* traces, uint64_t count,
                               const LibguiScopeOptions* opts = nullptr) {

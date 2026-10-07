@@ -2509,3 +2509,59 @@ fn c_scopes_and_meters() {
         libgui_ui_free(u);
     }
 }
+
+/// A modal from C: it blocks the button behind, reports Escape, comes and
+/// goes with the host's own flag, and a close without an open poisons
+/// rather than corrupts.
+#[test]
+fn a_c_modal_blocks_and_reports() {
+    unsafe {
+        let u = ui();
+        let mut mo = std::mem::zeroed::<LibguiModalOptions>();
+        libgui_modal_options_default(&mut mo);
+        assert_eq!((mo.dim, mo.shortcuts_behind), (1, 0));
+        let step = |u, show: bool| -> (LibguiResponse, LibguiModalResponse) {
+            let (mut behind, mut r) = (LibguiResponse::default(), LibguiModalResponse::default());
+            frame(u, || {
+                behind = libgui_button(u, c("Behind").as_ptr());
+                if show {
+                    libgui_open_modal(u, c("dlg").as_ptr(), c("Settings").as_ptr(), &mo);
+                    libgui_label(u, c("Inside").as_ptr());
+                    r = libgui_close_modal(u);
+                }
+            });
+            (behind, r)
+        };
+        let (behind, _) = step(u, false);
+        let (_, r) = step(u, true);
+        assert_eq!(r.opened, 1);
+        step(u, true);
+        assert_eq!(libgui_any_modal_open(u), 1);
+        libgui_push_pointer_moved(u, behind.rect.x + 4.0, behind.rect.y + 4.0);
+        libgui_push_pointer_button(u, 0, 1);
+        step(u, true);
+        libgui_push_pointer_button(u, 0, 0);
+        let (b, r) = step(u, true);
+        assert_eq!(b.clicked, 0, "the button behind the dialog was clicked");
+        assert_eq!(r.clicked_outside, 1, "the click outside was not reported");
+        assert_eq!(libgui_install_keymap(u, PLATFORM_WINDOWS), 0);
+        libgui_push_key(u, KEY_ESCAPE, 1, 0);
+        let (_, r) = step(u, true);
+        assert_eq!(r.cancelled, 1, "Escape was not reported");
+        libgui_push_key(u, KEY_ESCAPE, 0, 0);
+        step(u, false);
+        step(u, false);
+        assert_eq!(libgui_any_modal_open(u), 0);
+        // Nulls, then misuse.
+        libgui_modal_options_default(std::ptr::null_mut());
+        frame(u, || {
+            libgui_open_modal(u, c("n").as_ptr(), std::ptr::null(), std::ptr::null());
+            libgui_close_modal(u);
+        });
+        assert_eq!(libgui_any_modal_open(std::ptr::null_mut()), 0);
+        libgui_begin_frame(u, 400.0, 300.0, 1.0, 1.0 / 60.0);
+        libgui_close_modal(u);
+        assert_eq!(libgui_ui_poisoned(u), 1, "closing a modal that was never opened did not poison the handle");
+        libgui_ui_free(u);
+    }
+}

@@ -110,7 +110,7 @@ apps do with it. `no` = absent.
 |---|---|---|
 | Tooltip | 14 | yes |
 | Popup / dropdown surface | 14 | yes |
-| Modal dialog | 14 | part — **deliberately**: built from layers, see DESIGN §13 |
+| Modal dialog | 14 | yes (`modal`): the mechanics; open/close and what Escape means stay the app's — DESIGN §13 |
 | Toast / notification | 12 | yes (`toast`, `show_toasts`) |
 | Inline validation error on a field | 11 | yes (`validated_input`) |
 | Empty state | 12 | part — containers and a label; no widget needed |
@@ -224,8 +224,8 @@ Item 5 costs nothing to decide and gets more expensive to defer.
 Some absences are decisions, recorded in DESIGN.md, and were excluded rather
 than listed as missing:
 
-- **No modal primitive.** What a modal blocks is the app's question. Layers are
-  the mechanism.
+- **What a modal means.** `modal` blocks input and keeps focus; whether a click
+  outside or Escape closes it is the app's question, so they are reported.
 - **No file dialogs, no clipboard, no window creation.** libgui does not touch
   the platform; the host supplies these.
 - **No icon set.** Icons are the application's identity. The painter draws

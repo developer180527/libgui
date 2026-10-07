@@ -431,6 +431,21 @@ pub struct PanelStyle {
 }
 
 serde_struct! {
+/// [`crate::Ui::modal`]: the dimmed window behind, and the dialog.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ModalStyle {
+    /// Over the whole window, behind the dialog.
+    pub scrim: Color,
+    pub fill: Color,
+    pub border: Color,
+    pub radius: f32,
+    pub padding: f32,
+    pub gap: f32,
+    pub title: Color,
+}
+}
+
+serde_struct! {
 /// [`crate::Ui::scope`]: a trace over a grid.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ScopeStyle {
@@ -546,6 +561,7 @@ pub struct Theme {
     pub panel: PanelStyle,
     pub plot: PlotStyle,
     pub scope: ScopeStyle,
+    pub modal: ModalStyle,
     pub meter: MeterStyle,
     pub viewport: ViewportStyle,
     pub table: TableStyle,
@@ -714,6 +730,15 @@ impl Theme {
             splitter: SplitterStyle { size: 3.0, line_hover: p.accent.with_alpha(0.85) },
             panel: PanelStyle { fill: p.bg_panel, border: p.border, radius: 0.0 },
             plot: PlotStyle { fill: p.bg_inset, border: p.border, bar: p.accent, bar_high: p.warning },
+            modal: ModalStyle {
+                scrim: Color::rgba(0.0, 0.0, 0.0, 0.45),
+                fill: p.bg_panel,
+                border: p.border_strong,
+                radius: m.radius_large,
+                padding: m.space * 2.5,
+                gap: m.space * 1.5,
+                title: p.text,
+            },
             scope: ScopeStyle {
                 fill: p.bg_inset,
                 border: p.border,

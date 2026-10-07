@@ -48,7 +48,7 @@ C and C++ hosts: `add_subdirectory(crates/libgui_c)`, then link
   - Buttons, checkboxes, toggles, radios, sliders, drag values, combo boxes,
     segmented controls.
   - Text fields, a multi-line editor with undo, validated fields, a colour
-    picker, notifications.
+    picker, notifications, modal dialogs.
   - Menus, popups, tooltips, splitters, progress bars.
   - Scopes that draw a million samples at a screen width's cost, and level
     meters with zones, peak hold and a clip light.

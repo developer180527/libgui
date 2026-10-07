@@ -220,6 +220,8 @@ sizeof_fns! {
     libgui_sizeof_scope_response => crate::meters::LibguiScopeResponse,
     libgui_sizeof_meter_options => crate::meters::LibguiMeterOptions,
     libgui_sizeof_meter_response => crate::meters::LibguiMeterResponse,
+    libgui_sizeof_modal_options => crate::modal_c::LibguiModalOptions,
+    libgui_sizeof_modal_response => crate::modal_c::LibguiModalResponse,
     libgui_sizeof_toast_response => crate::toast::LibguiToastResponse,
     libgui_sizeof_validated_options => crate::text::LibguiValidatedOptions,
     libgui_sizeof_validated_response => crate::text::LibguiValidatedResponse,

@@ -273,3 +273,22 @@ fn meters(ui: &mut Ui, left_db: f32, right_db: f32, load_now: f32, load_1s: f32)
     });
     ui.meter_with_average("cpu", load_now, load_1s, &MeterOptions { zones: Some((0.7, 0.9)), ..Default::default() });
 }
+
+struct ConfirmApp { confirm_delete: bool }
+impl ConfirmApp { fn delete_selection(&mut self) {} }
+
+#[allow(dead_code)]
+fn modal_example(ui: &mut Ui, app: &mut ConfirmApp) {
+    if app.confirm_delete {
+        let r = ui.modal("delete", "Delete 3 parts?", &ModalOptions::default(), |ui| {
+            ui.label("This cannot be undone.");
+            ui.row(|ui| {
+                ui.flex();
+                (ui.button("Cancel").clicked, ui.button_primary("Delete").clicked)
+            })
+        });
+        let (cancel, delete) = r.inner;
+        if delete || r.submitted { app.delete_selection(); app.confirm_delete = false; }
+        if cancel || r.cancelled { app.confirm_delete = false; }
+    }
+}

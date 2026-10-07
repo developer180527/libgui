@@ -554,11 +554,32 @@ fn scope_meters(ui: &mut Ui) {
     });
 }
 
+/// A modal over a busy window: the scrim, the dialog's frame and shadow, its
+/// title, and its first control focused (the keyboard moves in on its own).
+fn modal(ui: &mut Ui) {
+    panel(ui, |ui| {
+        ui.heading("Assembly");
+        for i in 0..6 {
+            let _ = ui.selectable(&format!("Part {i}"), i == 2);
+        }
+        let _ = ui.button("Export");
+    });
+    ui.modal("confirm", "Delete 3 parts?", &ModalOptions { width: 240.0, ..Default::default() }, |ui| {
+        ui.label("This cannot be undone.");
+        ui.row(|ui| {
+            ui.flex();
+            let _ = ui.button("Cancel");
+            let _ = ui.button_primary("Delete");
+        });
+    });
+}
+
 pub const SCENES: &[Scene] = &[
     Scene { name: "widgets", size: (320.0, 640.0), pointer: Pointer::None, build: widgets },
     Scene { name: "tree", size: (240.0, 230.0), pointer: Pointer::None, build: tree },
     Scene { name: "shapes", size: (280.0, 200.0), pointer: Pointer::None, build: shapes },
     Scene { name: "paths", size: (260.0, 132.0), pointer: Pointer::None, build: paths },
+    Scene { name: "modal", size: (320.0, 260.0), pointer: Pointer::None, build: modal },
     Scene { name: "scope_meters", size: (300.0, 320.0), pointer: Pointer::Hover, build: scope_meters },
     Scene { name: "dashes_rotated", size: (290.0, 190.0), pointer: Pointer::None, build: dashes_rotated },
     Scene { name: "text", size: (360.0, 200.0), pointer: Pointer::None, build: text },

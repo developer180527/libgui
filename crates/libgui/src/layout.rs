@@ -180,6 +180,9 @@ pub(crate) struct Node {
     pub hit_pad: f32,
     /// Hit-test before normal widgets regardless of paint order.
     pub hit_top: bool,
+    /// Nothing painted before this node can be hit, scrolled or dropped on: a
+    /// modal's scrim. Everything beneath it is out of reach while it is up.
+    pub barrier: bool,
     pub clip: bool,
     pub paint: Option<PaintFn>,
     pub scroll: Option<Scroll>,
@@ -222,6 +225,7 @@ impl Node {
             interactive: false,
             hit_pad: 0.0,
             hit_top: false,
+            barrier: false,
             clip: false,
             paint: None,
             scroll: None,

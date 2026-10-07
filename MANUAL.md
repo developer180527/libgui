@@ -484,9 +484,40 @@ let r = ui.tree_view("assembly", &mut tree_state, &model);
 - Keyboard: menus work from the keyboard without extra code.
 - Shortcuts: `ui.any_popup_open()` tells your global shortcuts to wait.
 
-**Modals.** libgui has no modal type. What a modal blocks is your app's
-decision, so build one from two layers: a translucent layer over the whole
-window, then the dialog's own layer.
+**Modals.** `ui.modal` shows a dialog over a dimmed window:
+
+```rust
+if app.confirm_delete {
+    let r = ui.modal("delete", "Delete 3 parts?", &ModalOptions::default(), |ui| {
+        ui.label("This cannot be undone.");
+        ui.row(|ui| {
+            ui.flex();
+            (ui.button("Cancel").clicked, ui.button_primary("Delete").clicked)
+        })
+    });
+    let (cancel, delete) = r.inner;
+    if delete || r.submitted { app.delete_selection(); app.confirm_delete = false; }
+    if cancel || r.cancelled { app.confirm_delete = false; }
+}
+```
+
+- **Open and closed are yours.** The dialog shows on every frame you build it
+  and is gone on the first frame you don't. Nothing in libgui closes it.
+- **Nothing behind it can be reached.** No hover, click, wheel or drop gets
+  through, including splitters and table grips, which normally hit-test
+  first. Widgets behind keep their focus but take no keys.
+- **Shortcuts:** app shortcuts built outside the dialog don't fire, unless
+  `ModalOptions::shortcuts_behind` is set.
+- **Focus:** Tab stays inside the dialog. When it appears, the keyboard moves
+  to its first control, and when it goes, focus returns to where it was.
+- **Reported, not acted on:** Escape (`cancelled`), an Enter that no control
+  used (`submitted`) and a click on the dimmed window (`clicked_outside`).
+  Whether a click outside means cancel is your call. Escape closes a combo
+  inside the dialog first, then reaches the dialog.
+- **Stacking:** a dialog built inside another dialog's body (a confirmation
+  over settings) goes on top and takes the keys.
+- **Your own checks:** `ui.any_modal_open()` tells your own input handling
+  (the 3-D view's camera, say) to wait.
 
 **Notifications.**
 
@@ -1208,6 +1239,7 @@ Rust names are methods on `Ui` unless stated otherwise. C names drop the
 | menus | `menu_button`, `submenu`, `menu_item(_shortcut)`, `context_menu` | `open_/close_menu`, `menu_item*`, `open_context_menu` |
 | popups | `any_popup_open`, `close_popups` | same names |
 | notifications | `toast`, `dismiss_toast`, `toast_count`, `show_toasts(_with)` | same names |
+| modal dialogs | `modal`, `open_/close_modal`, `any_modal_open` | `open_/close_modal`, `any_modal_open` |
 | drag and drop | `drag_source`, `drop_zone`, `dragging`, `drag_ghost`, `insertion_line` | same names |
 | from the OS | `begin_/end_external_drag` | same names |
 
@@ -1255,7 +1287,8 @@ The full signatures are in rustdoc (`cargo doc -p libgui --open`) and in
 **Widgets**
 - `plot` is a simple bar chart; use `scope` for traces. Scopes have no axis
   labels, triggering, zoom or legend, and there is no general chart widget.
-- There is no modal type (build one from layers, §7) and no date picker.
+- There is no date picker. A modal is centred; there are no sheets or
+  dialogs anchored to a widget.
 - Tables have no 2-D cell cursor; trees cannot be reordered by dragging.
 
 **Text**

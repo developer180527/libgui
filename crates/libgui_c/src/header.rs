@@ -935,6 +935,44 @@ uint64_t libgui_toast_count(LibguiUi* ui);
 /* Draw the stack: once a frame, last, so it sits above the window. opts may be NULL. */
 LibguiToastResponse libgui_show_toasts(LibguiUi* ui, const LibguiToastOptions* opts);
 
+/* --- Modal dialogs ------------------------------------------------------------ */
+
+typedef struct {
+    float   width;             /* logical px; the height fits the content (420) */
+    uint8_t dim;               /* shade the window behind (1); blocked either way */
+    uint8_t shortcuts_behind;  /* app shortcuts built outside still fire (0) */
+    uint8_t _pad[2];
+} LibguiModalOptions;
+
+void libgui_modal_options_default(LibguiModalOptions* out);
+
+typedef struct {
+    uint8_t cancelled;         /* Escape, while this dialog is on top */
+    uint8_t submitted;         /* Enter no control inside used: the default action */
+    uint8_t clicked_outside;   /* a click on the dimmed window */
+    uint8_t opened;            /* the first frame it is shown */
+} LibguiModalResponse;
+
+/* A dialog over the window. While it is up nothing behind it can be hovered,
+ * clicked, scrolled or dropped on; widgets behind keep their focus but take
+ * no keys; app shortcuts built outside it do not fire unless the options say
+ * so. Tab stays inside it, the keyboard moves to its first control when it
+ * appears, and focus comes back when it goes. Shown on every frame you build
+ * it and gone on the first you do not: nothing here closes it.
+ *
+ *     if (confirm) {
+ *         libgui_open_modal(ui, "delete", "Delete 3 parts?", NULL);
+ *         ... a label, a Delete button, a Cancel button ...
+ *         LibguiModalResponse r = libgui_close_modal(ui);
+ *         if (delete_clicked || r.submitted) { delete_parts(); confirm = 0; }
+ *         if (cancel_clicked || r.cancelled)  confirm = 0;
+ *     }
+ */
+void                libgui_open_modal(LibguiUi* ui, const char* key, const char* title,
+                                      const LibguiModalOptions* opts);
+LibguiModalResponse libgui_close_modal(LibguiUi* ui);
+uint8_t             libgui_any_modal_open(LibguiUi* ui);
+
 /* --- Scopes and meters ------------------------------------------------------- */
 
 /* `count` samples across r, lo at the bottom and hi at the top; `start` is the
@@ -1304,6 +1342,8 @@ uint64_t libgui_sizeof_scope_options(void);
 uint64_t libgui_sizeof_scope_response(void);
 uint64_t libgui_sizeof_meter_options(void);
 uint64_t libgui_sizeof_meter_response(void);
+uint64_t libgui_sizeof_modal_options(void);
+uint64_t libgui_sizeof_modal_response(void);
 uint64_t libgui_sizeof_validated_options(void);
 uint64_t libgui_sizeof_validated_response(void);
 "##;
