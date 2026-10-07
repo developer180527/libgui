@@ -100,8 +100,8 @@ apps do with it. `no` = absent.
 | 2-D cell cursor (arrow keys between cells) | 7 | **no** |
 | Virtualised list | 11 | yes |
 | Progress bar, determinate and indeterminate | 14 | yes |
-| **Chart with axes, series, legend** | 8 | **no** — `plot` is a sparkline |
-| Sparkline / meter | 9 | yes (`plot`) |
+| **Chart with axes, series, legend** | 8 | part — `scope` draws series over a grid with a readout; no axis labels or legend |
+| Sparkline / meter | 9 | yes (`scope`, `meter`; `plot` for bars) |
 | Badge / count pill | 10 | **no** — trivial from a painted leaf |
 
 ### Overlays and feedback

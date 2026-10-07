@@ -620,6 +620,28 @@ public:
         return libgui_color_button(h_, key, &color, opts);
     }
 
+    // A scope over `count` traces; opts may be null.
+    LibguiScopeResponse scope(const char* key, const LibguiScopeTrace* traces, uint64_t count,
+                              const LibguiScopeOptions* opts = nullptr) {
+        return libgui_scope(h_, key, traces, count, opts);
+    }
+    // One plain array as a scope: the common case without filling a struct.
+    LibguiScopeResponse scope(const char* key, const float* samples, uint64_t count,
+                              const LibguiScopeOptions* opts = nullptr, const char* label = nullptr) {
+        LibguiScopeTrace t{};
+        t.samples = samples;
+        t.count = count;
+        t.width = 1.5f;
+        t.label = label;
+        return libgui_scope(h_, key, &t, 1, opts);
+    }
+    LibguiMeterResponse meter(const char* key, float value, const LibguiMeterOptions* opts = nullptr) {
+        return libgui_meter(h_, key, value, opts);
+    }
+    LibguiMeterResponse meter(const char* key, float value, float average, const LibguiMeterOptions* opts) {
+        return libgui_meter_with_average(h_, key, value, average, opts);
+    }
+
     // Notifications. duration < 0: the kind's own (4 s; errors stay); 0: until closed.
     uint64_t toast(int32_t kind, const char* message, float duration = -1.0f,
                    const char* action = nullptr) {

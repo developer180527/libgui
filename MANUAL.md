@@ -109,6 +109,8 @@ runs after layout, with its final rectangle. The available calls:
 - shapes: `rect`, `rect_bordered`, `shadow`, `gradient`;
 - lines: `line`, `polyline`, `dashed_line`, `dashed_polyline`, `bezier`,
   `wire`, `chevron`, `hairline`;
+- data: `trace` and `trace_fill`, which decimate any number of samples to one
+  stroke per pixel column;
 - text: `text`, `text_left`, `text_centered`, `text_right`, `text_wrapped`,
   `text_rotated`, plus `measure` to size text before drawing it;
 - vector paths: `fill_path`;
@@ -273,6 +275,7 @@ if ui.button("Save").clicked { save(); }
   `virtual_list`, `virtual_rows`.
 - **Chrome:** `menu_button`, `menu_item`, `submenu`, `context_menu`, `tooltip`,
   `splitter`, `separator`, `progress`, `plot`, `viewport`, `show_toasts`.
+- **Instruments:** `scope`, `meter`, `meter_with_average`.
 
 **Repeated labels.** Rows that can share a label need a `*_keyed` variant,
 otherwise the rows share their state.
@@ -330,6 +333,57 @@ if r.committed { doc.reevaluate(); }
 strip, an alpha strip and a hex field. `ui.color_button` is a swatch that opens
 a picker in a popup. On the response, `changed` is set on every frame of a
 drag; `finished` is set once per gesture, which is when to push an undo step.
+
+### Scopes and meters
+
+**Scopes.** A scope draws traces over a grid, newest sample at the right:
+
+```rust
+// A streaming history in a fixed ring buffer: nothing is shifted or copied.
+ui.scope("frame time", &[ScopeTrace::new(Trace::ring(&ms, head)).filled().label("ms")],
+    &ScopeOptions { range: Some((0.0, 33.3)), ..Default::default() });
+
+// Several traces, the range fitted to the data.
+let r = ui.scope("signals", &[ScopeTrace::new(&left[..]), ScopeTrace::new(&right[..])], &ScopeOptions::default());
+if let Some(i) = r.index(left.len()) { status = format!("sample {i}"); }
+```
+
+- **Cost follows the screen, not the data.** Each pixel column draws one
+  stroke from the lowest to the highest value it covers, so a million samples
+  cost what a few hundred do. Nothing is lost: a one-sample spike still lights
+  its column.
+- **Short traces:** a trace with fewer samples than columns is the line
+  through its samples.
+- **Odd values:** non-finite samples are gaps, and values off the scale rail at
+  the edge.
+- **Readout:** with the pointer over the scope it shows each trace's value
+  there; `r.at` and `r.index(len)` give the position.
+
+**Meters.** A meter is a level bar in zones, with a held peak and an
+over-range light:
+
+```rust
+let opts = MeterOptions::audio_db();            // -60..0 dB, zones at -18 and -6, LEDs, clip light
+ui.row(|ui| {
+    ui.meter("L", left_db, &opts);
+    ui.meter("R", right_db, &opts);
+});
+ui.meter_with_average("cpu", load_now, load_1s, &MeterOptions { zones: Some((0.7, 0.9)), ..Default::default() });
+```
+
+- **Peak hold:** the highest recent value is held for `hold` seconds, then
+  falls.
+- **Over light:** it latches at the top of the scale. A click clears it and
+  the peak (`r.clipped`, `r.peak`).
+- **State and timing:** libgui keeps that state, so you pass only this frame's
+  value. A meter at rest asks for no frames; a held peak wakes the window once,
+  when it is due to fall. Both rely on a real `dt`.
+- **Units:** the units are yours (dB, %, litres); the meter only places them on
+  its range.
+
+**In a custom widget,** `p.trace(r, Trace::new(&samples), (lo, hi), width, colour)`
+and `p.trace_fill(r, trace, (lo, hi), baseline, colour)` draw the same
+decimated trace.
 
 ## 6. Lists, trees and selection
 
@@ -1134,6 +1188,7 @@ Rust names are methods on `Ui` unless stated otherwise. C names drop the
 | text entry | `text_input`, `text_area`, `validated_input` | same names, `text_overflow` |
 | colour | `color_picker`, `color_button` | same names |
 | display | `progress`, `plot`, `viewport`, `tooltip` | same names |
+| instruments | `scope` + `ScopeTrace`/`Trace`, `meter`, `meter_with_average`, `p.trace`, `p.trace_fill` | `scope` + `LibguiScopeTrace`, `meter`, `meter_with_average`, `painter_trace`, `painter_trace_fill` |
 | panes | `splitter` | `splitter` |
 
 ### Collections
@@ -1198,7 +1253,8 @@ The full signatures are in rustdoc (`cargo doc -p libgui --open`) and in
 - **No bidirectional text.** Arabic and Hebrew lay out left to right.
 
 **Widgets**
-- `plot` is a simple bar chart.
+- `plot` is a simple bar chart; use `scope` for traces. Scopes have no axis
+  labels, triggering, zoom or legend, and there is no general chart widget.
 - There is no modal type (build one from layers, §7) and no date picker.
 - Tables have no 2-D cell cursor; trees cannot be reordered by dragging.
 

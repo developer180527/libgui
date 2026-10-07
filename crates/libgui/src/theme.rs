@@ -431,6 +431,46 @@ pub struct PanelStyle {
 }
 
 serde_struct! {
+/// [`crate::Ui::scope`]: a trace over a grid.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScopeStyle {
+    pub fill: Color,
+    pub border: Color,
+    pub grid: Color,
+    /// The zero line, drawn over the grid when zero is in range.
+    pub axis: Color,
+    /// A trace with no colour of its own; further traces cycle through
+    /// `trace`, `trace_2`, `trace_3`.
+    pub trace: Color,
+    pub trace_2: Color,
+    pub trace_3: Color,
+    /// The readout cursor under the pointer, and its labels.
+    pub cursor: Color,
+    pub text: Color,
+    pub radius: f32,
+}
+}
+
+serde_struct! {
+/// [`crate::Ui::meter`]: a level bar in zones, with a held peak.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MeterStyle {
+    /// The unlit track.
+    pub track: Color,
+    /// Below the first zone threshold, between the two, and above the second.
+    pub low: Color,
+    pub mid: Color,
+    pub high: Color,
+    /// The held-peak tick.
+    pub peak: Color,
+    /// The latched over-range light.
+    pub clip: Color,
+    pub tick: Color,
+    pub radius: f32,
+}
+}
+
+serde_struct! {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PlotStyle {
     pub fill: Color,
@@ -505,6 +545,8 @@ pub struct Theme {
     pub splitter: SplitterStyle,
     pub panel: PanelStyle,
     pub plot: PlotStyle,
+    pub scope: ScopeStyle,
+    pub meter: MeterStyle,
     pub viewport: ViewportStyle,
     pub table: TableStyle,
     pub drop_preview: DropPreviewStyle,
@@ -672,6 +714,28 @@ impl Theme {
             splitter: SplitterStyle { size: 3.0, line_hover: p.accent.with_alpha(0.85) },
             panel: PanelStyle { fill: p.bg_panel, border: p.border, radius: 0.0 },
             plot: PlotStyle { fill: p.bg_inset, border: p.border, bar: p.accent, bar_high: p.warning },
+            scope: ScopeStyle {
+                fill: p.bg_inset,
+                border: p.border,
+                grid: p.border.with_alpha(p.border.a * 0.55),
+                axis: p.border_strong,
+                trace: p.accent,
+                trace_2: p.success,
+                trace_3: p.warning,
+                cursor: p.text_muted,
+                text: p.text,
+                radius: m.radius,
+            },
+            meter: MeterStyle {
+                track: p.bg_inset,
+                low: p.success,
+                mid: p.warning,
+                high: p.danger,
+                peak: p.text,
+                clip: p.danger,
+                tick: p.text_faint,
+                radius: 2.0,
+            },
             viewport: ViewportStyle { radius: m.radius_large, border: p.border, border_hover: p.border_strong },
             drop_preview: DropPreviewStyle {
                 fill: p.accent.with_alpha(0.2),

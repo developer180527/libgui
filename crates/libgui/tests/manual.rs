@@ -252,3 +252,24 @@ fn turned(p: &mut Painter, r: Rect, knob_tex: TextureId, axis_mid: Vec2, a: Vec2
     p.text_rotated(axis_mid, 12.0, ink, "Height (mm)", -FRAC_PI_2);   // reads bottom to top
     p.text_rotated((a + b) * 0.5, 11.0, ink, "42.0 mm", angle_of(a, b)); // along a dimension line
 }
+
+#[allow(dead_code)]
+fn scopes(ui: &mut Ui, ms: &[f32], head: usize, left: &[f32], right: &[f32], status: &mut String) {
+    // A streaming history in a fixed ring buffer: nothing is shifted or copied.
+    ui.scope("frame time", &[ScopeTrace::new(Trace::ring(ms, head)).filled().label("ms")],
+        &ScopeOptions { range: Some((0.0, 33.3)), ..Default::default() });
+
+    // Several traces, the range fitted to the data.
+    let r = ui.scope("signals", &[ScopeTrace::new(left), ScopeTrace::new(right)], &ScopeOptions::default());
+    if let Some(i) = r.index(left.len()) { *status = format!("sample {i}"); }
+}
+
+#[allow(dead_code)]
+fn meters(ui: &mut Ui, left_db: f32, right_db: f32, load_now: f32, load_1s: f32) {
+    let opts = MeterOptions::audio_db();            // -60..0 dB, zones at -18 and -6, LEDs, clip light
+    ui.row(|ui| {
+        ui.meter("L", left_db, &opts);
+        ui.meter("R", right_db, &opts);
+    });
+    ui.meter_with_average("cpu", load_now, load_1s, &MeterOptions { zones: Some((0.7, 0.9)), ..Default::default() });
+}

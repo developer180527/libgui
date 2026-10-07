@@ -122,6 +122,11 @@ int main(int argc, char** argv) {
     CHECK_SIZE(LibguiColorPickerResponse, libgui_sizeof_color_picker_response);
     CHECK_SIZE(LibguiToastOptions, libgui_sizeof_toast_options);
     CHECK_SIZE(LibguiToastResponse, libgui_sizeof_toast_response);
+    CHECK_SIZE(LibguiScopeTrace, libgui_sizeof_scope_trace);
+    CHECK_SIZE(LibguiScopeOptions, libgui_sizeof_scope_options);
+    CHECK_SIZE(LibguiScopeResponse, libgui_sizeof_scope_response);
+    CHECK_SIZE(LibguiMeterOptions, libgui_sizeof_meter_options);
+    CHECK_SIZE(LibguiMeterResponse, libgui_sizeof_meter_response);
     CHECK_SIZE(LibguiValidatedOptions, libgui_sizeof_validated_options);
     CHECK_SIZE(LibguiValidatedResponse, libgui_sizeof_validated_response);
 
@@ -568,6 +573,20 @@ int main(int argc, char** argv) {
         }
         CHECK(layer.r == 0.2f && layer.b == 0.9f, "an untouched picker wrote the colour");
         CHECK(libgui_ui_poisoned(ui) == 0, "the picker poisoned the handle");
+    }
+
+    /* A scope and a meter. */
+    {
+        float wave[300];
+        for (int i = 0; i < 300; i++) wave[i] = (float)(i % 50) / 50.0f;
+        LibguiScopeTrace t = { wave, 300, 7, {0}, 0, 1, {0}, 1.5f, "v" };
+        LibguiMeterOptions mo;
+        libgui_meter_options_default(&mo);
+        libgui_begin_frame(ui, 400.0f, 400.0f, 1.0f, 1.0f / 60.0f);
+        LibguiScopeResponse s = libgui_scope(ui, "wave", &t, 1, NULL);
+        LibguiMeterResponse m = libgui_meter(ui, "level", 0.4f, &mo);
+        libgui_end_frame(ui);
+        CHECK(s.hi > s.lo && m.peak == 0.4f, "the scope or meter misbehaved");
     }
 
     /* Notifications. */

@@ -49,7 +49,9 @@ C and C++ hosts: `add_subdirectory(crates/libgui_c)`, then link
     segmented controls.
   - Text fields, a multi-line editor with undo, validated fields, a colour
     picker, notifications.
-  - Menus, popups, tooltips, splitters, progress bars, plots.
+  - Menus, popups, tooltips, splitters, progress bars.
+  - Scopes that draw a million samples at a screen width's cost, and level
+    meters with zones, peak hold and a clip light.
 - **Large data.** Virtual lists, a virtual tree for 100,000-node assemblies,
   and tables with frozen and resizable columns.
 - **Docking.** Unity-style docking with tabs that tear off into OS windows,
@@ -125,7 +127,6 @@ Run any of them with `cargo run --release -p <name>`.
    - a multi-page glyph atlas.
 3. **Drawing:**
    - a triangle primitive for shapes that change every frame;
-   - a real line/area plot.
 4. **Tables:** a 2-D cell cursor, cell editing, reordering columns by drag.
 5. **Compositions:**
    - a searchable dropdown;

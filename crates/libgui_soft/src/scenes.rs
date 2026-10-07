@@ -519,11 +519,47 @@ fn dashes_rotated(ui: &mut Ui) {
     });
 }
 
+/// A scope and meters. The scope has a dense trace (twenty thousand samples,
+/// decimated to columns, with a one-sample spike and a gap) over a sparse
+/// filled one, and the pointer resting on it for the readout. The meters are
+/// solid with an average, an LED ladder in three zones, and two vertical
+/// audio meters, one of them over the top with its light latched.
+fn scope_meters(ui: &mut Ui) {
+    panel(ui, |ui| {
+        let dense: Vec<f32> = (0..20_000)
+            .map(|i| {
+                let t = i as f32 / 20_000.0;
+                if (0.62..0.66).contains(&t) {
+                    f32::NAN
+                } else if i == 7_000 {
+                    1.4
+                } else {
+                    (t * 40.0).sin() * 0.6 + (t * 310.0).sin() * 0.25
+                }
+            })
+            .collect();
+        let sparse: Vec<f32> = (0..24).map(|i| ((i as f32) * 0.45).cos() * 0.5).collect();
+        let r = ui.scope(
+            "signals",
+            &[ScopeTrace::new(&sparse[..]).filled().label("slow"), ScopeTrace::new(&dense[..]).width(1.0).label("fast")],
+            &ScopeOptions { range: Some((-1.0, 1.0)), height: 110.0, ..Default::default() },
+        );
+        target(r.response.rect);
+        ui.meter_with_average("cpu", 0.72, 0.48, &MeterOptions { zones: Some((0.6, 0.85)), ..Default::default() });
+        ui.meter("ladder", 0.93, &MeterOptions { zones: Some((0.6, 0.85)), cells: 20, thickness: 10.0, tick_step: Some(0.25), ..Default::default() });
+        ui.row(|ui| {
+            ui.meter("L", -9.0, &MeterOptions { length: Size::Fixed(90.0), ..MeterOptions::audio_db() });
+            ui.meter("R", 2.0, &MeterOptions { length: Size::Fixed(90.0), ..MeterOptions::audio_db() });
+        });
+    });
+}
+
 pub const SCENES: &[Scene] = &[
     Scene { name: "widgets", size: (320.0, 640.0), pointer: Pointer::None, build: widgets },
     Scene { name: "tree", size: (240.0, 230.0), pointer: Pointer::None, build: tree },
     Scene { name: "shapes", size: (280.0, 200.0), pointer: Pointer::None, build: shapes },
     Scene { name: "paths", size: (260.0, 132.0), pointer: Pointer::None, build: paths },
+    Scene { name: "scope_meters", size: (300.0, 320.0), pointer: Pointer::Hover, build: scope_meters },
     Scene { name: "dashes_rotated", size: (290.0, 190.0), pointer: Pointer::None, build: dashes_rotated },
     Scene { name: "text", size: (360.0, 200.0), pointer: Pointer::None, build: text },
     Scene { name: "button_hover", size: (240.0, 90.0), pointer: Pointer::Hover, build: button_target },

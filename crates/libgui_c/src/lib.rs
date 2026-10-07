@@ -32,6 +32,7 @@ use std::os::raw::c_char;
 
 mod canvas;
 mod color;
+mod meters;
 mod toast;
 mod conformance;
 mod containers;
@@ -55,6 +56,7 @@ mod types;
 
 pub use canvas::*;
 pub use color::*;
+pub use meters::*;
 pub use toast::*;
 pub use conformance::*;
 pub use containers::*;

@@ -2431,3 +2431,81 @@ fn c_dashes_and_rotation_reach_the_instances() {
         libgui_ui_free(u);
     }
 }
+
+/// Scopes and meters from C: a long ring buffer drawn at a screen width's
+/// cost, the readout position, a meter's held peak and its latched light,
+/// and the painter's trace calls.
+#[test]
+fn c_scopes_and_meters() {
+    extern "C" fn paint(p: *mut LibguiPainter, r: LibguiRect, _: *mut c_void) {
+        let s: Vec<f32> = (0..50_000).map(|i| (i as f32 * 0.01).sin()).collect();
+        let c = LibguiColor { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
+        unsafe {
+            libgui_painter_trace(p, r, s.as_ptr(), s.len() as u64, 17, -1.0, 1.0, 1.0, c);
+            libgui_painter_trace_fill(p, r, s.as_ptr(), s.len() as u64, 0, -1.0, 1.0, 0.0, c);
+            libgui_painter_trace(p, r, std::ptr::null(), 10, 0, -1.0, 1.0, 1.0, c);
+            libgui_painter_trace_fill(std::ptr::null_mut(), r, s.as_ptr(), 3, 0, 0.0, 1.0, 0.0, c);
+        }
+    }
+    unsafe {
+        let u = ui();
+        let samples: Vec<f32> = (0..200_000).map(|i| (i as f32 * 0.002).sin() * 3.0).collect();
+        let label = c("v");
+        let trace = LibguiScopeTrace {
+            samples: samples.as_ptr(),
+            count: samples.len() as u64,
+            start: 5,
+            color: LibguiColor::default(),
+            has_color: 0,
+            fill: 1,
+            _pad: [0; 2],
+            width: 1.5,
+            label: label.as_ptr(),
+        };
+        let mut so = std::mem::zeroed::<LibguiScopeOptions>();
+        libgui_scope_options_default(&mut so);
+        assert_eq!((so.auto_range, so.grid_x), (1, 10));
+        let mut mo = std::mem::zeroed::<LibguiMeterOptions>();
+        libgui_meter_options_audio_db(&mut mo);
+        assert_eq!((mo.lo, mo.hi, mo.vertical, mo.clip_light), (-60.0, 0.0, 1, 1));
+        let step = |u, level: f32| -> (LibguiScopeResponse, LibguiMeterResponse, u64) {
+            let (mut scope, mut meter) = (LibguiScopeResponse::default(), LibguiMeterResponse::default());
+            frame(u, || {
+                scope = libgui_scope(u, c("wave").as_ptr(), &trace, 1, &so);
+                meter = libgui_meter(u, c("L").as_ptr(), level, &mo);
+                libgui_add_leaf(u, 31, leaf_layout(200.0, 40.0), 0, LibguiPaintFn { paint: Some(paint), drop_user: None, user: std::ptr::null_mut() });
+            });
+            let mut instances = 0;
+            libgui_frame_instances(u, &mut instances);
+            (scope, meter, instances)
+        };
+        step(u, -12.0);
+        let (scope, _, instances) = step(u, -12.0);
+        assert!(scope.lo <= -3.0 && scope.hi >= 3.0, "the fitted range {}..{} does not hold the data", scope.lo, scope.hi);
+        assert!(instances < 2_000, "{instances} instances for two hundred thousand samples");
+        assert!(scope.at < 0.0, "a readout with no pointer over the scope");
+        let r = scope.response.rect;
+        libgui_push_pointer_moved(u, r.x + r.w * 0.5, r.y + r.h * 0.5);
+        let (scope, meter, _) = step(u, 3.0);
+        assert!((scope.at - 0.5).abs() < 0.02, "the pointer at the middle read {}", scope.at);
+        assert_eq!(meter.clipped, 1, "over the top did not latch the light");
+        let (_, meter, _) = step(u, -40.0);
+        assert_eq!(meter.peak, 3.0, "the peak was not held");
+        assert_eq!(meter.clipped, 1, "the light went out on its own");
+        // Defaults and nulls.
+        let mut d = std::mem::zeroed::<LibguiMeterOptions>();
+        libgui_meter_options_default(&mut d);
+        assert_eq!((d.lo, d.hi, d.cells), (0.0, 1.0, 0));
+        frame(u, || {
+            libgui_meter_with_average(u, c("cpu").as_ptr(), 0.7, 0.4, &d);
+            libgui_meter(u, c("n").as_ptr(), 0.2, std::ptr::null());
+            libgui_scope(u, c("empty").as_ptr(), std::ptr::null(), 0, std::ptr::null());
+        });
+        libgui_meter_options_default(std::ptr::null_mut());
+        libgui_meter_options_audio_db(std::ptr::null_mut());
+        libgui_scope_options_default(std::ptr::null_mut());
+        assert_eq!(libgui_scope(std::ptr::null_mut(), c("x").as_ptr(), &trace, 1, &so).at, -1.0);
+        assert_eq!(libgui_ui_poisoned(u), 0);
+        libgui_ui_free(u);
+    }
+}

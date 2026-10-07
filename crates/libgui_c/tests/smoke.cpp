@@ -1,5 +1,6 @@
 // The C++ wrapper, compiled and run. Proves the header-only layer works and
 // that the RAII guards actually close what they opened.
+#include <cmath>
 #include "libgui.hpp"
 
 #include <cstdio>
@@ -281,6 +282,20 @@ int main(int argc, char** argv) {
         }
         CHECK(rows_built > 0 && rows_built < 100, "the C++ virtual list built the wrong rows");
         CHECK(pane == 200.0f && ui.focused() == 0 && !ui.poisoned(), "the parity calls misbehaved");
+    }
+
+    {
+        std::vector<float> wave(10000);
+        for (size_t i = 0; i < wave.size(); i++) wave[i] = std::sin(float(i) * 0.01f);
+        LibguiMeterOptions mo;
+        libgui_meter_options_audio_db(&mo);
+        ui.begin_frame(400.0f, 400.0f, 1.0f, 1.0f / 60.0f);
+        auto s = ui.scope("wave", wave.data(), wave.size(), nullptr, "v");
+        auto m = ui.meter("L", -12.0f, &mo);
+        auto a = ui.meter("cpu", 0.7f, 0.4f, nullptr);
+        ui.end_frame();
+        CHECK(s.hi > s.lo && m.peak == -12.0f && !m.clipped && a.peak == 0.7f, "a C++ scope or meter misbehaved");
+        CHECK(!ui.poisoned(), "scopes poisoned the Ui");
     }
 
     // Type-ahead with a lambda for the labels.

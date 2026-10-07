@@ -907,6 +907,95 @@ uint64_t libgui_toast_count(LibguiUi* ui);
 /* Draw the stack: once a frame, last, so it sits above the window. opts may be NULL. */
 LibguiToastResponse libgui_show_toasts(LibguiUi* ui, const LibguiToastOptions* opts);
 
+/* --- Scopes and meters ------------------------------------------------------- */
+
+/* `count` samples across r, lo at the bottom and hi at the top; `start` is the
+ * oldest sample's index in a ring buffer (0 for a plain array). At most one
+ * stroke per pixel column however many samples: each column draws the lowest
+ * to the highest value it covers, so a one-sample spike still shows.
+ * Non-finite samples are gaps; values off the scale rail at the edge. */
+void libgui_painter_trace(LibguiPainter* p, LibguiRect r, const float* samples, uint64_t count,
+                          uint64_t start, float lo, float hi, float width, LibguiColor c);
+/* The area between the samples and `baseline`, one crisp rect per column. */
+void libgui_painter_trace_fill(LibguiPainter* p, LibguiRect r, const float* samples, uint64_t count,
+                               uint64_t start, float lo, float hi, float baseline, LibguiColor c);
+
+typedef struct {
+    const float* samples;
+    uint64_t     count;
+    uint64_t     start;       /* oldest sample, for a ring buffer; 0 for an array */
+    LibguiColor  color;
+    uint8_t      has_color;   /* 0: the theme's next trace colour */
+    uint8_t      fill;        /* fill to the scope's baseline */
+    uint8_t      _pad[2];
+    float        width;
+    const char*  label;       /* in the readout; may be NULL */
+} LibguiScopeTrace;
+
+typedef struct {
+    float    height;
+    uint8_t  auto_range;      /* 1: fit the data and ignore lo/hi (1 by default) */
+    uint8_t  readout;         /* values under the pointer (1) */
+    uint8_t  _pad[2];
+    float    lo, hi;
+    uint32_t grid_x, grid_y;  /* divisions; 0 for none (10, 4) */
+    float    baseline;        /* what fills reach to (0) */
+} LibguiScopeOptions;
+
+void libgui_scope_options_default(LibguiScopeOptions* out);
+
+typedef struct {
+    LibguiResponse response;
+    float          lo, hi;    /* the range drawn */
+    float          at;        /* 0 oldest .. 1 newest under the pointer; negative when not over it */
+    uint32_t       _pad;
+} LibguiScopeResponse;
+
+/* A scope: traces over a grid, newest at the right, with a readout under the
+ * pointer. Reduced to a screen width of data while the frame is built;
+ * nothing is kept after the call. opts may be NULL.
+ *
+ *     LibguiScopeTrace t = { ms, 600, head, {0}, 0, 1, {0}, 1.5f, "ms" };
+ *     libgui_scope(ui, "frame time", &t, 1, NULL);
+ */
+LibguiScopeResponse libgui_scope(LibguiUi* ui, const char* key, const LibguiScopeTrace* traces,
+                                 uint64_t count, const LibguiScopeOptions* opts);
+
+typedef struct {
+    float    lo, hi;          /* the scale, in your units */
+    float    warn, over;      /* zone starts, used when has_zones is 1 */
+    uint8_t  has_zones;
+    uint8_t  vertical;        /* 1: bottom to top; 0: left to right */
+    uint8_t  clip_light;      /* the over-range light at the top */
+    uint8_t  _pad;
+    uint32_t length_kind;     /* 0 fixed (length px), 1 fit, 2 grow (weight length) */
+    float    length;
+    float    thickness;
+    float    hold;            /* seconds a peak is held; 0 for no peak tick */
+    float    fall;            /* ranges per second a held peak falls */
+    uint32_t cells;           /* an LED ladder of this many; 0 for a solid bar */
+    float    tick_step;       /* a tick every this many units; 0 for none */
+} LibguiMeterOptions;
+
+void libgui_meter_options_default(LibguiMeterOptions* out);
+/* dBFS: -60..0, warning from -18, over from -6, vertical, LEDs, clip light. */
+void libgui_meter_options_audio_db(LibguiMeterOptions* out);
+
+typedef struct {
+    LibguiResponse response;
+    float          peak;      /* the held peak, in your units */
+    uint8_t        clipped;   /* over the top since last cleared; a click clears it */
+    uint8_t        _pad[3];
+} LibguiMeterResponse;
+
+/* A level meter. The held peak and the over light are kept by libgui under
+ * the key; a held peak wakes the window once, when it is due to fall, and a
+ * meter at rest asks for no frames. Pass the real elapsed time as dt. */
+LibguiMeterResponse libgui_meter(LibguiUi* ui, const char* key, float value, const LibguiMeterOptions* opts);
+/* With an average (RMS under peak) drawn solid under the value. */
+LibguiMeterResponse libgui_meter_with_average(LibguiUi* ui, const char* key, float value, float average,
+                                              const LibguiMeterOptions* opts);
+
 /* --- Fields the app validates -------------------------------------------------- */
 
 /* Asked, on commit, whether `text` is acceptable. Return 1 to accept. To
@@ -1182,6 +1271,11 @@ uint64_t libgui_sizeof_color_picker_options(void);
 uint64_t libgui_sizeof_color_picker_response(void);
 uint64_t libgui_sizeof_toast_options(void);
 uint64_t libgui_sizeof_toast_response(void);
+uint64_t libgui_sizeof_scope_trace(void);
+uint64_t libgui_sizeof_scope_options(void);
+uint64_t libgui_sizeof_scope_response(void);
+uint64_t libgui_sizeof_meter_options(void);
+uint64_t libgui_sizeof_meter_response(void);
 uint64_t libgui_sizeof_validated_options(void);
 uint64_t libgui_sizeof_validated_response(void);
 

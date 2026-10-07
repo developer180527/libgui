@@ -2486,6 +2486,12 @@ impl Ui {
     }
 
     /// Jump an animation to `value` (it then eases towards its next target).
+    /// A value kept under `(id, slot)` by `set_anim` or an animation, if
+    /// there is one. Swept with the id like any retained state.
+    pub(crate) fn anim_get(&self, id: Id, slot: u8) -> Option<f32> {
+        self.anims.get(&(id, slot)).copied()
+    }
+
     pub fn set_anim(&mut self, id: Id, slot: u8, value: f32) {
         self.anims.insert((id, slot), sane(value, 0.0));
     }

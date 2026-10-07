@@ -22,6 +22,8 @@ mod validated;
 mod color_picker;
 mod tree_view;
 mod toast;
+mod scope;
+mod meter;
 mod paint_arena;
 mod painter;
 mod profile;
@@ -65,6 +67,8 @@ pub use layout::{Align, Axis, Insets, Layout, Size};
 pub use math::{sin_cos, Color, Rect, Transform, Vec2};
 pub use validated::{FieldError, ValidatedOptions, ValidatedResponse};
 pub use color_picker::{ColorPickerOptions, ColorPickerResponse};
+pub use scope::{ScopeOptions, ScopeResponse, ScopeTrace, Trace};
+pub use meter::{MeterOptions, MeterResponse};
 pub use toast::{Toast, ToastCorner, ToastId, ToastKind, ToastOptions, ToastResponse};
 pub use tree_view::{TreeRow, TreeSelection, TreeSource, TreeState, TreeViewResponse};
 pub use painter::{Chevron, Painter};
@@ -80,7 +84,7 @@ pub use text::{Atlas, FontError, FontId, Fonts, DEFAULT_TAB_WIDTH};
 pub use table::{Column, Sort, TableOptions, TableResponse, TableState};
 pub use text_arena::{FrameText, PaintText};
 pub use theme::{
-    ButtonStyle, Density, DropPreviewStyle, Metrics, MenuStyle, Palette, PanelStyle, PlotStyle, ScrollbarStyle, SegmentedStyle,
+    ButtonStyle, Density, DropPreviewStyle, Metrics, MenuStyle, MeterStyle, Palette, PanelStyle, PlotStyle, ScopeStyle, ScrollbarStyle, SegmentedStyle,
     SelectableStyle, Shadow, SliderStyle, SplitterStyle, Spring, StateColors, TabStyle, TableStyle, TextInputStyle, TooltipStyle, Theme,
     ToggleStyle,
     ViewportStyle,

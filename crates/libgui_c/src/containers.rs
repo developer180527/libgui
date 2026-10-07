@@ -278,7 +278,7 @@ pub unsafe extern "C" fn libgui_interact(ui: *mut LibguiUi, id: u64) -> crate::t
     with_ui(ui, Default::default(), |ui| ui.interact(Id(id)).into())
 }
 
-fn painter<'a>(p: *mut LibguiPainter) -> Option<&'a mut Painter<'a>> {
+pub(crate) fn painter<'a>(p: *mut LibguiPainter) -> Option<&'a mut Painter<'a>> {
     let p = unsafe { p.as_mut() }?;
     Some(unsafe { &mut *(p.inner as *mut Painter) })
 }
