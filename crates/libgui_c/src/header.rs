@@ -670,6 +670,23 @@ LibguiTextResponse libgui_text_input(LibguiUi* ui, const char* key, char* buf, u
                                      const char* placeholder, uint64_t* out_len);
 LibguiTextResponse libgui_text_area(LibguiUi* ui, const char* key, char* buf, uint64_t cap,
                                     uint64_t rows, uint64_t* out_len);
+
+/* A text area's layout. Long lines wrap at word boundaries by default: Home,
+ * End, Up and Down then move by the rows on screen, and a caret at a wrap
+ * point sits at the end of one row or the start of the next. wrap = 0 keeps
+ * lines hard and scrolls sideways, for code. */
+typedef struct {
+    uint32_t rows;           /* height in lines when height_kind is 1 (6) */
+    uint32_t height_kind;    /* 0 fixed (height px), 1 fit (rows lines), 2 grow (weight height) */
+    float    height;
+    uint8_t  wrap;           /* 1 by default */
+    uint8_t  line_numbers;
+    uint8_t  _pad[2];
+} LibguiTextAreaOptions;
+
+void               libgui_text_area_options_default(LibguiTextAreaOptions* out);
+LibguiTextResponse libgui_text_area_with(LibguiUi* ui, const char* key, char* buf, uint64_t cap,
+                                         const LibguiTextAreaOptions* opts, uint64_t* out_len);
 /* The whole text of a field that did not fit, this frame. snprintf contract;
  * 0 when nothing overflowed. */
 uint64_t           libgui_text_overflow(LibguiUi* ui, uint64_t id, char* buf, uint64_t cap);
@@ -1381,6 +1398,7 @@ uint64_t libgui_sizeof_meter_response(void);
 uint64_t libgui_sizeof_modal_options(void);
 uint64_t libgui_sizeof_modal_response(void);
 uint64_t libgui_sizeof_atlas_page(void);
+uint64_t libgui_sizeof_text_area_options(void);
 uint64_t libgui_sizeof_validated_options(void);
 uint64_t libgui_sizeof_validated_response(void);
 "##;

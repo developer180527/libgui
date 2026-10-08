@@ -75,8 +75,7 @@ C and C++ hosts: `add_subdirectory(crates/libgui_c)`, then link
 
 **Not yet:**
 - accessibility (screen readers);
-- bidirectional text;
-- word wrap inside the text editor.
+- bidirectional text.
 
 The full list is in [MANUAL §17](MANUAL.md#17-limitations).
 
@@ -122,7 +121,6 @@ Run any of them with `cargo run --release -p <name>`.
 1. **Accessibility** via AccessKit. This blocks shipping to consumers.
 2. **Text:**
    - bidirectional text;
-   - word wrap in `text_area`;
    - double-click to select a word.
 3. **Tables:** a 2-D cell cursor, cell editing, reordering columns by drag.
 4. **Compositions:**

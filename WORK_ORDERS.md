@@ -7,7 +7,7 @@ recommended.
 | # | Gap | Status today | Priority |
 |---|---|---|---|
 | WO-1 | One glyph-atlas page; flicker when full | **Done** (contract 5): pages, least-recently-used reuse, nothing on screen lost unless one frame outgrows the whole budget | — |
-| WO-2 | No word wrap in `text_area` | Long lines scroll sideways | Medium |
+| WO-2 | No word wrap in `text_area` | **Done**: wraps by default (`TextAreaOptions::wrap`), rows-on-screen motion, inline IME composition, cost bounded by the screen | — |
 | WO-3 | No triangle primitive | **Done** (contract 5): `fill_polygon`, `_with_holes`, `fill_mesh`; seam-free on CPU and GPU | — |
 | WO-4 | No right-to-left text | Shaped correctly, laid out left to right | Low unless shipping to RTL markets |
 | — | Video scopes | Correct as planned: GPU textures through `viewport`/`image` | None |

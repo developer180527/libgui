@@ -65,6 +65,8 @@ thread_local! {
     static COLUMNS: std::cell::RefCell<Option<TableState>> = const { std::cell::RefCell::new(None) };
     /// The text area's document: app state, reset for every run.
     static AREA: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+    /// The wrapped note's text: app state, reset for every run.
+    static NOTE: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
 }
 
 /// Mark `r` as the widget the scene's [`Pointer`] acts on.
@@ -91,6 +93,9 @@ impl Scene {
             *t.borrow_mut() = "fn frame(ui: &mut Ui) {\n    ui.label(\"hello\");\n    // a line long enough to run past the right edge of the panel\n    for i in 0..10 { ui.button(&i.to_string()); }\n}".into()
         });
         COLUMNS.with(|t| *t.borrow_mut() = None);
+        NOTE.with(|t| {
+            *t.borrow_mut() = "Fillet the outer edges at 2 mm before shelling the body, so the wall keeps an even thickness all the way round.\nCheck draft on the ribs.".into()
+        });
         // A whole second per frame, so every hover fade and ease has finished
         // by the time it is captured.
         let info = FrameInfo { screen_size: Vec2::new(self.size.0, self.size.1), scale, dt: 1.0 };
@@ -270,7 +275,8 @@ fn text_area(ui: &mut Ui) {
         ui.label("Script");
         AREA.with(|t| {
             let mut text = t.borrow_mut();
-            let opts = TextAreaOptions { rows: 7, line_numbers: true, ..Default::default() };
+            // Code: hard lines that scroll sideways, not prose that wraps.
+            let opts = TextAreaOptions { rows: 7, line_numbers: true, wrap: false, ..Default::default() };
             let r = ui.text_area_with("script", &mut text, opts);
             target(r.response.rect);
         });
@@ -615,6 +621,19 @@ fn polygons(ui: &mut Ui) {
     });
 }
 
+/// A wrapped note with a selection dragged across two of its rows: words fold
+/// at the field's width, the selection follows the rows on screen.
+fn text_area_wrapped(ui: &mut Ui) {
+    panel(ui, |ui| {
+        ui.label("Notes");
+        NOTE.with(|t| {
+            let mut text = t.borrow_mut();
+            let r = ui.text_area_with("note", &mut text, TextAreaOptions { rows: 6, ..Default::default() });
+            target(r.response.rect);
+        });
+    });
+}
+
 pub const SCENES: &[Scene] = &[
     Scene { name: "widgets", size: (320.0, 640.0), pointer: Pointer::None, build: widgets },
     Scene { name: "tree", size: (240.0, 230.0), pointer: Pointer::None, build: tree },
@@ -630,6 +649,7 @@ pub const SCENES: &[Scene] = &[
     Scene { name: "tooltip", size: (300.0, 110.0), pointer: Pointer::Hover, build: tooltip_target },
     Scene { name: "text_focused", size: (240.0, 60.0), pointer: Pointer::ClickAndType("Hello"), build: text_input_target },
     Scene { name: "text_area", size: (360.0, 210.0), pointer: Pointer::ClickAndType(""), build: text_area },
+    Scene { name: "text_area_wrapped", size: (300.0, 190.0), pointer: Pointer::DragBy(Vec2::new(-60.0, -42.0)), build: text_area_wrapped },
     Scene { name: "menu_open", size: (260.0, 190.0), pointer: Pointer::ClickAndType(""), build: menu_target },
     Scene { name: "combo_open", size: (260.0, 160.0), pointer: Pointer::ClickAndType(""), build: combo_target },
     // 37px: not a multiple of anything, so a fractional offset would show.

@@ -2636,3 +2636,50 @@ fn c_polygons_and_atlas_pages() {
         libgui_ui_free(u);
     }
 }
+
+/// A wrapped text area from C: options cross, a long line wraps (Down stays
+/// in the paragraph), and wrap = 0 keeps it one row (Down goes to its end).
+#[test]
+fn a_c_text_area_wraps() {
+    let text = "The quick brown fox jumps over the lazy dog while the five boxing wizards jump quickly.";
+    // Where the caret is after Down from the start, with wrapping on or off.
+    let down = |wrap: u8| -> u64 {
+        unsafe {
+            let u = ui();
+            assert_eq!(libgui_install_keymap(u, PLATFORM_WINDOWS), 0);
+            let mut opts = std::mem::zeroed::<LibguiTextAreaOptions>();
+            libgui_text_area_options_default(&mut opts);
+            assert_eq!((opts.rows, opts.height_kind, opts.wrap), (6, 1, 1));
+            opts.wrap = wrap;
+            let mut buf = vec![0u8; 256];
+            buf[..text.len()].copy_from_slice(text.as_bytes());
+            let mut step = |u| -> LibguiTextResponse {
+                libgui_begin_frame(u, 180.0, 300.0, 1.0, 1.0 / 60.0);
+                let r = libgui_text_area_with(u, c("note").as_ptr(), buf.as_mut_ptr() as *mut _, 256, &opts, std::ptr::null_mut());
+                libgui_end_frame(u);
+                r
+            };
+            step(u);
+            let id = step(u).response.id;
+            libgui_set_focus(u, id);
+            step(u);
+            libgui_push_key(u, KEY_DOWN, 1, 0);
+            let r = step(u);
+            assert_eq!(libgui_ui_poisoned(u), 0);
+            libgui_ui_free(u);
+            r.selection_start
+        }
+    };
+    let wrapped = down(1);
+    assert!(wrapped > 0 && (wrapped as usize) < text.len(), "Down in a wrapped field left the paragraph: {wrapped}");
+    assert_eq!(down(0) as usize, text.len(), "Down in an unwrapped one-line field did not go to its end");
+    unsafe {
+        let u = ui();
+        libgui_text_area_options_default(std::ptr::null_mut());
+        frame(u, || {
+            let mut buf = [0u8; 8];
+            libgui_text_area_with(u, c("n").as_ptr(), buf.as_mut_ptr() as *mut _, 8, std::ptr::null(), std::ptr::null_mut());
+        });
+        libgui_ui_free(u);
+    }
+}

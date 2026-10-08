@@ -173,6 +173,66 @@ pub unsafe extern "C" fn libgui_text_area(
     unsafe { field(ui, "libgui_text_area", buf, cap, out_len, |u, t| u.text_area(key, t, rows as usize)) }
 }
 
+/// Mirrors [`libgui::TextAreaOptions`]. Start from
+/// [`libgui_text_area_options_default`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct LibguiTextAreaOptions {
+    /// Height in lines, when `height_kind` is 1 (fit).
+    pub rows: u32,
+    /// 0 fixed (`height` px), 1 fit (`rows` lines), 2 grow (weight `height`).
+    pub height_kind: u32,
+    pub height: f32,
+    /// Fold long lines at word boundaries to the field's width (1, the
+    /// default); 0 keeps lines hard and scrolls sideways, for code.
+    pub wrap: u8,
+    /// A gutter of line numbers.
+    pub line_numbers: u8,
+    pub _pad: [u8; 2],
+}
+
+/// # Safety
+/// `out` null or writable.
+#[no_mangle]
+pub unsafe extern "C" fn libgui_text_area_options_default(out: *mut LibguiTextAreaOptions) {
+    if let Some(o) = unsafe { out.as_mut() } {
+        let d = libgui::TextAreaOptions::default();
+        *o = LibguiTextAreaOptions { rows: d.rows as u32, height_kind: 1, height: 0.0, wrap: d.wrap as u8, line_numbers: d.line_numbers as u8, _pad: [0; 2] };
+    }
+}
+
+/// [`libgui_text_area`] with options: wrapping, line numbers, height. `opts`
+/// may be null for the defaults (wrapped, six rows).
+///
+/// # Safety
+/// As [`libgui_text_input`]; `opts` null or valid.
+#[no_mangle]
+pub unsafe extern "C" fn libgui_text_area_with(
+    ui: *mut LibguiUi,
+    key: *const c_char,
+    buf: *mut c_char,
+    cap: u64,
+    opts: *const LibguiTextAreaOptions,
+    out_len: *mut u64,
+) -> LibguiTextResponse {
+    let key = unsafe { str_or_empty(key, "libgui_text_area_with") };
+    let o = match unsafe { opts.as_ref() } {
+        Some(o) => libgui::TextAreaOptions {
+            rows: o.rows as usize,
+            // A plain number from C, not an enum: anything unknown fits.
+            height: match o.height_kind {
+                0 => libgui::Size::Fixed(o.height),
+                2 => libgui::Size::Grow(if o.height > 0.0 { o.height } else { 1.0 }),
+                _ => libgui::Size::Fit,
+            },
+            line_numbers: o.line_numbers != 0,
+            wrap: o.wrap != 0,
+        },
+        None => libgui::TextAreaOptions::default(),
+    };
+    unsafe { field(ui, "libgui_text_area_with", buf, cap, out_len, |u, t| u.text_area_with(key, t, o)) }
+}
+
 /// A drop-down over a `uint64_t` index the caller owns. `options` is an array
 /// of `count` NUL-terminated strings.
 ///

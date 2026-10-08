@@ -37,6 +37,13 @@ pub(crate) struct TextState {
     /// to where you started, so the *intended position* is remembered rather
     /// than recomputed from the caret each time.
     goal: Goal,
+    /// For a wrapped text area: which visual row of its logical line the view
+    /// starts on (`top_byte` is the logical line's start).
+    top_row: usize,
+    /// The caret sits at a wrap point *at the end of the row above* rather
+    /// than at the start of the row below — where End puts it. One byte offset
+    /// is both places; this says which one the caret is drawn at.
+    upstream: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -98,6 +105,8 @@ struct Edit<'a> {
     text: &'a mut String,
     cursor: usize,
     anchor: usize,
+    /// See `TextState::upstream`.
+    upstream: bool,
     /// What the last mutation did, for the undo history. Every edit goes
     /// through `replace`, so this is the one place a change is described —
     /// and describing it here is what lets the history store the edit rather
@@ -124,6 +133,75 @@ pub(crate) trait Columns {
     fn x_at(&self, line: &str, byte: usize) -> f32;
     /// The byte offset in `line` whose caret is nearest `x`.
     fn byte_at(&self, line: &str, x: f32) -> usize;
+    /// How the logical line `line` breaks into visual rows. One row unless the
+    /// field wraps.
+    fn rows(&self, line: &str) -> RowsOf {
+        RowsOf::One(line.len())
+    }
+}
+
+/// The visual rows of one logical line, as byte offsets into it.
+///
+/// Row `k` starts at `start(k)`. Its **caret range** runs to `end(k)` — the
+/// next row's start, so it includes any spaces the wrap left at its end — and
+/// its **drawn text** to `draw_end(k)`, which leaves those spaces off. A byte
+/// offset at a wrap point belongs to the row below unless the caret says
+/// otherwise (`TextState::upstream`).
+#[derive(Clone)]
+pub(crate) enum RowsOf {
+    /// Not wrapped: one row, the whole line.
+    One(usize),
+    /// Wrapped, from the font system's cache; the line's length.
+    Wrapped(std::rc::Rc<[crate::text::Line]>, usize),
+}
+
+impl RowsOf {
+    pub(crate) fn count(&self) -> usize {
+        match self {
+            RowsOf::One(_) => 1,
+            RowsOf::Wrapped(l, _) => l.len().max(1),
+        }
+    }
+
+    pub(crate) fn start(&self, k: usize) -> usize {
+        match self {
+            RowsOf::One(_) => 0,
+            RowsOf::Wrapped(l, _) => l.get(k).map_or(0, |l| l.start as usize),
+        }
+    }
+
+    pub(crate) fn end(&self, k: usize) -> usize {
+        match self {
+            RowsOf::One(len) => *len,
+            RowsOf::Wrapped(l, len) => l.get(k + 1).map_or(*len, |n| n.start as usize),
+        }
+    }
+
+    pub(crate) fn draw_end(&self, k: usize) -> usize {
+        match self {
+            RowsOf::One(len) => *len,
+            RowsOf::Wrapped(l, len) => l.get(k).map_or(*len, |l| l.end as usize),
+        }
+    }
+
+    pub(crate) fn is_last(&self, k: usize) -> bool {
+        k + 1 >= self.count()
+    }
+
+    /// The row byte `b` of the line is on. At a wrap point, the row below —
+    /// or the one above if `upstream`.
+    pub(crate) fn row_of(&self, b: usize, upstream: bool) -> usize {
+        let n = self.count();
+        let mut k = 0;
+        while k + 1 < n && self.start(k + 1) <= b {
+            k += 1;
+        }
+        if upstream && k > 0 && self.start(k) == b {
+            k - 1
+        } else {
+            k
+        }
+    }
 }
 
 /// A stand-in for tests of the motions that never leave a line.
@@ -178,6 +256,7 @@ impl Edit<'_> {
         self.text.replace_range(a..b, with);
         self.cursor = a + with.len();
         self.anchor = self.cursor;
+        self.upstream = false;
     }
 
     fn insert(&mut self, s: &str) {
@@ -249,60 +328,96 @@ impl Edit<'_> {
         &self.text[self.line_start(pos)..self.line_end(pos)]
     }
 
-    /// The same x on the line above. `None` when there is no line above — a
-    /// single-line field is always in that case.
-    fn line_above(&self, pos: usize, x: f32, cols: &dyn Columns) -> Option<usize> {
-        let start = self.line_start(pos);
-        if start == 0 {
-            return None;
-        }
-        let prev_start = self.line_start(start - 1);
-        let prev = &self.text[prev_start..start - 1];
-        Some(prev_start + cols.byte_at(prev, x))
+    /// The visual row `pos` is on: its logical line's start, that line's
+    /// rows, and the row's index among them.
+    fn vis_row(&self, pos: usize, upstream: bool, cols: &dyn Columns) -> (usize, RowsOf, usize) {
+        let ls = self.line_start(pos);
+        let rows = cols.rows(self.line_at(pos));
+        let k = rows.row_of(pos - ls, upstream);
+        (ls, rows, k)
     }
 
-    fn line_below(&self, pos: usize, x: f32, cols: &dyn Columns) -> Option<usize> {
+    /// The caret at `x` on row `k` of the logical line starting at `ls`, and
+    /// whether that is the end of a row that wraps (drawn at the end of the
+    /// row, not the start of the next).
+    fn at_x_on_row(&self, ls: usize, rows: &RowsOf, k: usize, x: f32, cols: &dyn Columns) -> (usize, bool) {
+        let (s, e) = (rows.start(k), rows.end(k));
+        let b = cols.byte_at(&self.text[ls + s..ls + e], x);
+        (ls + s + b, !rows.is_last(k) && s + b == e)
+    }
+
+    /// The same x on the visual row above. `None` at the first row.
+    fn row_above(&self, pos: usize, x: f32, cols: &dyn Columns) -> Option<(usize, bool)> {
+        let (ls, rows, k) = self.vis_row(pos, self.upstream, cols);
+        if k > 0 {
+            return Some(self.at_x_on_row(ls, &rows, k - 1, x, cols));
+        }
+        if ls == 0 {
+            return None;
+        }
+        let prev = self.line_start(ls - 1);
+        let rows = cols.rows(&self.text[prev..ls - 1]);
+        Some(self.at_x_on_row(prev, &rows, rows.count() - 1, x, cols))
+    }
+
+    /// The same x on the visual row below. `None` at the last row.
+    fn row_below(&self, pos: usize, x: f32, cols: &dyn Columns) -> Option<(usize, bool)> {
+        let (ls, rows, k) = self.vis_row(pos, self.upstream, cols);
+        if !rows.is_last(k) {
+            return Some(self.at_x_on_row(ls, &rows, k + 1, x, cols));
+        }
         let end = self.line_end(pos);
         if end >= self.len() {
             return None;
         }
-        let next_start = end + 1;
-        let next_end = self.line_end(next_start);
-        let next = &self.text[next_start..next_end];
-        Some(next_start + cols.byte_at(next, x))
+        let next = end + 1;
+        let rows = cols.rows(&self.text[next..self.line_end(next)]);
+        Some(self.at_x_on_row(next, &rows, 0, x, cols))
     }
 
-    fn move_to(&mut self, to: usize, extend: bool) {
+    fn move_to(&mut self, to: usize, extend: bool, upstream: bool) {
+        self.upstream = upstream;
         self.cursor = to.min(self.len());
         if !extend {
             self.anchor = self.cursor;
         }
     }
 
-    /// Where `motion` takes the caret. `goal` is the x Up and Down aim for;
-    /// with no line to move to they fall back to the ends of the text, which
-    /// is what a single-line field wants from them.
-    fn target(&self, motion: Motion, goal: Goal, cols: &dyn Columns) -> usize {
+    /// Where `motion` takes the caret, and whether it lands at the end of a
+    /// wrapped row (see `TextState::upstream`). `goal` is the x Up and Down
+    /// aim for; with no row to move to they fall back to the ends of the
+    /// text, which is what a single-line field wants from them.
+    ///
+    /// Home, End, Up and Down work in **visual** rows: in a wrapped field End
+    /// goes to the end of the row on screen, not of the paragraph.
+    fn target(&self, motion: Motion, goal: Goal, cols: &dyn Columns) -> (usize, bool) {
         let n = self.len();
         let x = || goal.unwrap_or_else(|| self.caret_x(cols));
         match motion {
-            Motion::Left => self.prev_char(self.cursor),
-            Motion::Right => self.next_char(self.cursor),
-            Motion::WordLeft => self.word_left(self.cursor),
-            Motion::WordRight => self.word_right(self.cursor),
-            Motion::LineStart => self.line_start(self.cursor),
-            Motion::LineEnd => self.line_end(self.cursor),
-            Motion::Up => self.line_above(self.cursor, x(), cols).unwrap_or(0),
-            Motion::Down => self.line_below(self.cursor, x(), cols).unwrap_or(n),
-            Motion::DocStart => 0,
-            Motion::DocEnd => n,
+            Motion::Left => (self.prev_char(self.cursor), false),
+            Motion::Right => (self.next_char(self.cursor), false),
+            Motion::WordLeft => (self.word_left(self.cursor), false),
+            Motion::WordRight => (self.word_right(self.cursor), false),
+            Motion::LineStart => {
+                let (ls, rows, k) = self.vis_row(self.cursor, self.upstream, cols);
+                (ls + rows.start(k), false)
+            }
+            Motion::LineEnd => {
+                let (ls, rows, k) = self.vis_row(self.cursor, self.upstream, cols);
+                (ls + rows.end(k), !rows.is_last(k))
+            }
+            Motion::Up => self.row_above(self.cursor, x(), cols).unwrap_or((0, false)),
+            Motion::Down => self.row_below(self.cursor, x(), cols).unwrap_or((n, false)),
+            Motion::DocStart => (0, false),
+            Motion::DocEnd => (n, false),
         }
     }
 
-    /// The caret's x within its own line.
+    /// The caret's x within its own visual row.
     fn caret_x(&self, cols: &dyn Columns) -> f32 {
-        let start = self.line_start(self.cursor);
-        cols.x_at(self.line_at(self.cursor), self.cursor - start)
+        let (ls, rows, k) = self.vis_row(self.cursor, self.upstream, cols);
+        let s = ls + rows.start(k);
+        cols.x_at(&self.text[s..ls + rows.end(k)], self.cursor - s)
     }
 
     /// Apply one action. Returns true if the text changed.
@@ -320,9 +435,9 @@ impl Edit<'_> {
             UiAction::Move { motion, select } => {
                 // A plain arrow with a selection lands on its near edge
                 // rather than moving from the caret.
-                let to = match motion {
-                    Motion::Left if self.has_selection() && !select => self.selection().0,
-                    Motion::Right if self.has_selection() && !select => self.selection().1,
+                let (to, up) = match motion {
+                    Motion::Left if self.has_selection() && !select => (self.selection().0, false),
+                    Motion::Right if self.has_selection() && !select => (self.selection().1, false),
                     m => {
                         if vertical && goal.is_none() {
                             *goal = Some(self.caret_x(cols));
@@ -330,7 +445,7 @@ impl Edit<'_> {
                         self.target(m, *goal, cols)
                     }
                 };
-                self.move_to(to, select);
+                self.move_to(to, select, up);
                 false
             }
             UiAction::Delete(_) if self.has_selection() => {
@@ -338,16 +453,17 @@ impl Edit<'_> {
                 true
             }
             UiAction::Delete(motion) => {
-                let to = self.target(motion, None, cols);
+                let (to, _) = self.target(motion, None, cols);
                 if to == self.cursor {
                     return false;
                 }
                 self.replace(self.cursor.min(to), self.cursor.max(to), "");
                 true
             }
-    UiAction::SelectAll => {
+            UiAction::SelectAll => {
                 self.anchor = 0;
                 self.cursor = self.len();
+                self.upstream = false;
                 false
             }
             _ => false,
@@ -408,7 +524,7 @@ struct Edited2 {
 /// Shared by both fields: the single-line one differs only in refusing
 /// newlines, and in treating Enter as "commit" because it has nowhere to put
 /// a line break.
-fn apply_events(ui: &mut Ui, id: Id, text: &mut String, st: &mut TextState, multiline: bool) -> Edited2 {
+fn apply_events(ui: &mut Ui, id: Id, text: &mut String, st: &mut TextState, multiline: bool, wrap: Option<f32>) -> Edited2 {
     let mut out = Edited2 { changed: false, submitted: false, cancelled: false, can_undo: false, can_redo: false };
     let mut hist = ui.text_history.remove(&id).unwrap_or_default();
     // No whole-document comparison here to spot the app writing the string
@@ -421,7 +537,7 @@ fn apply_events(ui: &mut Ui, id: Id, text: &mut String, st: &mut TextState, mult
     // caret is at on one line decides where it lands on the next.
     let size = ui.theme.metrics.font_size;
     let events = ui.input.events.clone();
-    let mut e = Edit { text, cursor: st.cursor, anchor: st.anchor, change: None };
+    let mut e = Edit { text, cursor: st.cursor, anchor: st.anchor, upstream: st.upstream, change: None };
     for ev in events {
         match ev {
             Event::Text(s) => {
@@ -468,6 +584,7 @@ fn apply_events(ui: &mut Ui, id: Id, text: &mut String, st: &mut TextState, mult
                     Some((c, a)) => {
                         e.cursor = c.min(e.len());
                         e.anchor = a.min(e.len());
+                        e.upstream = false;
                         out.changed = true;
                     }
                     None => ui.release_action(UiAction::Undo),
@@ -478,13 +595,14 @@ fn apply_events(ui: &mut Ui, id: Id, text: &mut String, st: &mut TextState, mult
                     Some((c, a)) => {
                         e.cursor = c.min(e.len());
                         e.anchor = a.min(e.len());
+                        e.upstream = false;
                         out.changed = true;
                     }
                     None => ui.release_action(UiAction::Redo),
                 }
             }
             Event::Action(a @ UiAction::Delete(_)) => {
-                let cols = LineColumns { fonts: &ui.fonts, font: ui.font, size };
+                let cols = LineColumns { fonts: &ui.fonts, font: ui.font, size, wrap };
                 out.changed |= edited(&mut e, &mut hist, Edited::Deleting, now, pause, |e| {
                     e.action(a, &mut None, &cols);
                 });
@@ -492,7 +610,7 @@ fn apply_events(ui: &mut Ui, id: Id, text: &mut String, st: &mut TextState, mult
             Event::Action(a @ (UiAction::Move { .. } | UiAction::SelectAll)) => {
                 // A caret move ends the run: what is typed next is its own step.
                 hist.break_run();
-                let cols = LineColumns { fonts: &ui.fonts, font: ui.font, size };
+                let cols = LineColumns { fonts: &ui.fonts, font: ui.font, size, wrap };
                 out.changed |= e.action(a, &mut st.goal, &cols);
             }
             _ => continue,
@@ -501,6 +619,7 @@ fn apply_events(ui: &mut Ui, id: Id, text: &mut String, st: &mut TextState, mult
     }
     st.cursor = e.cursor;
     st.anchor = e.anchor;
+    st.upstream = e.upstream;
     out.can_undo = hist.can_undo();
     out.can_redo = hist.can_redo();
     ui.text_history.insert(id, hist);
@@ -553,7 +672,7 @@ impl Ui {
         let (mut can_undo, mut can_redo) = (false, false);
         // While a popup is open the keys are its, even with focus here.
         if self.focused == Some(id) && self.keys_reach() {
-            let out = apply_events(self, id, text, &mut st, false);
+            let out = apply_events(self, id, text, &mut st, false, None);
             changed = out.changed;
             submitted = out.submitted;
             cancelled = out.cancelled;
@@ -672,7 +791,7 @@ mod tests {
 
     fn run(state: (String, usize, usize), actions: &[UiAction]) -> (String, usize, usize) {
         let (mut text, cursor, anchor) = state;
-        let mut e = Edit { text: &mut text, cursor, anchor, change: None };
+        let mut e = Edit { text: &mut text, cursor, anchor, upstream: false, change: None };
         for &a in actions {
             e.action(a, &mut None, &NoColumns);
         }
@@ -716,7 +835,7 @@ mod tests {
         // Offsets are bytes: "héllo " is 7 bytes, and "wörld" is 6.
         let (mut text, cursor, anchor) = run(edit("héllo wörld", 13), &[sel(WordLeft)]);
         assert_eq!((cursor, anchor), (7, 13));
-        let mut e = Edit { text: &mut text, cursor, anchor, change: None };
+        let mut e = Edit { text: &mut text, cursor, anchor, upstream: false, change: None };
         assert_eq!(e.selected_text(), "wörld");
         e.insert("libgui");
         assert_eq!(text, "héllo libgui");
@@ -804,94 +923,117 @@ pub struct TextAreaOptions {
     /// Height in lines, when `height` is `Size::Fit`.
     pub rows: usize,
     pub height: Size,
-    /// Show a gutter of line numbers, as a script editor does.
+    /// Show a gutter of line numbers, as a script editor does. With `wrap`, a
+    /// number marks the first row of each line.
     pub line_numbers: bool,
+    /// Fold long lines at word boundaries to the field's width, the way a note
+    /// or a description reads. Off, long lines scroll sideways, which is what
+    /// code wants. On by default.
+    pub wrap: bool,
 }
 
 impl Default for TextAreaOptions {
     fn default() -> Self {
-        Self { rows: 6, height: Size::Fit, line_numbers: false }
+        Self { rows: 6, height: Size::Fit, line_numbers: false, wrap: true }
     }
 }
 
-/// One visible line, ready to paint: its y, its glyphs, the part of it that is
-/// selected, and its number for the gutter.
+/// One visible row, ready to paint: its y, its glyphs, the part of it that is
+/// selected, and its number for the gutter (empty on a wrapped continuation).
+/// On the caret's row while an input method is composing, `text` is the part
+/// before the caret and `compose` the rest.
 struct Row {
     y: f32,
     text: FrameText,
     selection: Option<(f32, f32)>,
     number: FrameText,
+    compose: Option<Compose>,
 }
 
-/// Newlines in `s`. Bytes, not chars: the only thing a line boundary is.
-fn count_lines(s: &str) -> usize {
-    s.as_bytes().iter().filter(|&&b| b == b'\n').count()
+/// An input method's uncommitted text, drawn inline at the caret: the
+/// composing text, what follows it on the row, where it starts and how wide
+/// it is.
+#[derive(Clone, Copy)]
+struct Compose {
+    pre: FrameText,
+    tail: FrameText,
+    x: f32,
+    w: f32,
 }
 
-/// Move `start` (a line start) by `delta` whole lines, staying a line start.
-/// Walks only the lines it crosses, which is what makes a scroll or a caret
-/// nudge cost the distance moved rather than the size of the document.
-fn advance_lines(text: &str, start: usize, delta: isize) -> usize {
-    let mut at = start;
-    for _ in 0..delta.unsigned_abs() {
-        if delta > 0 {
-            match text[at..].find('\n') {
-                Some(i) => at += i + 1,
-                None => return at,
-            }
-        } else {
-            if at == 0 {
-                return 0;
-            }
-            at = text[..at - 1].rfind('\n').map_or(0, |i| i + 1);
+/// The logical line starting at `start`.
+fn line_from(text: &str, start: usize) -> &str {
+    let end = text[start..].find('\n').map_or(text.len(), |i| start + i);
+    &text[start..end]
+}
+
+/// Move the view's anchor one visual row down (`dir > 0`) or up. False at an
+/// end of the document. Crosses into the next or previous logical line only
+/// when its rows run out, so a scroll costs the rows it passes.
+fn step_anchor(text: &str, st: &mut TextState, dir: i32, cols: &dyn Columns) -> bool {
+    if dir > 0 {
+        let line = line_from(text, st.top_byte);
+        if !cols.rows(line).is_last(st.top_row) {
+            st.top_row += 1;
+            return true;
         }
-    }
-    at
-}
-
-/// Move the anchor by `delta` whole lines, keeping its line number in step.
-fn move_anchor(text: &str, st: &mut TextState, delta: isize) {
-    let to = advance_lines(text, st.top_byte, delta);
-    // `advance_lines` stops at the ends, so the line number follows what it
-    // actually did rather than what it was asked to do.
-    let moved = if to >= st.top_byte {
-        count_lines(&text[st.top_byte..to]) as isize
+        let end = st.top_byte + line.len();
+        if end >= text.len() {
+            return false;
+        }
+        st.top_byte = end + 1;
+        st.top_line += 1;
+        st.top_row = 0;
+        true
     } else {
-        -(count_lines(&text[to..st.top_byte]) as isize)
-    };
-    st.top_byte = to;
-    st.top_line = (st.top_line as isize + moved).max(0) as usize;
+        if st.top_row > 0 {
+            st.top_row -= 1;
+            return true;
+        }
+        if st.top_byte == 0 {
+            return false;
+        }
+        let prev = text[..st.top_byte - 1].rfind('\n').map_or(0, |i| i + 1);
+        st.top_byte = prev;
+        st.top_line = st.top_line.saturating_sub(1);
+        st.top_row = cols.rows(line_from(text, prev)).count() - 1;
+        true
+    }
 }
 
-/// Fold whole lines out of the fractional offset, and stop at the ends.
-///
-/// Scrolling down stops with the last line at the bottom of the view, which
-/// needs to know only whether `rows` more lines exist — a look ahead of one
-/// screen, not a count of the document.
-fn normalise_anchor(text: &str, st: &mut TextState, lh: f32, rows: usize) {
+/// Fold whole rows out of the fractional offset, and stop at the ends: the
+/// last row stops at the bottom of the view, which needs to know only whether
+/// `rows` more rows exist — a look ahead of one screen, not a count of the
+/// document.
+fn normalise_rows(text: &str, st: &mut TextState, lh: f32, rows: usize, cols: &dyn Columns) {
     while st.top_frac < 0.0 {
-        if st.top_byte == 0 {
+        if !step_anchor(text, st, -1, cols) {
             st.top_frac = 0.0;
             break;
         }
-        move_anchor(text, st, -1);
         st.top_frac += lh;
     }
     while st.top_frac >= lh {
-        // At the bottom when a screenful from here reaches the end.
-        let end_of_screen = advance_lines(text, st.top_byte, rows as isize);
-        if text[end_of_screen..].find('\n').is_none() && end_of_screen >= text.len().saturating_sub(1) {
+        let mut probe = *st;
+        let mut ahead = 0;
+        while ahead < rows && step_anchor(text, &mut probe, 1, cols) {
+            ahead += 1;
+        }
+        if ahead < rows {
             st.top_frac = st.top_frac.min(lh - 1.0).max(0.0);
             break;
         }
-        let before = st.top_byte;
-        move_anchor(text, st, 1);
-        if st.top_byte == before {
+        if !step_anchor(text, st, 1, cols) {
             st.top_frac = 0.0;
             break;
         }
         st.top_frac -= lh;
     }
+}
+
+/// Newlines in `s`. Bytes, not chars: the only thing a line boundary is.
+fn count_lines(s: &str) -> usize {
+    s.as_bytes().iter().filter(|&&b| b == b'\n').count()
 }
 
 /// The line number and line start of `at`, counted from the beginning. The one
@@ -908,6 +1050,8 @@ struct LineColumns<'a> {
     fonts: &'a crate::Fonts,
     font: crate::FontId,
     size: f32,
+    /// Wrap at this width, logical px; `None` for hard lines only.
+    wrap: Option<f32>,
 }
 
 impl Columns for LineColumns<'_> {
@@ -916,6 +1060,13 @@ impl Columns for LineColumns<'_> {
     }
     fn byte_at(&self, line: &str, x: f32) -> usize {
         self.fonts.byte_at_x(self.font, self.size, line, x)
+    }
+    fn rows(&self, line: &str) -> RowsOf {
+        match self.wrap {
+            // An empty line is one empty row, and needs no lookup.
+            Some(w) if !line.is_empty() => RowsOf::Wrapped(self.fonts.wrap(self.font, self.size, line, w), line.len()),
+            _ => RowsOf::One(line.len()),
+        }
     }
 }
 
@@ -935,8 +1086,12 @@ impl Ui {
     /// is on screen. A focused, idle frame over a multi-megabyte file costs
     /// the same as one over a short note.
     ///
-    /// Lines are hard: there is no word wrapping yet, and a long line scrolls
-    /// sideways rather than folding.
+    /// Long lines **wrap** at word boundaries to the field's width; Home, End,
+    /// Up and Down move by the rows on screen, and the caret at a wrap point
+    /// can sit at the end of one row or the start of the next, as in any
+    /// editor. `TextAreaOptions { wrap: false, .. }` keeps lines hard and
+    /// scrolls sideways, for code. An input method's composition is drawn
+    /// inline at the caret, underlined.
     pub fn text_area(&mut self, key: &str, text: &mut String, rows: usize) -> TextResponse {
         self.text_area_with(key, text, TextAreaOptions { rows, ..Default::default() })
     }
@@ -957,10 +1112,13 @@ impl Ui {
         let gutter = if opts.line_numbers { (size * 2.6).ceil() } else { 0.0 };
         let view = Rect::new(resp.rect.x + pad + gutter, resp.rect.y + pad, (resp.rect.w - pad * 2.0 - gutter).max(1.0), (resp.rect.h - pad * 2.0).max(1.0));
         let rows_visible = ((view.h / lh).ceil() as usize).max(1);
+        // Wrap to the width the field had last frame. On its first frame it
+        // has none yet, and wrapping to nothing would fold every character.
+        let wrap = (opts.wrap && resp.rect.w > 0.0).then_some((view.w - 2.0).max(size));
 
         // ---- the anchor ----------------------------------------------------
-        // Everything below is measured from the first visible line, so an idle
-        // frame reads the lines it draws and nothing else. The anchor is
+        // Everything below is measured from the first visible row, so an idle
+        // frame reads the rows it draws and nothing else. The anchor is
         // checked first, because the app owns the string and may have replaced
         // it between frames: a byte offset that is no longer a line start
         // means the document underneath moved.
@@ -968,20 +1126,37 @@ impl Ui {
         if st.top_byte > 0 && text.as_bytes().get(st.top_byte - 1) != Some(&b'\n') {
             st.top_byte = 0;
             st.top_line = 0;
+            st.top_row = 0;
             st.top_frac = 0.0;
         }
         st.cursor = floor_boundary(text, st.cursor);
         st.anchor = floor_boundary(text, st.anchor);
+        {
+            // The field may be narrower or wider than last frame: the anchor's
+            // line may now have fewer rows.
+            let cols = LineColumns { fonts: &self.fonts, font: self.font, size, wrap };
+            let n = cols.rows(line_from(text, st.top_byte)).count();
+            st.top_row = st.top_row.min(n - 1);
+        }
 
         // ---- pointer -------------------------------------------------------
-        // Byte offset under a window point. The point is inside the view, so
-        // the line it names is reached from the anchor, not from the start of
-        // the document.
-        let row_at = |ui: &Ui, p: Vec2, text: &str, st: &TextState| -> usize {
-            let delta = ((p.y - view.y + st.top_frac) / lh).floor().max(0.0) as isize;
-            let start = advance_lines(text, st.top_byte, delta);
-            let end = text[start..].find('\n').map_or(text.len(), |i| start + i);
-            start + ui.fonts.byte_at_x(ui.font, size, &text[start..end], p.x - view.x + st.scroll)
+        // The caret under a window point, and whether it lands at the end of
+        // a wrapped row. The point is inside the view, so the row it names is
+        // reached from the anchor, not from the start of the document.
+        let row_at = |ui: &Ui, p: Vec2, text: &str, st: &TextState| -> (usize, bool) {
+            let cols = LineColumns { fonts: &ui.fonts, font: ui.font, size, wrap };
+            let delta = ((p.y - view.y + st.top_frac) / lh).floor().max(0.0) as usize;
+            let mut probe = *st;
+            for _ in 0..delta {
+                if !step_anchor(text, &mut probe, 1, &cols) {
+                    break;
+                }
+            }
+            let line = line_from(text, probe.top_byte);
+            let rows = cols.rows(line);
+            let (a, b) = (rows.start(probe.top_row), rows.end(probe.top_row));
+            let at = ui.fonts.byte_at_x(ui.font, size, &line[a..b], p.x - view.x + st.scroll);
+            (probe.top_byte + a + at, !rows.is_last(probe.top_row) && a + at == b)
         };
 
         if resp.pressed {
@@ -989,15 +1164,16 @@ impl Ui {
             if let Some(h) = self.text_history.get_mut(&id) {
                 h.break_run();
             }
-            let i = row_at(self, resp.mouse_pos, text, &st);
+            let (i, up) = row_at(self, resp.mouse_pos, text, &st);
             st.cursor = i;
+            st.upstream = up;
             if !self.input.modifiers.shift {
                 st.anchor = i;
             }
             st.goal = None;
             st.last_move = self.time;
         } else if resp.active && (self.mouse_delta.x != 0.0 || self.mouse_delta.y != 0.0) {
-            st.cursor = row_at(self, resp.mouse_pos, text, &st);
+            (st.cursor, st.upstream) = row_at(self, resp.mouse_pos, text, &st);
             st.last_move = self.time;
         }
 
@@ -1008,7 +1184,7 @@ impl Ui {
         let (mut can_undo, mut can_redo) = (false, false);
         // While a popup is open the keys are its, even with focus here.
         if self.focused == Some(id) && self.keys_reach() {
-            let out = apply_events(self, id, text, &mut st, true);
+            let out = apply_events(self, id, text, &mut st, true, wrap);
             changed = out.changed;
             submitted = out.submitted;
             cancelled = out.cancelled;
@@ -1027,24 +1203,49 @@ impl Ui {
             let (line, byte) = locate(text, st.cursor);
             st.top_line = line;
             st.top_byte = byte;
+            st.top_row = 0;
             st.top_frac = 0.0;
         }
 
-        // ---- where the caret is, relative to the anchor ---------------------
+        let fonts = self.fonts.clone();
+        let cols = LineColumns { fonts: &fonts, font: self.font, size, wrap };
+        {
+            // An edit inside the anchor's line can take rows away from it.
+            let n = cols.rows(line_from(text, st.top_byte)).count();
+            st.top_row = st.top_row.min(n - 1);
+        }
+
+        // ---- where the caret is ------------------------------------------
         let line_start = text[..st.cursor].rfind('\n').map_or(0, |i| i + 1);
         let line_end = text[st.cursor..].find('\n').map_or(text.len(), |i| st.cursor + i);
-        let caret_row = if st.cursor >= st.top_byte {
+        let caret_line = if st.cursor >= st.top_byte {
             self.text_scanned += st.cursor - st.top_byte;
             st.top_line + count_lines(&text[st.top_byte..st.cursor])
         } else {
             self.text_scanned += st.top_byte - st.cursor;
             st.top_line.saturating_sub(count_lines(&text[st.cursor..st.top_byte]))
         };
+        let caret_rows = cols.rows(&text[line_start..line_end]);
+        let caret_k = caret_rows.row_of(st.cursor - line_start, st.upstream);
+        // How many rows below the anchor's row the caret's is, looking no
+        // further than a screen and a row: past that, it is simply off screen.
+        let caret_offset = |st: &TextState| -> Option<usize> {
+            let mut probe = *st;
+            for i in 0..=rows_visible + 1 {
+                if probe.top_byte == line_start && probe.top_row == caret_k {
+                    return Some(i);
+                }
+                if !step_anchor(text, &mut probe, 1, &cols) {
+                    return None;
+                }
+            }
+            None
+        };
 
         // ---- scrolling -----------------------------------------------------
         let wheel = if resp.hovered { self.input.scroll.y } else { 0.0 };
         st.top_frac -= wheel;
-        normalise_anchor(text, &mut st, lh, rows_visible);
+        normalise_rows(text, &mut st, lh, rows_visible, &cols);
 
         // Keep the caret in view — but only on the frames the caret actually
         // moved. Doing it on every frame means a wheel scroll is undone before
@@ -1053,24 +1254,42 @@ impl Ui {
         // looked like.
         let caret_moved = st.last_move == self.time;
         if focused && caret_moved {
-            let delta = if caret_row < st.top_line {
-                caret_row as isize - st.top_line as isize
-            } else if caret_row + 1 > st.top_line + rows_visible {
-                (caret_row + 1 - rows_visible) as isize - st.top_line as isize
-            } else {
-                0
-            };
-            if delta != 0 {
-                move_anchor(text, &mut st, delta);
-                st.top_frac = 0.0;
+            let above = st.cursor < st.top_byte || (line_start == st.top_byte && caret_k < st.top_row);
+            match caret_offset(&st) {
+                // In view: leave it.
+                Some(i) if !above && i < rows_visible => {}
+                // A row below the bottom: scroll down just far enough.
+                Some(i) if !above => {
+                    for _ in 0..(i + 1).saturating_sub(rows_visible) {
+                        step_anchor(text, &mut st, 1, &cols);
+                    }
+                    st.top_frac = 0.0;
+                }
+                // Above the view, or further than a screen: put the anchor on
+                // the caret's row — at the top if it is above, at the bottom
+                // if below — without walking the rows in between.
+                _ => {
+                    st.top_byte = line_start;
+                    st.top_line = caret_line;
+                    st.top_row = caret_k;
+                    st.top_frac = 0.0;
+                    if !above {
+                        for _ in 0..rows_visible.saturating_sub(1) {
+                            if !step_anchor(text, &mut st, -1, &cols) {
+                                break;
+                            }
+                        }
+                    }
+                }
             }
         }
 
         let line_src = &text[line_start..line_end];
-        let caret_x = self.fonts.caret_x(self.font, size, line_src, st.cursor - line_start);
+        let (cr0, cr1) = (caret_rows.start(caret_k), caret_rows.end(caret_k));
+        let caret_x = fonts.caret_x(self.font, size, &line_src[cr0..cr1], st.cursor - line_start - cr0);
         // The column, in chars, for whoever draws a status bar.
         let col = line_src[..st.cursor - line_start].chars().count();
-        if focused {
+        if focused && wrap.is_none() {
             if caret_x - st.scroll > view.w - 2.0 {
                 st.scroll = caret_x - view.w + 2.0;
             }
@@ -1079,39 +1298,74 @@ impl Ui {
             }
             st.scroll = st.scroll.max(0.0);
         }
+        if wrap.is_some() {
+            st.scroll = 0.0; // a wrapped field never scrolls sideways
+        }
+
+        // What an input method is composing, drawn inline at the caret.
+        let composing = if focused { self.preedit().map(|(t, c)| (t.to_string(), c)) } else { None };
 
         // ---- what to draw --------------------------------------------------
         // From the anchor forward: a five-thousand-line script draws what a
         // screenful draws, and reads no more of the document than that.
         let (sel_a, sel_b) = (st.cursor.min(st.anchor), st.cursor.max(st.anchor));
         let mut rows: Vec<Row> = Vec::with_capacity(rows_visible + 1);
-        let mut at = st.top_byte;
-        for r in st.top_line..st.top_line + rows_visible + 1 {
-            let end = text[at..].find('\n').map_or(text.len(), |i| at + i);
-            let src = &text[at..end];
-            let y = (r - st.top_line) as f32 * lh - st.top_frac;
-            // This line's share of the selection, if any. Measured only when
+        let mut probe = st;
+        let mut caret_y = None;
+        let mut pre_caret = 0.0;
+        let mut ime_w = 1.0f32;
+        for i in 0..=rows_visible {
+            let at = probe.top_byte;
+            let line = line_from(text, at);
+            let lrows = cols.rows(line);
+            let k = probe.top_row;
+            let (r0, r1, rd) = (lrows.start(k), lrows.end(k), lrows.draw_end(k));
+            let last = lrows.is_last(k);
+            let (rs, re) = (at + r0, at + r1);
+            let caret_src = &line[r0..r1];
+            let y = i as f32 * lh - st.top_frac;
+            // This row's share of the selection, if any. Measured only when
             // there is one: a caret table per visible line is what made an
             // idle text area allocate on every frame.
-            let sel = if sel_b > sel_a && sel_b > at && sel_a <= end {
-                let x0 = self.fonts.caret_x(self.font, size, src, sel_a.max(at) - at);
-                let x1 = self.fonts.caret_x(self.font, size, src, sel_b.min(end) - at);
+            let sel = if sel_b > sel_a && sel_b > rs && sel_a <= re && !(sel_a == re && !last) {
+                let x0 = fonts.caret_x(self.font, size, caret_src, sel_a.max(rs) - rs);
+                let x1 = fonts.caret_x(self.font, size, caret_src, sel_b.min(re) - rs);
                 // A selected newline shows as a sliver past the last glyph.
-                let x1 = if sel_b > end { x1 + size * 0.35 } else { x1 };
+                let x1 = if last && sel_b > re { x1 + size * 0.35 } else { x1 };
                 Some((x0, x1))
             } else {
                 None
             };
-            let number = if opts.line_numbers { self.frame_text(&(r + 1).to_string()) } else { self.frame_text("") };
-            self.text_scanned += end - at;
-            rows.push(Row { y, text: self.frame_text(src), selection: sel, number });
-            if end >= text.len() {
+            let number = if opts.line_numbers && k == 0 { self.frame_text(&(probe.top_line + 1).to_string()) } else { self.frame_text("") };
+            self.text_scanned += r1 - r0;
+            let is_caret_row = at == line_start && k == caret_k;
+            if is_caret_row {
+                caret_y = Some(y);
+            }
+            // While composing, the caret's row is drawn in three runs: before
+            // the caret, the composition (underlined), and after.
+            let compose = match &composing {
+                Some((t, c)) if is_caret_row => {
+                    let split = st.cursor - at;
+                    let w = fonts.measure(self.font, size, t).x;
+                    pre_caret = fonts.measure(self.font, size, &t[..*c]).x;
+                    ime_w = w.max(1.0);
+                    let cut = split.clamp(r0, rd.max(r0));
+                    Some((cut, Compose { pre: self.frame_text(t), tail: self.frame_text(&line[cut..rd.max(cut)]), x: caret_x, w }))
+                }
+                _ => None,
+            };
+            let (shown, compose) = match compose {
+                Some((cut, c)) => (self.frame_text(&line[r0..cut]), Some(c)),
+                None => (self.frame_text(&line[r0..rd]), None),
+            };
+            rows.push(Row { y, text: shown, selection: sel, number, compose });
+            if !step_anchor(text, &mut probe, 1, &cols) {
                 break;
             }
-            at = end + 1;
         }
-        let caret_y = (caret_row as f32 - st.top_line as f32) * lh - st.top_frac;
-        let row = caret_row;
+        let caret_y = caret_y.unwrap_or(-10.0 * lh);
+        let row = caret_line;
 
         let caret_on = focused && (((self.time - st.last_move) * 1.8) as i64 % 2 == 0);
         let focus_t = self.animate_bool(id, 0, focused);
@@ -1124,7 +1378,9 @@ impl Ui {
             h => h,
         };
         let scroll_x = st.scroll;
-        let caret_pos = Vec2::new(caret_x, caret_y);
+        // A caret in the spaces a wrap left at a row's end hangs off the
+        // right; keep it at the edge, where every editor draws it.
+        let caret_pos = Vec2::new(if wrap.is_some() { caret_x.min(view.w - 1.0) } else { caret_x }, caret_y);
         let layout = Layout::leaf(Size::Grow(1.0), height);
         self.add_leaf(id, layout, Vec2::new(80.0, lh + pad * 2.0), true, move |p, r| {
             let radius = s.radius;
@@ -1146,10 +1402,20 @@ impl Ui {
                     let g = Rect::new(r.x + pad, ly, gutter - 6.0, lh);
                     p.text_right(g, size, s.placeholder, row.number);
                 }
-                p.text(Vec2::new(view.x - scroll_x, ly), size, s.text, row.text);
+                let x0 = view.x - scroll_x;
+                p.text(Vec2::new(x0, ly), size, s.text, row.text);
+                if let Some(c) = row.compose {
+                    p.text(Vec2::new(x0 + c.x, ly), size, s.text, c.pre);
+                    p.text(Vec2::new(x0 + c.x + c.w, ly), size, s.text, c.tail);
+                    // Underlined, which is how every platform says "not
+                    // committed".
+                    let u = p.hairline(x0 + c.x, ly + lh - 2.0, 1.0, 1.0);
+                    p.rect(Rect::new(u.x, u.y, c.w, u.w), s.text, 0.0);
+                }
             }
             if caret_on {
-                let x = (view.x - scroll_x + caret_pos.x).round();
+                // While composing, the caret is the IME's, inside its text.
+                let x = (view.x - scroll_x + caret_pos.x + pre_caret).round();
                 p.rect(Rect::new(x - 0.75, view.y + caret_pos.y - 1.0, 1.5, lh + 2.0), s.caret, 0.75);
             }
             p.draw.pop_clip();
@@ -1158,7 +1424,9 @@ impl Ui {
         if focused {
             let x = resp.rect.x + pad + gutter - scroll_x + caret_pos.x;
             let y = resp.rect.y + pad + caret_pos.y;
-            self.ime_rect = Some(Rect::new(x, y, 1.0, lh));
+            // The rect of what is being composed, so the candidate window sits
+            // under it.
+            self.ime_rect = Some(Rect::new(x, y, ime_w, lh));
         }
         TextResponse { response: resp, changed, submitted, cancelled, focused, caret: (row, col), selection: (sel_a, sel_b), can_undo, can_redo }
     }

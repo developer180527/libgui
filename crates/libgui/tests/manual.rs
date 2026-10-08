@@ -299,3 +299,11 @@ fn fills(p: &mut Painter, region: &[Vec2], plate: &[Vec2], bore_a: &[Vec2], bore
     p.fill_polygon_with_holes(plate, &[bore_a, bore_b], steel);     // a profile with holes
     p.fill_mesh(points, indices, colour);                           // your own triangles
 }
+
+#[allow(dead_code)]
+fn text_areas(ui: &mut Ui, note: &mut String, code: &mut String) {
+    // A note: wraps at the field's width (the default).
+    ui.text_area_with("note", note, TextAreaOptions { rows: 6, ..Default::default() });
+    // A script: hard lines that scroll sideways, with line numbers.
+    ui.text_area_with("script", code, TextAreaOptions { wrap: false, line_numbers: true, ..Default::default() });
+}

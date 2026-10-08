@@ -1143,6 +1143,11 @@ impl Fonts {
         self.0.borrow().carets(font, size, text)
     }
 
+    /// `text` broken into lines no wider than `max`, cached.
+    pub(crate) fn wrap(&self, font: FontId, size: f32, text: &str, max: f32) -> Rc<[Line]> {
+        self.0.borrow().wrap(font, size, text, max)
+    }
+
     pub fn wrap_lines_for_test(&self, font: FontId, size: f32, text: &str, max: f32) -> Vec<String> {
         self.0.borrow().wrap_lines_for_test(font, size, text, max)
     }

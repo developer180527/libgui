@@ -675,6 +675,11 @@ public:
             return libgui_text_area(h_, key, buf, cap, rows, need);
         });
     }
+    LibguiTextResponse text_area(const char* key, std::string& s, const LibguiTextAreaOptions& opts) {
+        return edit(s, [&](char* buf, uint64_t cap, uint64_t* need) {
+            return libgui_text_area_with(h_, key, buf, cap, &opts, need);
+        });
+    }
 
     // A widget you draw yourself, from a lambda. The lambda is copied to the
     // heap and deleted through `drop_user`, so it may capture freely.

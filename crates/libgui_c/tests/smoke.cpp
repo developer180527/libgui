@@ -313,6 +313,17 @@ int main(int argc, char** argv) {
         CHECK(ui.open_depth() == 0 && !ui.poisoned(), "the C++ modal left something open");
     }
 
+    {
+        LibguiTextAreaOptions to;
+        libgui_text_area_options_default(&to);
+        to.line_numbers = 1;
+        std::string note = "A note long enough to wrap onto a second row in a narrow field.";
+        ui.begin_frame(160.0f, 200.0f, 1.0f, 1.0f / 60.0f);
+        auto r = ui.text_area("note", note, to);
+        ui.end_frame();
+        CHECK(to.wrap == 1 && !r.changed && !ui.poisoned(), "a wrapped C++ text area misbehaved");
+    }
+
     // Type-ahead with a lambda for the labels.
     {
         const char* parts[] = {"Axle", "bearing", "Bolt", "Bracket"};

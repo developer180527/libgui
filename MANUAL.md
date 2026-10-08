@@ -308,6 +308,31 @@ ui.enabled(has_selection, |ui| {
 Widgets inside are inert and drawn faded, and so is your own painting. An
 `enabled(true, …)` nested inside a disabled group does **not** re-enable.
 
+### Multi-line text
+
+`ui.text_area(key, &mut text, rows)` is a multi-line editor with its own
+undo. `text_area_with` takes `TextAreaOptions`:
+
+```rust
+// A note: wraps at the field's width (the default).
+ui.text_area_with("note", &mut note, TextAreaOptions { rows: 6, ..Default::default() });
+// A script: hard lines that scroll sideways, with line numbers.
+ui.text_area_with("script", &mut code, TextAreaOptions { wrap: false, line_numbers: true, ..Default::default() });
+```
+
+- **Wrapping:** long lines wrap at word boundaries to the field's width, and
+  re-wrap when it changes.
+- **Rows on screen:** Home, End, Up and Down move by the rows on screen, not by
+  logical lines.
+- **The caret at a wrap point:** it can sit at the end of one row (where End
+  puts it) or at the start of the next.
+- **Status bars:** `caret` still reports the logical line and column.
+- **Composition:** an input method's composition is drawn inline at the
+  caret, underlined, and is not part of the text until it is committed.
+- **Cost:** however long the document, a frame reads and shapes only the rows
+  it draws. A jump to the end of a 10,000-paragraph document shapes a
+  screenful, not the document.
+
 ### Fields your app validates
 
 `validated_input` changes your value only when *your* validator accepts it.
@@ -1268,7 +1293,7 @@ Rust names are methods on `Ui` unless stated otherwise. C names drop the
 | buttons | `button`, `button_primary`, `button_keyed`, `button_styled` | `button`, `button_primary`, `button_keyed`, ✗ |
 | choices | `checkbox`, `toggle`, `radio`, `combo`, `segmented` | same names |
 | numbers | `slider`, `slider_vertical`, `drag_value`, `drag_value_range` | same names |
-| text entry | `text_input`, `text_area`, `validated_input` | same names, `text_overflow` |
+| text entry | `text_input`, `text_area(_with)` + `TextAreaOptions`, `validated_input` | same names, `text_area_with` + `LibguiTextAreaOptions`, `text_overflow` |
 | colour | `color_picker`, `color_button` | same names |
 | display | `progress`, `plot`, `viewport`, `tooltip` | same names |
 | instruments | `scope` + `ScopeTrace`/`Trace`, `meter`, `meter_with_average`, `p.trace`, `p.trace_fill` | `scope` + `LibguiScopeTrace`, `meter`, `meter_with_average`, `painter_trace`, `painter_trace_fill` |
@@ -1346,7 +1371,8 @@ The full signatures are in rustdoc (`cargo doc -p libgui --open`) and in
 - Tables have no 2-D cell cursor; trees cannot be reordered by dragging.
 
 **Text**
-- `text_area` does not wrap; long lines scroll sideways.
+- `text_area` wraps greedily at word boundaries (spaces, hyphens, between
+  ideographs); there is no hyphenation and no Thai or Khmer word breaking.
 - There is no double-click to select a word.
 - The caret moves by `char` and can split an emoji sequence.
 - There is one font role per `Ui`.

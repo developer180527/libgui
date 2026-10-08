@@ -158,7 +158,7 @@ macro_rules! goldens {
     };
 }
 
-goldens!(widgets, tree, shapes, paths, dashes_rotated, scope_meters, modal, polygons, text, text_area, button_hover, button_pressed, tooltip, text_focused, combo_open, menu_open, scroll_mid, drag_reorder, table, focus_ring, paragraph);
+goldens!(widgets, tree, shapes, paths, dashes_rotated, scope_meters, modal, polygons, text, text_area, text_area_wrapped, button_hover, button_pressed, tooltip, text_focused, combo_open, menu_open, scroll_mid, drag_reorder, table, focus_ring, paragraph);
 
 /// The same scene renders to the same bytes twice in one process: nothing in
 /// the pipeline depends on the clock, hashing seeds or allocation order.
