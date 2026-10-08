@@ -2,6 +2,8 @@
 //! plus a real OS window for every torn-off panel. All windows share one wgpu
 //! device and the engine scene; each has its own surface, renderer and `Ui`.
 
+#[cfg(target_os = "ios")]
+mod ios_scene;
 mod panels;
 mod scene;
 
@@ -195,6 +197,8 @@ impl App {
             attrs = attrs.with_position(PhysicalPosition::new(outer.x as i32, outer.y as i32));
         }
         let window = Arc::new(el.create_window(attrs).expect("window"));
+        #[cfg(target_os = "ios")]
+        ios_scene::window_created(&window);
 
         if self.gfx.is_none() {
             let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle(Box::new(el.owned_display_handle())));
@@ -819,6 +823,8 @@ impl ApplicationHandler for App {
 }
 
 fn main() {
+    #[cfg(target_os = "ios")]
+    ios_scene::register();
     let event_loop = EventLoop::new().expect("event loop");
     let mut app = App::new();
     // Tablets: floating panels live inside the app, and controls are touch-sized.

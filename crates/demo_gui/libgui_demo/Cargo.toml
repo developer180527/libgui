@@ -17,6 +17,10 @@ winit.workspace = true
 bytemuck.workspace = true
 pollster.workspace = true
 
+# The UIScene delegate iOS requires (winit 0.30 has none); winit's own objc2.
+[target.'cfg(target_os = "ios")'.dependencies]
+objc2 = "0.5"
+
 # OS clipboard on desktop; iOS gets UIPasteboard later.
 [target.'cfg(not(target_os = "ios"))'.dependencies]
 arboard = { version = "3", default-features = false }

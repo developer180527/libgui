@@ -853,6 +853,7 @@ dependencies = [
  "libgui_nodes",
  "libgui_wgpu",
  "libgui_winit",
+ "objc2 0.5.2",
  "pollster",
  "wgpu",
  "winit",
