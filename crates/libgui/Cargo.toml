@@ -8,7 +8,7 @@ authors.workspace = true
 rust-version = "1.87"
 
 [features]
-default = ["theme-toml", "fontdue"]
+default = ["theme-toml", "fontdue", "bidi"]
 # The built-in font backend (see `FontRasterizer` to plug in your own).
 fontdue = ["dep:fontdue"]
 # Real text shaping through rustybuzz (a port of HarfBuzz): ligatures, mark
@@ -16,6 +16,11 @@ fontdue = ["dep:fontdue"]
 # default because it is a large dependency and a UI in Latin script does not
 # need it; `fontdue` still rasterises the glyphs it picks.
 shape = ["fontdue", "dep:rustybuzz", "dep:self_cell"]
+# Right-to-left and mixed-direction text (Unicode bidi, UAX #9): Arabic and
+# Hebrew are reordered per line, and carets, hit tests and selections follow
+# the glyphs on screen. Small, and on by default; text with no right-to-left
+# characters never touches it. Pair with `shape` for Arabic joining.
+bidi = ["dep:unicode-bidi"]
 # Serialise libgui's own data: themes, saved dock layouts. Pure data, no I/O.
 serde = ["dep:serde"]
 # Parse and export TOML themes and dock layouts (pure data, no I/O).
@@ -29,6 +34,7 @@ profile = []
 [dependencies]
 fontdue = { workspace = true, optional = true }
 rustybuzz = { workspace = true, optional = true }
+unicode-bidi = { workspace = true, optional = true }
 self_cell = { workspace = true, optional = true }
 bytemuck.workspace = true
 serde = { version = "1", features = ["derive"], optional = true }

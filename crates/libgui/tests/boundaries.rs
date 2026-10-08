@@ -60,6 +60,7 @@ const ALLOWED_DEPS: &[(&str, &str)] = &[
     ("self_cell", "optional, off: holds font bytes beside the rustybuzz face that borrows them"),
     ("serde", "optional: theme (de)serialisation, pure data"),
     ("toml", "optional: theme file format, pure data"),
+    ("unicode-bidi", "optional, default: right-to-left text (feature `bidi`); the Unicode bidi algorithm's tables, no deps, no I/O"),
 ];
 
 fn src_dir() -> std::path::PathBuf {

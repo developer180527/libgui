@@ -40,13 +40,14 @@
 //!
 //! # Right-to-left
 //!
-//! Letters are **shaped** correctly in RTL scripts — an Arabic letter gets its
-//! initial, medial, final or isolated form, and joins its neighbours — but the
-//! glyphs are emitted in logical order and so are laid out left to right.
-//! Reordering them is bidi, which is a property of the paragraph rather than
-//! of the font, and which every caret, hit test and selection rectangle in the
-//! library would have to understand. It is not done here, and this module does
-//! not pretend otherwise.
+//! Letters are **shaped** here — an Arabic letter gets its initial, medial,
+//! final or isolated form and joins its neighbours, and a bracket in a
+//! right-to-left run is mirrored — and emitted in logical order. Putting them
+//! on screen right to left is not the shaper's job: direction is a property
+//! of the paragraph, not of the font. libgui's `bidi` feature (on by default)
+//! splits each paragraph into runs of one direction, hands right-to-left runs
+//! to [`FontRasterizer::shape_rtl`], and orders the glyphs on each line; the
+//! caret, hit testing and selection follow.
 
 use crate::font::{FontRasterizer, GlyphBitmap, LineMetrics, ShapedGlyph};
 use crate::Vec2;
@@ -158,9 +159,9 @@ impl ShapeRasterizer {
 
     /// Which way the text runs. Derived from the script when unset.
     ///
-    /// Note what this does and does not do: it decides how the *shaper* treats
-    /// the run, so an RTL run gets its joined forms either way. It does not
-    /// lay the run out right to left — see the note on right-to-left above.
+    /// It decides how the *shaper* treats every run, overriding the direction
+    /// the bidi pass gives each one; where glyphs go on screen is still the
+    /// bidi pass's. Leave it unset for mixed-direction text.
     pub fn with_direction(mut self, dir: TextDirection) -> Self {
         self.direction = Some(match dir {
             TextDirection::LeftToRight => rustybuzz::Direction::LeftToRight,
@@ -170,19 +171,9 @@ impl ShapeRasterizer {
     }
 }
 
-impl FontRasterizer for ShapeRasterizer {
-    fn line_metrics(&self, px: f32) -> LineMetrics {
-        match self.raster.horizontal_line_metrics(px) {
-            Some(m) => LineMetrics { ascent: m.ascent, descent: m.descent },
-            None => LineMetrics { ascent: px * 0.8, descent: -px * 0.2 },
-        }
-    }
-
-    fn covers(&self, ch: char) -> bool {
-        self.raster.lookup_glyph_index(ch) != 0
-    }
-
-    fn shape(&self, text: &str, px: f32, out: &mut Vec<ShapedGlyph>) {
+impl ShapeRasterizer {
+    /// Shape `text`, as `dir` unless the app set a direction.
+    fn shape_as(&self, text: &str, px: f32, dir: Option<rustybuzz::Direction>, out: &mut Vec<ShapedGlyph>) {
         let mut slot = self.buffer.borrow_mut();
         let mut buf = slot.take().unwrap_or_default();
         buf.clear();
@@ -195,7 +186,7 @@ impl FontRasterizer for ShapeRasterizer {
         if let Some(s) = self.script {
             buf.set_script(s);
         }
-        if let Some(d) = self.direction {
+        if let Some(d) = self.direction.or(dir) {
             buf.set_direction(d);
         }
         // Then fill the rest from the characters. This only sets what is still
@@ -213,8 +204,8 @@ impl FontRasterizer for ShapeRasterizer {
         // rustybuzz emits an RTL run in visual order, which would leave
         // clusters running backwards. Everything downstream — caret positions,
         // hit testing, the width of a byte range — reads clusters as
-        // non-decreasing, so the run is put back into logical order. That is
-        // why RTL lays out left to right; see the module docs.
+        // non-decreasing, so the run is put back into logical order; the bidi
+        // pass in `text` puts it on screen right to left.
         let n = infos.len();
         out.reserve(n);
         for i in 0..n {
@@ -231,6 +222,29 @@ impl FontRasterizer for ShapeRasterizer {
         }
 
         *slot = Some(glyphs.clear());
+    }
+}
+
+impl FontRasterizer for ShapeRasterizer {
+    fn line_metrics(&self, px: f32) -> LineMetrics {
+        match self.raster.horizontal_line_metrics(px) {
+            Some(m) => LineMetrics { ascent: m.ascent, descent: m.descent },
+            None => LineMetrics { ascent: px * 0.8, descent: -px * 0.2 },
+        }
+    }
+
+    fn covers(&self, ch: char) -> bool {
+        self.raster.lookup_glyph_index(ch) != 0
+    }
+
+    fn shape(&self, text: &str, px: f32, out: &mut Vec<ShapedGlyph>) {
+        self.shape_as(text, px, None, out);
+    }
+
+    /// The run as right to left, unless the app set a direction: rustybuzz
+    /// then mirrors brackets itself, so the default's mirroring is skipped.
+    fn shape_rtl(&self, text: &str, px: f32, out: &mut Vec<ShapedGlyph>) {
+        self.shape_as(text, px, Some(rustybuzz::Direction::RightToLeft), out);
     }
 
     fn rasterize(&self, _face: u16, glyph: u32, px: f32) -> GlyphBitmap {

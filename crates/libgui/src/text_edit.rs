@@ -129,10 +129,29 @@ pub(crate) type Goal = Option<f32>;
 /// without them. The text area passes its own; a single-line field has no
 /// line to move to, so it passes one that is never asked.
 pub(crate) trait Columns {
-    /// x of the caret before `byte` in `line`.
-    fn x_at(&self, line: &str, byte: usize) -> f32;
-    /// The byte offset in `line` whose caret is nearest `x`.
-    fn byte_at(&self, line: &str, x: f32) -> usize;
+    /// x of the caret before `byte` (an offset in `line`) on the visual row
+    /// `row` of `line` (a byte range of it), from the row's left edge in the
+    /// field. The whole line is passed, not just the row, because a row of a
+    /// right-to-left paragraph is laid out in the paragraph's direction.
+    ///
+    /// `upstream` places it with the character *before* `byte` — the end of a
+    /// wrapped row, or the trailing edge of the character before where two
+    /// directions meet. See `TextState::upstream`.
+    fn x_at(&self, line: &str, row: (usize, usize), byte: usize, upstream: bool) -> f32;
+    /// The offset in `line`, within `row`, whose caret is nearest `x`, and
+    /// whether it goes with the character before it (a trailing edge).
+    fn byte_at(&self, line: &str, row: (usize, usize), x: f32) -> (usize, bool);
+    /// Every place a caret can sit on the row, as `(x, offset in line,
+    /// trailing)`, when the row mixes directions: Left and Right then move to
+    /// the next stop on screen. `None` for a left-to-right row, which moves by
+    /// characters.
+    fn stops(&self, _line: &str, _row: (usize, usize)) -> Option<Vec<(f32, usize, bool)>> {
+        None
+    }
+    /// Whether `line` runs right to left as a paragraph.
+    fn rtl(&self, _line: &str) -> bool {
+        false
+    }
     /// How the logical line `line` breaks into visual rows. One row unless the
     /// field wraps.
     fn rows(&self, line: &str) -> RowsOf {
@@ -210,11 +229,11 @@ pub(crate) struct NoColumns;
 
 #[cfg(test)]
 impl Columns for NoColumns {
-    fn x_at(&self, _line: &str, _byte: usize) -> f32 {
+    fn x_at(&self, _line: &str, _row: (usize, usize), _byte: usize, _upstream: bool) -> f32 {
         0.0
     }
-    fn byte_at(&self, _line: &str, _x: f32) -> usize {
-        0
+    fn byte_at(&self, _line: &str, row: (usize, usize), _x: f32) -> (usize, bool) {
+        (row.0, false)
     }
 }
 
@@ -342,8 +361,36 @@ impl Edit<'_> {
     /// row, not the start of the next).
     fn at_x_on_row(&self, ls: usize, rows: &RowsOf, k: usize, x: f32, cols: &dyn Columns) -> (usize, bool) {
         let (s, e) = (rows.start(k), rows.end(k));
-        let b = cols.byte_at(&self.text[ls + s..ls + e], x);
-        (ls + s + b, !rows.is_last(k) && s + b == e)
+        let line = &self.text[ls..self.line_end(ls)];
+        let (b, trailing) = cols.byte_at(line, (s, e), x);
+        (ls + b, trailing || (!rows.is_last(k) && b == e))
+    }
+
+    /// Left or Right, on screen. A row that mixes directions moves to the
+    /// next caret stop in that direction; past the row's edge, or on a row
+    /// that runs one way only, by a character — forward for Right in a
+    /// left-to-right paragraph and for Left in a right-to-left one.
+    fn horizontal(&self, right: bool, cols: &dyn Columns) -> (usize, bool) {
+        let (ls, rows, k) = self.vis_row(self.cursor, self.upstream, cols);
+        let line = &self.text[ls..self.line_end(ls)];
+        let row = (rows.start(k), rows.end(k));
+        let forward = right != cols.rtl(line);
+        if let Some(stops) = cols.stops(line, row) {
+            let x = cols.x_at(line, row, self.cursor - ls, self.upstream);
+            let next = if right {
+                stops.iter().filter(|s| s.0 > x + 0.5).min_by(|a, b| a.0.total_cmp(&b.0))
+            } else {
+                stops.iter().filter(|s| s.0 < x - 0.5).max_by(|a, b| a.0.total_cmp(&b.0))
+            };
+            if let Some(&(_, b, trailing)) = next {
+                return (ls + b, trailing);
+            }
+        }
+        if forward {
+            (self.next_char(self.cursor), false)
+        } else {
+            (self.prev_char(self.cursor), false)
+        }
     }
 
     /// The same x on the visual row above. `None` at the first row.
@@ -394,8 +441,8 @@ impl Edit<'_> {
         let n = self.len();
         let x = || goal.unwrap_or_else(|| self.caret_x(cols));
         match motion {
-            Motion::Left => (self.prev_char(self.cursor), false),
-            Motion::Right => (self.next_char(self.cursor), false),
+            Motion::Left => self.horizontal(false, cols),
+            Motion::Right => self.horizontal(true, cols),
             Motion::WordLeft => (self.word_left(self.cursor), false),
             Motion::WordRight => (self.word_right(self.cursor), false),
             Motion::LineStart => {
@@ -416,8 +463,7 @@ impl Edit<'_> {
     /// The caret's x within its own visual row.
     fn caret_x(&self, cols: &dyn Columns) -> f32 {
         let (ls, rows, k) = self.vis_row(self.cursor, self.upstream, cols);
-        let s = ls + rows.start(k);
-        cols.x_at(&self.text[s..ls + rows.end(k)], self.cursor - s)
+        cols.x_at(&self.text[ls..self.line_end(ls)], (rows.start(k), rows.end(k)), self.cursor - ls, self.upstream)
     }
 
     /// Apply one action. Returns true if the text changed.
@@ -524,7 +570,7 @@ struct Edited2 {
 /// Shared by both fields: the single-line one differs only in refusing
 /// newlines, and in treating Enter as "commit" because it has nowhere to put
 /// a line break.
-fn apply_events(ui: &mut Ui, id: Id, text: &mut String, st: &mut TextState, multiline: bool, wrap: Option<f32>) -> Edited2 {
+fn apply_events(ui: &mut Ui, id: Id, text: &mut String, st: &mut TextState, multiline: bool, wrap: Option<f32>, align: Option<f32>) -> Edited2 {
     let mut out = Edited2 { changed: false, submitted: false, cancelled: false, can_undo: false, can_redo: false };
     let mut hist = ui.text_history.remove(&id).unwrap_or_default();
     // No whole-document comparison here to spot the app writing the string
@@ -602,7 +648,7 @@ fn apply_events(ui: &mut Ui, id: Id, text: &mut String, st: &mut TextState, mult
                 }
             }
             Event::Action(a @ UiAction::Delete(_)) => {
-                let cols = LineColumns { fonts: &ui.fonts, font: ui.font, size, wrap };
+                let cols = LineColumns { fonts: &ui.fonts, font: ui.font, size, wrap, align };
                 out.changed |= edited(&mut e, &mut hist, Edited::Deleting, now, pause, |e| {
                     e.action(a, &mut None, &cols);
                 });
@@ -610,7 +656,7 @@ fn apply_events(ui: &mut Ui, id: Id, text: &mut String, st: &mut TextState, mult
             Event::Action(a @ (UiAction::Move { .. } | UiAction::SelectAll)) => {
                 // A caret move ends the run: what is typed next is its own step.
                 hist.break_run();
-                let cols = LineColumns { fonts: &ui.fonts, font: ui.font, size, wrap };
+                let cols = LineColumns { fonts: &ui.fonts, font: ui.font, size, wrap, align };
                 out.changed |= e.action(a, &mut st.goal, &cols);
             }
             _ => continue,
@@ -644,8 +690,13 @@ impl Ui {
         st.cursor = floor_boundary(text, st.cursor);
         st.anchor = floor_boundary(text, st.anchor);
         let text_x = resp.rect.x + pad - st.scroll;
-        let hit = |ui: &Ui, x: f32, text: &str| -> usize {
-            ui.fonts.byte_at_x(ui.font, size, text, x - text_x)
+        // The caret under a point, and whether it goes with the character
+        // before it (a trailing edge, where two directions meet).
+        let hit = |ui: &Ui, x: f32, text: &str| -> (usize, bool) {
+            if ui.fonts.bidi_of(ui.font, size, text).0 {
+                return ui.fonts.byte_at_x_in(ui.font, size, text, (0, text.len()), x - text_x);
+            }
+            (ui.fonts.byte_at_x(ui.font, size, text, x - text_x), false)
         };
 
         if resp.pressed {
@@ -655,14 +706,15 @@ impl Ui {
             if let Some(h) = self.text_history.get_mut(&id) {
                 h.break_run();
             }
-            let i = hit(self, resp.mouse_pos.x, text);
+            let (i, up) = hit(self, resp.mouse_pos.x, text);
             st.cursor = i;
+            st.upstream = up;
             if !self.input.modifiers.shift {
                 st.anchor = i;
             }
             st.last_move = self.time;
         } else if resp.active && self.mouse_delta.x != 0.0 {
-            st.cursor = hit(self, resp.mouse_pos.x, text); // drag-select
+            (st.cursor, st.upstream) = hit(self, resp.mouse_pos.x, text); // drag-select
             st.last_move = self.time;
         }
 
@@ -672,7 +724,7 @@ impl Ui {
         let (mut can_undo, mut can_redo) = (false, false);
         // While a popup is open the keys are its, even with focus here.
         if self.focused == Some(id) && self.keys_reach() {
-            let out = apply_events(self, id, text, &mut st, false, None);
+            let out = apply_events(self, id, text, &mut st, false, None, None);
             changed = out.changed;
             submitted = out.submitted;
             cancelled = out.cancelled;
@@ -687,7 +739,11 @@ impl Ui {
         // Keep the caret in view.
         let visible_w = (resp.rect.w - 2.0 * pad).max(0.0);
         let total_w = self.fonts.caret_x(self.font, size, text, text.len());
-        let cx = self.fonts.caret_x(self.font, size, text, st.cursor);
+        let cx = if self.fonts.bidi_of(self.font, size, text).0 {
+            self.fonts.caret_x_in(self.font, size, text, (0, text.len()), st.cursor, st.upstream)
+        } else {
+            self.fonts.caret_x(self.font, size, text, st.cursor)
+        };
         if resp.rect.w > 0.0 {
             if cx - st.scroll > visible_w {
                 st.scroll = cx - visible_w;
@@ -723,6 +779,14 @@ impl Ui {
         let caret_on = focused && (((self.time - st.last_move) * 1.8) as i64 % 2 == 0);
         let (sa, sb) = (st.cursor.min(st.anchor), st.cursor.max(st.anchor));
         let sel = (self.fonts.caret_x(self.font, size, text, sa), self.fonts.caret_x(self.font, size, text, sb));
+        // A selection in mixed-direction text can be several spans of x.
+        let spans: Vec<(f32, f32)> = if sb > sa && self.fonts.bidi_of(self.font, size, text).0 {
+            self.fonts.spans_in(self.font, size, text, (0, text.len()), sa, sb)
+        } else if sel.1 > sel.0 {
+            vec![sel]
+        } else {
+            Vec::new()
+        };
         // Handles into the frame's text arena rather than owned copies: the
         // paint closure runs after layout, so it needs the text to outlive
         // this call, and three `String`s per field per frame is exactly the
@@ -749,9 +813,9 @@ impl Ui {
             let ty = r.center().y - line_h * 0.5;
             let x0 = inner.x - scroll;
             p.draw.push_clip(inner.expand(1.0));
-            if sel.1 > sel.0 {
+            for &(a, b) in &spans {
                 let c = if focus_t > 0.5 { s.selection } else { s.selection.with_alpha(s.selection.a * 0.5) };
-                p.rect(Rect::new(x0 + sel.0, ty, sel.1 - sel.0, line_h), c, 2.0);
+                p.rect(Rect::new(x0 + a, ty, b - a, line_h), c, 2.0);
             }
             if empty && pre_text.is_none() {
                 p.text(Vec2::new(inner.x, ty), size, s.placeholder, placeholder);
@@ -945,9 +1009,15 @@ impl Default for TextAreaOptions {
 struct Row {
     y: f32,
     text: FrameText,
-    selection: Option<(f32, f32)>,
+    /// The selected spans of x on this row: one, or several where a bidi
+    /// row's selection crosses a change of direction.
+    selection: Vec<(f32, f32)>,
     number: FrameText,
     compose: Option<Compose>,
+    /// For a row of a bidi paragraph: `text` is the whole paragraph and this
+    /// the byte range to draw, so the row is ordered by the paragraph's
+    /// direction; and how far right it starts.
+    bidi: Option<(usize, usize, f32)>,
 }
 
 /// An input method's uncommitted text, drawn inline at the caret: the
@@ -1052,14 +1122,51 @@ struct LineColumns<'a> {
     size: f32,
     /// Wrap at this width, logical px; `None` for hard lines only.
     wrap: Option<f32>,
+    /// The field's width, to start a right-to-left paragraph's rows at its
+    /// right edge; `None` to keep every row at the left.
+    align: Option<f32>,
+}
+
+impl LineColumns<'_> {
+    fn bidi(&self, line: &str) -> (bool, bool) {
+        self.fonts.bidi_of(self.font, self.size, line)
+    }
+
+    /// How far right a row starts: a right-to-left paragraph's rows end at
+    /// the field's right edge (their trailing spaces hang past it).
+    fn offset(&self, line: &str, row: (usize, usize)) -> f32 {
+        match self.align {
+            Some(w) if self.bidi(line).1 => {
+                let shown = row.0 + line[row.0..row.1].trim_end().len();
+                (w - self.fonts.width_in(self.font, self.size, line, (row.0, shown))).max(0.0)
+            }
+            _ => 0.0,
+        }
+    }
 }
 
 impl Columns for LineColumns<'_> {
-    fn x_at(&self, line: &str, byte: usize) -> f32 {
-        self.fonts.caret_x(self.font, self.size, line, byte)
+    fn x_at(&self, line: &str, row: (usize, usize), byte: usize, upstream: bool) -> f32 {
+        if self.bidi(line).0 {
+            return self.offset(line, row) + self.fonts.caret_x_in(self.font, self.size, line, row, byte, upstream);
+        }
+        self.fonts.caret_x(self.font, self.size, &line[row.0..row.1], byte - row.0)
     }
-    fn byte_at(&self, line: &str, x: f32) -> usize {
-        self.fonts.byte_at_x(self.font, self.size, line, x)
+    fn byte_at(&self, line: &str, row: (usize, usize), x: f32) -> (usize, bool) {
+        if self.bidi(line).0 {
+            return self.fonts.byte_at_x_in(self.font, self.size, line, row, x - self.offset(line, row));
+        }
+        (row.0 + self.fonts.byte_at_x(self.font, self.size, &line[row.0..row.1], x), false)
+    }
+    fn stops(&self, line: &str, row: (usize, usize)) -> Option<Vec<(f32, usize, bool)>> {
+        if !self.bidi(line).0 {
+            return None;
+        }
+        let o = self.offset(line, row);
+        Some(self.fonts.stops_in(self.font, self.size, line, row).into_iter().map(|(x, b, t)| (x + o, b, t)).collect())
+    }
+    fn rtl(&self, line: &str) -> bool {
+        self.bidi(line).1
     }
     fn rows(&self, line: &str) -> RowsOf {
         match self.wrap {
@@ -1134,7 +1241,7 @@ impl Ui {
         {
             // The field may be narrower or wider than last frame: the anchor's
             // line may now have fewer rows.
-            let cols = LineColumns { fonts: &self.fonts, font: self.font, size, wrap };
+            let cols = LineColumns { fonts: &self.fonts, font: self.font, size, wrap, align: Some(view.w) };
             let n = cols.rows(line_from(text, st.top_byte)).count();
             st.top_row = st.top_row.min(n - 1);
         }
@@ -1144,7 +1251,7 @@ impl Ui {
         // a wrapped row. The point is inside the view, so the row it names is
         // reached from the anchor, not from the start of the document.
         let row_at = |ui: &Ui, p: Vec2, text: &str, st: &TextState| -> (usize, bool) {
-            let cols = LineColumns { fonts: &ui.fonts, font: ui.font, size, wrap };
+            let cols = LineColumns { fonts: &ui.fonts, font: ui.font, size, wrap, align: Some(view.w) };
             let delta = ((p.y - view.y + st.top_frac) / lh).floor().max(0.0) as usize;
             let mut probe = *st;
             for _ in 0..delta {
@@ -1155,8 +1262,8 @@ impl Ui {
             let line = line_from(text, probe.top_byte);
             let rows = cols.rows(line);
             let (a, b) = (rows.start(probe.top_row), rows.end(probe.top_row));
-            let at = ui.fonts.byte_at_x(ui.font, size, &line[a..b], p.x - view.x + st.scroll);
-            (probe.top_byte + a + at, !rows.is_last(probe.top_row) && a + at == b)
+            let (at, trailing) = cols.byte_at(line, (a, b), p.x - view.x + st.scroll);
+            (probe.top_byte + at, trailing || (!rows.is_last(probe.top_row) && at == b))
         };
 
         if resp.pressed {
@@ -1184,7 +1291,7 @@ impl Ui {
         let (mut can_undo, mut can_redo) = (false, false);
         // While a popup is open the keys are its, even with focus here.
         if self.focused == Some(id) && self.keys_reach() {
-            let out = apply_events(self, id, text, &mut st, true, wrap);
+            let out = apply_events(self, id, text, &mut st, true, wrap, Some(view.w));
             changed = out.changed;
             submitted = out.submitted;
             cancelled = out.cancelled;
@@ -1208,7 +1315,7 @@ impl Ui {
         }
 
         let fonts = self.fonts.clone();
-        let cols = LineColumns { fonts: &fonts, font: self.font, size, wrap };
+        let cols = LineColumns { fonts: &fonts, font: self.font, size, wrap, align: Some(view.w) };
         {
             // An edit inside the anchor's line can take rows away from it.
             let n = cols.rows(line_from(text, st.top_byte)).count();
@@ -1286,7 +1393,7 @@ impl Ui {
 
         let line_src = &text[line_start..line_end];
         let (cr0, cr1) = (caret_rows.start(caret_k), caret_rows.end(caret_k));
-        let caret_x = fonts.caret_x(self.font, size, &line_src[cr0..cr1], st.cursor - line_start - cr0);
+        let caret_x = cols.x_at(line_src, (cr0, cr1), st.cursor - line_start, st.upstream);
         // The column, in chars, for whoever draws a status bar.
         let col = line_src[..st.cursor - line_start].chars().count();
         if focused && wrap.is_none() {
@@ -1327,14 +1434,30 @@ impl Ui {
             // This row's share of the selection, if any. Measured only when
             // there is one: a caret table per visible line is what made an
             // idle text area allocate on every frame.
-            let sel = if sel_b > sel_a && sel_b > rs && sel_a <= re && !(sel_a == re && !last) {
-                let x0 = fonts.caret_x(self.font, size, caret_src, sel_a.max(rs) - rs);
-                let x1 = fonts.caret_x(self.font, size, caret_src, sel_b.min(re) - rs);
-                // A selected newline shows as a sliver past the last glyph.
-                let x1 = if last && sel_b > re { x1 + size * 0.35 } else { x1 };
-                Some((x0, x1))
+            let (bidi, rtl) = fonts.bidi_of(self.font, size, line);
+            let sel: Vec<(f32, f32)> = if sel_b > sel_a && sel_b > rs && sel_a <= re && !(sel_a == re && !last) {
+                if bidi {
+                    let o = cols.offset(line, (r0, r1));
+                    let mut spans: Vec<(f32, f32)> = fonts
+                        .spans_in(self.font, size, line, (r0, r1), sel_a.max(rs) - at, sel_b.min(re) - at)
+                        .into_iter()
+                        .map(|(a, b)| (a + o, b + o))
+                        .collect();
+                    // The selected newline, at the paragraph's far end.
+                    if last && sel_b > re {
+                        let x = cols.x_at(line, (r0, r1), r1, true);
+                        spans.push(if rtl { (x - size * 0.35, x) } else { (x, x + size * 0.35) });
+                    }
+                    spans
+                } else {
+                    let x0 = fonts.caret_x(self.font, size, caret_src, sel_a.max(rs) - rs);
+                    let x1 = fonts.caret_x(self.font, size, caret_src, sel_b.min(re) - rs);
+                    // A selected newline shows as a sliver past the last glyph.
+                    let x1 = if last && sel_b > re { x1 + size * 0.35 } else { x1 };
+                    vec![(x0, x1)]
+                }
             } else {
-                None
+                Vec::new()
             };
             let number = if opts.line_numbers && k == 0 { self.frame_text(&(probe.top_line + 1).to_string()) } else { self.frame_text("") };
             self.text_scanned += r1 - r0;
@@ -1345,6 +1468,14 @@ impl Ui {
             // While composing, the caret's row is drawn in three runs: before
             // the caret, the composition (underlined), and after.
             let compose = match &composing {
+                // A bidi row is not split around the composition: it is drawn
+                // over the row at the caret.
+                Some((t, c)) if is_caret_row && bidi => {
+                    let w = fonts.measure(self.font, size, t).x;
+                    pre_caret = fonts.measure(self.font, size, &t[..*c]).x;
+                    ime_w = w.max(1.0);
+                    Some((rd, Compose { pre: self.frame_text(t), tail: self.frame_text(""), x: caret_x, w }))
+                }
                 Some((t, c)) if is_caret_row => {
                     let split = st.cursor - at;
                     let w = fonts.measure(self.font, size, t).x;
@@ -1355,11 +1486,15 @@ impl Ui {
                 }
                 _ => None,
             };
-            let (shown, compose) = match compose {
-                Some((cut, c)) => (self.frame_text(&line[r0..cut]), Some(c)),
-                None => (self.frame_text(&line[r0..rd]), None),
+            let (shown, compose, bidi_row) = if bidi {
+                (self.frame_text(line), compose.map(|(_, c)| c), Some((r0, rd, cols.offset(line, (r0, r1)))))
+            } else {
+                match compose {
+                    Some((cut, c)) => (self.frame_text(&line[r0..cut]), Some(c), None),
+                    None => (self.frame_text(&line[r0..rd]), None, None),
+                }
             };
-            rows.push(Row { y, text: shown, selection: sel, number, compose });
+            rows.push(Row { y, text: shown, selection: sel, number, compose, bidi: bidi_row });
             if !step_anchor(text, &mut probe, 1, &cols) {
                 break;
             }
@@ -1394,7 +1529,7 @@ impl Ui {
             p.draw.push_clip(Rect::new(r.x + 1.0, view.y, r.w - 2.0, view.h));
             for row in &rows {
                 let ly = view.y + row.y;
-                if let Some((x0, x1)) = row.selection {
+                for &(x0, x1) in &row.selection {
                     let c = if focus_t > 0.5 { s.selection } else { s.selection.with_alpha(s.selection.a * 0.5) };
                     p.rect(Rect::new(view.x - scroll_x + x0, ly, (x1 - x0).max(1.0), lh), c, 2.0);
                 }
@@ -1403,7 +1538,10 @@ impl Ui {
                     p.text_right(g, size, s.placeholder, row.number);
                 }
                 let x0 = view.x - scroll_x;
-                p.text(Vec2::new(x0, ly), size, s.text, row.text);
+                match row.bidi {
+                    Some((a, b, o)) => p.text_in(Vec2::new(x0 + o, ly), size, s.text, row.text, (a, b)),
+                    None => p.text(Vec2::new(x0, ly), size, s.text, row.text),
+                }
                 if let Some(c) = row.compose {
                     p.text(Vec2::new(x0 + c.x, ly), size, s.text, c.pre);
                     p.text(Vec2::new(x0 + c.x + c.w, ly), size, s.text, c.tail);

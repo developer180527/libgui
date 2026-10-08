@@ -397,6 +397,15 @@ impl<'a> Painter<'a> {
         self.fonts.draw(self.draw, self.font, size, pos, color, s);
     }
 
+    /// The byte range `row` of a bidi `line`, its left edge at `pos`: a
+    /// wrapped row laid out as part of its paragraph, so its direction is the
+    /// paragraph's.
+    pub(crate) fn text_in(&mut self, pos: Vec2, size: f32, color: Color, line: impl PaintText, row: (usize, usize)) {
+        let arena: &'a [u8] = self.strs;
+        let s = line.get(arena);
+        self.fonts.draw_in(self.draw, self.font, size, pos, color, s, row);
+    }
+
     /// Left-aligned, vertically centred in `r`.
     pub fn text_left(&mut self, r: Rect, size: f32, color: Color, text: impl PaintText) {
         let arena: &'a [u8] = self.strs;

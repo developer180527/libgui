@@ -167,6 +167,66 @@ struct Glyph {
 struct Run {
     glyphs: Rc<[ShapedGlyph]>,
     width: f32,
+    /// The bidi embedding level of each glyph, when the text holds anything
+    /// right-to-left; `None` for text that is left-to-right throughout, which
+    /// is laid out in logical order exactly as before bidi existed.
+    levels: Option<Rc<[u8]>>,
+    /// The paragraph runs right to left (its first strong character is).
+    rtl: bool,
+}
+
+/// Whether `text` holds a character that runs right to left, or an explicit
+/// direction mark: Hebrew, Arabic, Syriac, Thaana, N'Ko and their
+/// presentation forms. Everything else takes the left-to-right path, which is
+/// what keeps bidi from costing a Latin interface anything.
+pub(crate) fn has_rtl(text: &str) -> bool {
+    // Every such character encodes with a lead byte of 0xD6 or above; most
+    // Latin text is ruled out by the bytes alone.
+    if !text.bytes().any(|b| b >= 0xD6) {
+        return false;
+    }
+    text.chars().any(|c| {
+        matches!(c as u32,
+            0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF | 0x10800..=0x10FFF | 0x1E800..=0x1EFFF
+            | 0x200F | 0x202B | 0x202E | 0x2067)
+    })
+}
+
+/// Rule L2 of the bidi algorithm: from the highest level down to the lowest
+/// odd one, reverse every contiguous sequence at that level or above. `idx`
+/// and `levels` are reordered together.
+fn reorder_visual(idx: &mut [usize], levels: &mut [u8]) {
+    let Some(&max) = levels.iter().max() else { return };
+    let min = *levels.iter().min().unwrap_or(&0);
+    let lowest_odd = if min % 2 == 1 { min } else { min + 1 };
+    let mut level = max;
+    while level >= lowest_odd && level > 0 {
+        let mut i = 0;
+        while i < levels.len() {
+            if levels[i] >= level {
+                let mut j = i;
+                while j < levels.len() && levels[j] >= level {
+                    j += 1;
+                }
+                idx[i..j].reverse();
+                levels[i..j].reverse();
+                i = j;
+            } else {
+                i += 1;
+            }
+        }
+        level -= 1;
+    }
+}
+
+/// One glyph of a line laid out in visual order: its index in the run, its
+/// pen x from the line's left edge (raster px), and whether it runs right to
+/// left.
+#[derive(Clone, Copy, Debug)]
+struct Placed {
+    i: usize,
+    x: f32,
+    rtl: bool,
 }
 
 /// Everything the font system owns. Private: `Fonts` is the handle to it, so
@@ -462,11 +522,11 @@ impl FontsInner {
         let run = {
             let mut shaped = self.shaped.borrow_mut();
             shaped.clear();
-            self.fonts[font.0 as usize].shape(text, px, &mut shaped);
+            let (levels, rtl) = self.shape_bidi(font, px, text, &mut shaped);
             if text.contains('\t') {
                 self.lay_out_tabs(font, px, text, &mut shaped);
             }
-            Run { width: shaped.iter().map(|g| g.advance).sum(), glyphs: Rc::from(shaped.as_slice()) }
+            Run { width: shaped.iter().map(|g| g.advance).sum(), glyphs: Rc::from(shaped.as_slice()), levels, rtl }
         };
         let mut cache = self.runs.borrow_mut();
         let m = cache.entry(key).or_default();
@@ -475,6 +535,115 @@ impl FontsInner {
         }
         m.insert(text.to_string(), run.clone());
         run
+    }
+
+    /// Shape `text` into `out` in logical order, and say how it runs.
+    ///
+    /// Text with anything right to left in it is split into runs of one bidi
+    /// level (the Unicode bidi algorithm, resolved for the paragraph) and each
+    /// run is shaped on its own: a right-to-left run is shaped as one, which is
+    /// what gives Arabic its joined forms through [`ShapeRasterizer`]. The
+    /// glyphs stay in logical order with their levels beside them; lines are
+    /// put into visual order when they are laid out, after wrapping, as rule L2
+    /// says.
+    #[allow(unused_variables)]
+    fn shape_bidi(&self, font: FontId, px: f32, text: &str, out: &mut Vec<ShapedGlyph>) -> (Option<Rc<[u8]>>, bool) {
+        #[cfg(feature = "bidi")]
+        if has_rtl(text) {
+            let info = unicode_bidi::BidiInfo::new(text, None);
+            let rtl = info.paragraphs.first().is_some_and(|p| p.level.is_rtl());
+            let lv = &info.levels;
+            let mut levels: Vec<u8> = Vec::new();
+            let mut start = 0usize;
+            while start < text.len() {
+                let level = lv[start];
+                let mut end = start;
+                while end < text.len() && lv[end] == level {
+                    end += 1;
+                }
+                let before = out.len();
+                // Each run shaped in its own direction (joining, and brackets
+                // mirrored in a right-to-left run).
+                let face = &self.fonts[font.0 as usize];
+                if level.is_rtl() {
+                    face.shape_rtl(&text[start..end], px, out);
+                } else {
+                    face.shape(&text[start..end], px, out);
+                }
+                for g in &mut out[before..] {
+                    g.cluster += start as u32;
+                }
+                levels.resize(out.len(), level.number());
+                start = end;
+            }
+            return (Some(Rc::from(levels)), rtl);
+        }
+        self.fonts[font.0 as usize].shape(text, px, out);
+        (None, false)
+    }
+
+    /// The glyphs of `run` in the byte range `s..e` of `text`, in visual order
+    /// with their pen positions. Trailing whitespace takes the paragraph's
+    /// level (rule L1), so the spaces at a wrap stay at the line's end.
+    fn place_line(run: &Run, text: &str, s: usize, e: usize) -> Vec<Placed> {
+        let idx: Vec<usize> = (0..run.glyphs.len())
+            .filter(|&i| {
+                let c = run.glyphs[i].cluster as usize;
+                c >= s && c < e
+            })
+            .collect();
+        let base = run.rtl as u8;
+        let mut levels: Vec<u8> = match &run.levels {
+            Some(lv) => idx.iter().map(|&i| lv[i]).collect(),
+            None => vec![0; idx.len()],
+        };
+        for k in (0..idx.len()).rev() {
+            let c = run.glyphs[idx[k]].cluster as usize;
+            if text[c..].chars().next().is_some_and(char::is_whitespace) {
+                levels[k] = base;
+            } else {
+                break;
+            }
+        }
+        let rtl_of: Vec<bool> = levels.iter().map(|l| l % 2 == 1).collect();
+        let mut order: Vec<usize> = (0..idx.len()).collect();
+        let mut lv2 = levels.clone();
+        reorder_visual(&mut order, &mut lv2);
+        let mut pen = 0.0;
+        order
+            .into_iter()
+            .map(|k| {
+                let p = Placed { i: idx[k], x: pen, rtl: rtl_of[k] };
+                pen += run.glyphs[idx[k]].advance;
+                p
+            })
+            .collect()
+    }
+
+    /// Where a caret can sit on the line `s..e` of a bidi run, as `(x, byte)`
+    /// in raster px: both edges of every glyph. The leading edge (the right,
+    /// for a right-to-left glyph) is the caret before its character; the
+    /// trailing edge is the caret after it — so where two directions meet,
+    /// each side of the boundary is a stop of its own.
+    fn caret_stops(run: &Run, text: &str, s: usize, e: usize) -> Vec<(f32, usize, bool)> {
+        let placed = Self::place_line(run, text, s, e);
+        // Where each glyph's cluster ends: the next larger cluster, in logical
+        // order, or the end of the line.
+        let end_of = |i: usize| -> usize {
+            let c = run.glyphs[i].cluster;
+            run.glyphs[i..].iter().map(|g| g.cluster).find(|&n| n > c).map_or(e, |n| (n as usize).min(e))
+        };
+        let mut stops = Vec::with_capacity(placed.len() * 2);
+        for p in &placed {
+            let g = &run.glyphs[p.i];
+            let (lead, trail) = if p.rtl { (p.x + g.advance, p.x) } else { (p.x, p.x + g.advance) };
+            stops.push((lead, g.cluster as usize, false));
+            stops.push((trail, end_of(p.i), true));
+        }
+        if stops.is_empty() {
+            stops.push((0.0, s, false));
+        }
+        stops
     }
 
     /// Give every tab a blank glyph and a fixed advance.
@@ -536,6 +705,9 @@ impl FontsInner {
         let r = self.fit(size, px);
         let s = self.text_scale();
         let run = self.run(font, px, text);
+        if run.levels.is_some() {
+            return (Self::bidi_caret(&run, text, 0, text.len(), byte, false) * r).round() / s;
+        }
         if byte >= text.len() {
             return (run.width * r).round() / s;
         }
@@ -560,6 +732,9 @@ impl FontsInner {
         let r = self.fit(size, px);
         let s = self.text_scale();
         let run = self.run(font, px, text);
+        if run.levels.is_some() {
+            return Self::bidi_hit(&run, text, 0, text.len(), x * s / r).0;
+        }
         let (mut best, mut best_d) = (0usize, f32::INFINITY);
         let (mut j, mut pen) = (0usize, 0.0f32);
         for (byte, _) in text.char_indices() {
@@ -576,6 +751,103 @@ impl FontsInner {
             return text.len();
         }
         best
+    }
+
+    /// The caret before `byte` on the line `s..e` of a bidi run, raster px
+    /// from the line's left: the leading edge of the glyph that starts there,
+    /// or the trailing edge of the last glyph at the line's end.
+    /// Where two directions meet, one byte has two places on screen: the
+    /// leading edge of the character after it, and the trailing edge of the
+    /// character before. `trailing` says which: false (the usual) goes with
+    /// the character after, true with the one before — where a caret lands
+    /// that was moved there from that side.
+    fn bidi_caret(run: &Run, text: &str, s: usize, e: usize, byte: usize, trailing: bool) -> f32 {
+        let stops = Self::caret_stops(run, text, s, e);
+        let pick = |want: bool| stops.iter().find(|&&(_, b, t)| b == byte && t == want).map(|&(x, ..)| x);
+        if let Some(x) = pick(trailing).or_else(|| pick(!trailing)) {
+            return x;
+        }
+        // Inside a ligature: the nearest stop at or before it, logically.
+        stops.iter().filter(|&&(_, b, _)| b <= byte).max_by_key(|&&(_, b, _)| b).map_or(0.0, |&(x, ..)| x)
+    }
+
+    /// The byte whose caret is nearest `x` (raster px from the line's left).
+    /// The caret nearest `x` (raster px from the line's left): its byte,
+    /// and whether it is the trailing edge of the character before.
+    fn bidi_hit(run: &Run, text: &str, s: usize, e: usize, x: f32) -> (usize, bool) {
+        let stops = Self::caret_stops(run, text, s, e);
+        let mut best = (f32::INFINITY, s, false);
+        for &(sx, b, t) in &stops {
+            let d = (sx - x).abs();
+            if d < best.0 {
+                best = (d, b, t);
+            }
+        }
+        (best.1, best.2)
+    }
+
+    /// Whether `line` holds right-to-left text, and whether its paragraph
+    /// runs right to left.
+    pub(crate) fn bidi_of(&self, font: FontId, size: f32, line: &str) -> (bool, bool) {
+        if !has_rtl(line) {
+            return (false, false);
+        }
+        let run = self.run(font, self.px(size), line);
+        (run.levels.is_some(), run.rtl)
+    }
+
+    /// [`Fonts::caret_x`] on the row `s..e` of a bidi `line`, logical px from
+    /// the row's left edge.
+    pub(crate) fn caret_x_in(&self, font: FontId, size: f32, line: &str, (s0, e0): (usize, usize), byte: usize, trailing: bool) -> f32 {
+        let px = self.px(size);
+        let run = self.run(font, px, line);
+        (Self::bidi_caret(&run, line, s0, e0, byte, trailing) * self.fit(size, px)).round() / self.text_scale()
+    }
+
+    /// [`Fonts::byte_at_x`] on the row `s..e` of a bidi `line`: a byte of the
+    /// line within the row.
+    pub(crate) fn byte_at_x_in(&self, font: FontId, size: f32, line: &str, (s0, e0): (usize, usize), x: f32) -> (usize, bool) {
+        let px = self.px(size);
+        let run = self.run(font, px, line);
+        Self::bidi_hit(&run, line, s0, e0, x * self.text_scale() / self.fit(size, px))
+    }
+
+    /// Every caret stop on the row, logical px from its left edge.
+    pub(crate) fn stops_in(&self, font: FontId, size: f32, line: &str, (s0, e0): (usize, usize)) -> Vec<(f32, usize, bool)> {
+        let px = self.px(size);
+        let (r, sc) = (self.fit(size, px), self.text_scale());
+        let run = self.run(font, px, line);
+        Self::caret_stops(&run, line, s0, e0).into_iter().map(|(x, b, t)| ((x * r).round() / sc, b, t)).collect()
+    }
+
+    /// The selection `a..b` on the row `s..e` of a bidi line, as the spans of
+    /// x it covers — more than one where the selection crosses a change of
+    /// direction. Logical px from the row's left edge.
+    pub(crate) fn spans_in(&self, font: FontId, size: f32, line: &str, (s0, e0): (usize, usize), a: usize, b: usize) -> Vec<(f32, f32)> {
+        let px = self.px(size);
+        let (r, sc) = (self.fit(size, px), self.text_scale());
+        let run = self.run(font, px, line);
+        let mut out: Vec<(f32, f32)> = Vec::new();
+        for p in Self::place_line(&run, line, s0, e0) {
+            let g = &run.glyphs[p.i];
+            let c = g.cluster as usize;
+            if c < a || c >= b {
+                continue;
+            }
+            let (x0, x1) = ((p.x * r).round() / sc, ((p.x + g.advance) * r).round() / sc);
+            match out.last_mut() {
+                Some(last) if (last.1 - x0).abs() < 0.5 => last.1 = x1,
+                _ => out.push((x0, x1)),
+            }
+        }
+        out
+    }
+
+    /// Width of the row `s..e` of `line`, logical px.
+    pub(crate) fn width_in(&self, font: FontId, size: f32, line: &str, (s0, e0): (usize, usize)) -> f32 {
+        let px = self.px(size);
+        let run = self.run(font, px, line);
+        (width_between(&run, s0, e0) * size / px).ceil()
     }
 
     /// Caret x positions (logical px from the text start) before each char and
@@ -939,6 +1211,14 @@ impl FontsInner {
         let lh = self.line_height(font, size);
         let px = self.px(size);
         let k = size / px;
+        // A bidi paragraph is laid out as ranges of itself, so every line is
+        // ordered by the paragraph's direction; and a right-to-left paragraph
+        // starts at the right.
+        let (bidi, rtl) = self.bidi_of(font, size, text);
+        let align = match align {
+            crate::Align::Start if rtl => crate::Align::End,
+            a => a,
+        };
         for (i, l) in lines.iter().enumerate() {
             let slice = &text[l.start as usize..l.end as usize];
             if slice.is_empty() {
@@ -950,7 +1230,12 @@ impl FontsInner {
                 crate::Align::Center => r.x + (r.w - w) * 0.5,
                 _ => r.x,
             };
-            self.draw(dl, font, size, Vec2::new(x, r.y + lh * i as f32), color, slice);
+            let at = Vec2::new(x, r.y + lh * i as f32);
+            if bidi {
+                self.draw_in(dl, font, size, at, color, text, (l.start as usize, l.end as usize));
+            } else {
+                self.draw(dl, font, size, at, color, slice);
+            }
         }
     }
 
@@ -979,6 +1264,10 @@ impl FontsInner {
         // The run is reference-counted, so holding it while rasterising glyphs
         // (which needs `&mut self`) costs no copy.
         let run = self.run(font, px, text);
+        if run.levels.is_some() {
+            self.draw_placed(dl, font, px, (x0, baseline), r, s, snap, color, &run, Self::place_line(&run, text, 0, text.len()));
+            return;
+        }
         for sg in run.glyphs.iter() {
             let g = self.glyph(font, sg.face, sg.glyph, px);
             if g.w > 0.0 {
@@ -987,6 +1276,38 @@ impl FontsInner {
                 dl.glyph(Rect::new(gx / s, gy / s, g.w / s, g.h / s), g.page, g.uv, color);
             }
             x += sg.advance;
+        }
+    }
+
+    /// Draw the row `s..e` of a bidi `line`, its left edge at `pos`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn draw_in(&mut self, dl: &mut DrawList, font: FontId, size: f32, pos: Vec2, color: Color, line: &str, (s0, e0): (usize, usize)) {
+        let s = self.text_scale();
+        let px = self.px(size);
+        let r = self.fit(size, px);
+        let (asc, _) = self.line(font, px);
+        self.text_draws += 1;
+        let snap = dl.snap_text();
+        let round = |v: f32| if snap { v.round() } else { v };
+        let origin = (round(pos.x * s), round(pos.y * s + asc * r));
+        let run = self.run(font, px, line);
+        let placed = Self::place_line(&run, line, s0, e0);
+        self.draw_placed(dl, font, px, origin, r, s, snap, color, &run, placed);
+    }
+
+    /// Glyphs already put in visual order, drawn from `origin` (raster px:
+    /// the left edge and the baseline).
+    #[allow(clippy::too_many_arguments)]
+    fn draw_placed(&mut self, dl: &mut DrawList, font: FontId, px: f32, origin: (f32, f32), r: f32, s: f32, snap: bool, color: Color, run: &Run, placed: Vec<Placed>) {
+        let round = |v: f32| if snap { v.round() } else { v };
+        for p in placed {
+            let sg = run.glyphs[p.i];
+            let g = self.glyph(font, sg.face, sg.glyph, px);
+            if g.w > 0.0 {
+                let gx = round(origin.0 + (p.x + sg.offset.x) * r) + g.left;
+                let gy = origin.1 + round(sg.offset.y * r) - (g.bottom + g.h);
+                dl.glyph(Rect::new(gx / s, gy / s, g.w / s, g.h / s), g.page, g.uv, color);
+            }
         }
     }
 
@@ -1008,9 +1329,19 @@ impl FontsInner {
         // The upright box's top-left and baseline, in raster px from the centre.
         let x0 = -m.x * 0.5 * s;
         let baseline = -m.y * 0.5 * s + asc * r;
-        let mut x = 0.0;
+        let mut pen = 0.0;
         let run = self.run(font, px, text);
-        for sg in run.glyphs.iter() {
+        // Mixed-direction text in visual order; left to right as shaped.
+        let placed = run.levels.is_some().then(|| Self::place_line(&run, text, 0, text.len()));
+        for k in 0..placed.as_ref().map_or(run.glyphs.len(), Vec::len) {
+            let (i, x) = match &placed {
+                Some(p) => (p[k].i, p[k].x),
+                None => {
+                    pen += run.glyphs[k].advance;
+                    (k, pen - run.glyphs[k].advance)
+                }
+            };
+            let sg = run.glyphs[i];
             let g = self.glyph(font, sg.face, sg.glyph, px);
             if g.w > 0.0 {
                 let gx = x0 + (x + sg.offset.x) * r + g.left;
@@ -1027,7 +1358,6 @@ impl FontsInner {
                 let (w, h) = (w + 1.0 / s, h + 1.0 / s);
                 dl.glyph_rotated(Rect::new(c.x - w * 0.5, c.y - h * 0.5, w, h), g.page, uv, color, rot);
             }
-            x += sg.advance;
         }
     }
 }
@@ -1146,6 +1476,37 @@ impl Fonts {
     /// `text` broken into lines no wider than `max`, cached.
     pub(crate) fn wrap(&self, font: FontId, size: f32, text: &str, max: f32) -> Rc<[Line]> {
         self.0.borrow().wrap(font, size, text, max)
+    }
+
+    /// Whether `line` holds right-to-left text, and whether it runs right to
+    /// left as a paragraph.
+    pub(crate) fn bidi_of(&self, font: FontId, size: f32, line: &str) -> (bool, bool) {
+        self.0.borrow().bidi_of(font, size, line)
+    }
+
+    pub(crate) fn caret_x_in(&self, font: FontId, size: f32, line: &str, row: (usize, usize), byte: usize, trailing: bool) -> f32 {
+        self.0.borrow().caret_x_in(font, size, line, row, byte, trailing)
+    }
+
+    pub(crate) fn byte_at_x_in(&self, font: FontId, size: f32, line: &str, row: (usize, usize), x: f32) -> (usize, bool) {
+        self.0.borrow().byte_at_x_in(font, size, line, row, x)
+    }
+
+    pub(crate) fn stops_in(&self, font: FontId, size: f32, line: &str, row: (usize, usize)) -> Vec<(f32, usize, bool)> {
+        self.0.borrow().stops_in(font, size, line, row)
+    }
+
+    pub(crate) fn spans_in(&self, font: FontId, size: f32, line: &str, row: (usize, usize), a: usize, b: usize) -> Vec<(f32, f32)> {
+        self.0.borrow().spans_in(font, size, line, row, a, b)
+    }
+
+    pub(crate) fn width_in(&self, font: FontId, size: f32, line: &str, row: (usize, usize)) -> f32 {
+        self.0.borrow().width_in(font, size, line, row)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn draw_in(&self, dl: &mut DrawList, font: FontId, size: f32, pos: Vec2, color: Color, line: &str, row: (usize, usize)) {
+        self.0.borrow_mut().draw_in(dl, font, size, pos, color, line, row);
     }
 
     pub fn wrap_lines_for_test(&self, font: FontId, size: f32, text: &str, max: f32) -> Vec<String> {

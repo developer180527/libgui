@@ -93,9 +93,8 @@ fn clusters_are_ordered_byte_offsets_into_the_source() {
 /// rustybuzz emits it visually, right-hand glyph first, which would leave
 /// clusters running backwards and break every caret in the library.
 ///
-/// This is *not* bidi: the glyphs are laid out left to right. See the module
-/// docs on `ShapeRasterizer`. The test pins the ordering so that when bidi
-/// does land, it lands deliberately.
+/// Putting them on screen right to left is the bidi pass's job, not the
+/// shaper's (see `tests/bidi.rs`).
 #[test]
 fn a_right_to_left_run_comes_back_in_logical_order() {
     let (sh, _) = both("שלום");
@@ -238,4 +237,33 @@ fn the_locale_survives_the_reused_buffer() {
         // Shape something else in between, so the buffer really is recycled.
         let _ = shaped(&rtl, "Hello");
     }
+}
+
+/// **A right-to-left run is mirrored once**, whichever backend shapes it. The
+/// bidi pass hands an RTL run to `shape_rtl`: the shaper is told the
+/// direction and mirrors `(` itself, fontdue (which knows nothing of
+/// direction) gets it mirrored for it, and a fallback chain passes it to the
+/// face that draws it. Mirrored twice, `(` would come back as `(`.
+#[test]
+fn a_right_to_left_run_mirrors_its_brackets_once() {
+    let rtl = |r: &dyn FontRasterizer, text: &str| -> Vec<u32> {
+        let mut out = Vec::new();
+        r.shape_rtl(text, PX, &mut out);
+        out.iter().map(|g| g.glyph).collect()
+    };
+    let sh = ShapeRasterizer::from_bytes(FONT).expect("shaper");
+    let fd = FontdueRasterizer::from_bytes(FONT).expect("fontdue");
+    let close = shaped(&fd, ")")[0].glyph;
+    assert_eq!(rtl(&sh, "("), vec![close], "the shaper mirrored ( twice, or not at all");
+    // Beside a Hebrew letter the shaper would guess right to left on its own:
+    // mirrored by the default as well, the bracket would turn back.
+    assert_eq!(rtl(&sh, "א(")[1], close, "a bracket beside Hebrew was mirrored twice");
+    assert_eq!(rtl(&fd, "("), vec![close], "fontdue's ( was not mirrored");
+    let stack = FontStack::new(vec![Box::new(FontdueRasterizer::from_bytes(FONT).unwrap())]);
+    assert_eq!(rtl(&stack, "("), vec![close], "the fallback chain did not pass the direction on");
+    // Letters are left alone, and the clusters still name the source bytes.
+    let mut out = Vec::new();
+    fd.shape_rtl("(a)", PX, &mut out);
+    assert_eq!(out.iter().map(|g| g.cluster).collect::<Vec<_>>(), vec![0, 1, 2]);
+    assert_eq!(out[1].glyph, shaped(&fd, "a")[0].glyph);
 }

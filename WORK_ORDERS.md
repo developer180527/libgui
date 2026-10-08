@@ -9,9 +9,9 @@ recommended.
 | WO-1 | One glyph-atlas page; flicker when full | **Done** (contract 5): pages, least-recently-used reuse, nothing on screen lost unless one frame outgrows the whole budget | — |
 | WO-2 | No word wrap in `text_area` | **Done**: wraps by default (`TextAreaOptions::wrap`), rows-on-screen motion, inline IME composition, cost bounded by the screen | — |
 | WO-3 | No triangle primitive | **Done** (contract 5): `fill_polygon`, `_with_holes`, `fill_mesh`; seam-free on CPU and GPU | — |
-| WO-4 | No right-to-left text | Shaped correctly, laid out left to right | Low unless shipping to RTL markets |
+| WO-4 | No right-to-left text | **Done** (`bidi` feature, on by default): UAX #9 per paragraph, visual order per row, carets that know which side they are on, split selections, mirrored brackets. Panel mirroring is a follow-up | — |
 | — | Video scopes | Correct as planned: GPU textures through `viewport`/`image` | None |
-| — | Pre-1.0 API | Vendoring a commit is right; add a changelog | Small (WO-5) |
+| — | Pre-1.0 API | Vendoring a commit is right; **`CHANGELOG.md` added** (WO-5) | — |
 
 ---
 
@@ -170,9 +170,18 @@ this way.
 **Note.** Pair with the accessibility work: both block shipping to
 consumers in those markets.
 
+**As done.** The tests (`crates/libgui/tests/bidi.rs`) use a stub font whose
+glyphs name their characters, so order on screen is checked exactly without
+a Hebrew or Arabic font in the repository; Inter has neither, and the golden
+images use only Inter. A golden image of real Arabic waits on adding such a
+font. Each test was checked by breaking the code it guards. Not done: panel
+mirroring; a split caret (one caret is drawn, on the side the motion chose);
+right-aligning a single-line `text_input`; setting a paragraph's direction
+other than by a mark in its text.
+
 ---
 
-## WO-5 Changelog for vendored users
+## WO-5 Changelog for vendored users (done)
 
 Add `CHANGELOG.md`: one entry per commit that changes the API or
 `CONTRACT_VERSION`, listing what a vendored user must change (e.g. contract 4:

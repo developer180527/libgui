@@ -21,6 +21,8 @@ fontdue = "0.9"
 # Real shaping (ligatures, marks, contextual forms, Indic reordering).
 # Optional and off by default: see libgui's `shape` feature.
 rustybuzz = "0.20"
+# Right-to-left text: the Unicode bidi algorithm. See libgui's `bidi` feature.
+unicode-bidi = { version = "0.3", default-features = false, features = ["hardcoded-data"] }
 self_cell = "1"
 bytemuck = { version = "1", features = ["derive"] }
 pollster = "1"

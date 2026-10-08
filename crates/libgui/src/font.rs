@@ -8,6 +8,10 @@
 //! 2. [`FontRasterizer::shape`]: a string to positioned *glyph ids*;
 //! 3. [`FontRasterizer::rasterize`]: one glyph id to a coverage bitmap.
 //!
+//! A fourth, [`FontRasterizer::shape_rtl`], shapes a right-to-left run. Its
+//! default mirrors brackets and calls `shape`; a shaper that mirrors on its
+//! own overrides it.
+//!
 //! [`FontStack`] composes several of these into a fallback chain, so a string
 //! mixing scripts draws with whichever face has the glyphs.
 //!
@@ -79,6 +83,26 @@ pub trait FontRasterizer {
     /// blank glyphs (space).
     fn rasterize(&self, face: u16, glyph: u32, px: f32) -> GlyphBitmap;
 
+    /// Shape `text` that the bidi algorithm put in a right-to-left run.
+    ///
+    /// Glyphs still go to `out` in logical order, like [`shape`](Self::shape);
+    /// libgui reorders them. What differs is the run's direction, which a real
+    /// shaper uses for joining and mirroring. The default mirrors brackets
+    /// (`(` is drawn as `)`, Unicode's rule L4) and calls `shape`, which is
+    /// right for a backend that does not mirror on its own. A shaper that does
+    /// should override this to shape the run as right to left instead, or the
+    /// brackets turn twice.
+    fn shape_rtl(&self, text: &str, px: f32, out: &mut Vec<ShapedGlyph>) {
+        if text.chars().any(|c| mirror(c) != c) {
+            // Each mirror is the same length in UTF-8, so clusters still
+            // point into `text`.
+            let mirrored: String = text.chars().map(mirror).collect();
+            self.shape(&mirrored, px, out);
+        } else {
+            self.shape(text, px, out);
+        }
+    }
+
     /// Can this backend draw `ch` with something other than `.notdef`?
     ///
     /// Only [`FontStack`] asks, to decide where a run of text should go. The
@@ -88,6 +112,32 @@ pub trait FontRasterizer {
         let _ = ch;
         true
     }
+}
+
+/// The character drawn in place of `ch` in right-to-left text: the other half
+/// of a bracket pair, or `ch` itself. The common pairs of Unicode's
+/// Bidi_Mirroring_Glyph, each pair from one block, so the same UTF-8 length.
+pub(crate) fn mirror(ch: char) -> char {
+    const PAIRS: &[(char, char)] = &[
+        ('(', ')'), ('<', '>'), ('[', ']'), ('{', '}'), ('«', '»'), ('‹', '›'),
+        ('⁅', '⁆'), ('⁽', '⁾'), ('₍', '₎'), ('≤', '≥'), ('≦', '≧'), ('≪', '≫'),
+        ('⟨', '⟩'), ('⟪', '⟫'), ('⟦', '⟧'), ('⦃', '⦄'), ('〈', '〉'), ('《', '》'),
+        ('「', '」'), ('『', '』'), ('【', '】'), ('〔', '〕'), ('〖', '〗'), ('〘', '〙'),
+        ('〚', '〛'), ('﹙', '﹚'), ('﹛', '﹜'), ('﹝', '﹞'), ('（', '）'), ('［', '］'),
+        ('｛', '｝'), ('＜', '＞'), ('｟', '｠'), ('｢', '｣'),
+    ];
+    if ch.is_ascii_alphanumeric() || ch == ' ' {
+        return ch;
+    }
+    for &(a, b) in PAIRS {
+        if ch == a {
+            return b;
+        }
+        if ch == b {
+            return a;
+        }
+    }
+    ch
 }
 
 /// The built-in backend: fontdue. No complex shaping (one glyph per
@@ -288,6 +338,27 @@ impl FontRasterizer for FontStack {
     /// so a space or a digit between two CJK words does not split the run in
     /// three.
     fn shape(&self, text: &str, px: f32, out: &mut Vec<ShapedGlyph>) {
+        self.shape_runs(text, px, false, out);
+    }
+
+    /// Each face shapes its part as right to left: mirrored by whichever
+    /// face draws it, and only once.
+    fn shape_rtl(&self, text: &str, px: f32, out: &mut Vec<ShapedGlyph>) {
+        self.shape_runs(text, px, true, out);
+    }
+
+    fn rasterize(&self, face: u16, glyph: u32, px: f32) -> GlyphBitmap {
+        // The sub-face is a single-face backend and issued this id as its own
+        // face 0, so that is what it is asked for.
+        match self.faces.get(face as usize) {
+            Some(f) => f.rasterize(0, glyph, px),
+            None => GlyphBitmap::default(),
+        }
+    }
+}
+
+impl FontStack {
+    fn shape_runs(&self, text: &str, px: f32, rtl: bool, out: &mut Vec<ShapedGlyph>) {
         let mut run = self.run.borrow_mut();
         let mut start = 0usize;
         let mut face: Option<u16> = None;
@@ -305,21 +376,12 @@ impl FontRasterizer for FontStack {
                 continue;
             }
             if let Some(f) = face {
-                shape_run(&*self.faces[f as usize], &text[start..byte], px, start, f, &mut run, out);
+                shape_run(&*self.faces[f as usize], &text[start..byte], px, rtl, start, f, &mut run, out);
             }
             (start, face) = (byte, Some(want));
         }
         if let Some(f) = face {
-            shape_run(&*self.faces[f as usize], &text[start..], px, start, f, &mut run, out);
-        }
-    }
-
-    fn rasterize(&self, face: u16, glyph: u32, px: f32) -> GlyphBitmap {
-        // The sub-face is a single-face backend and issued this id as its own
-        // face 0, so that is what it is asked for.
-        match self.faces.get(face as usize) {
-            Some(f) => f.rasterize(0, glyph, px),
-            None => GlyphBitmap::default(),
+            shape_run(&*self.faces[f as usize], &text[start..], px, rtl, start, f, &mut run, out);
         }
     }
 }
@@ -327,17 +389,23 @@ impl FontRasterizer for FontStack {
 /// Shape one same-face run and append it, moving the sub-face's byte offsets
 /// back into the whole string's coordinates and stamping the face on each
 /// glyph.
+#[allow(clippy::too_many_arguments)]
 fn shape_run(
     face: &dyn FontRasterizer,
     slice: &str,
     px: f32,
+    rtl: bool,
     at: usize,
     index: u16,
     scratch: &mut Vec<ShapedGlyph>,
     out: &mut Vec<ShapedGlyph>,
 ) {
     scratch.clear();
-    face.shape(slice, px, scratch);
+    if rtl {
+        face.shape_rtl(slice, px, scratch);
+    } else {
+        face.shape(slice, px, scratch);
+    }
     out.extend(scratch.iter().map(|g| ShapedGlyph {
         face: index,
         cluster: g.cluster + at as u32,

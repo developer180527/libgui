@@ -575,4 +575,6 @@ The C ABI cannot move like that, which is why it versions separately (§9).
 `LIBGUI_ABI_VERSION` is checked once at start-up, and a mismatch is a loud
 failure rather than a silent misread.
 
-There is no changelog yet and no semver guarantee. Pin an exact version.
+There is no semver guarantee. Pin an exact version, and read
+[`CHANGELOG.md`](CHANGELOG.md) when you move it: each API or render-contract
+change lists what it asks of an app or a host.

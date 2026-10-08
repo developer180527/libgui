@@ -39,6 +39,7 @@ C and C++ hosts: `add_subdirectory(crates/libgui_c)`, then link
 | [`DESIGN.md`](DESIGN.md) | Why it is shaped this way, decision by decision |
 | [`WIDGETS.md`](WIDGETS.md) | Fourteen applications surveyed against the widget set: what is here, what is missing, in what order |
 | [`IN_DEPTH.md`](IN_DEPTH.md) | Longer notes: text undo, wheel smoothing, performance guards, arenas, damage tracking, caching, golden images |
+| [`CHANGELOG.md`](CHANGELOG.md) | What each API or render-contract change asks of an app or a host that vendors libgui |
 | `cargo doc -p libgui --open` | Every signature |
 
 ## What it has
@@ -68,14 +69,15 @@ C and C++ hosts: `add_subdirectory(crates/libgui_c)`, then link
   - IME composition, touch.
 - **Motion and idling.** Easing and springs; the window sleeps when nothing
   moves.
-- **Text.** Font fallback chains, and real shaping with rustybuzz.
+- **Text.** Font fallback chains, real shaping with rustybuzz, and
+  right-to-left and mixed-direction text (Unicode bidi).
 - **Rendering.** One shader in five languages and a wgpu backend. A mesh form
   serves renderers that cannot instance (bgfx, GLES2), and a CPU reference
   renderer gives pixel-exact tests.
 
 **Not yet:**
 - accessibility (screen readers);
-- bidirectional text.
+- panels mirrored for right-to-left languages.
 
 The full list is in [MANUAL §17](MANUAL.md#17-limitations).
 
@@ -120,8 +122,8 @@ Run any of them with `cargo run --release -p <name>`.
 
 1. **Accessibility** via AccessKit. This blocks shipping to consumers.
 2. **Text:**
-   - bidirectional text;
-   - double-click to select a word.
+   - double-click to select a word;
+   - mirroring whole panels for right-to-left languages.
 3. **Tables:** a 2-D cell cursor, cell editing, reordering columns by drag.
 4. **Compositions:**
    - a searchable dropdown;

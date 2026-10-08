@@ -806,8 +806,29 @@ let face = ShapeRasterizer::from_bytes(bytes)?.with_language("tr")?;
 let ui = Ui::with_rasterizer(theme, Box::new(face));
 ```
 
+**Right-to-left and mixed text** work with no setup (the `bidi` feature, on
+by default). Hebrew and Arabic read right to left, a Latin word or a number
+inside them keeps its own order, and brackets are mirrored:
+- **Direction** comes from the text: a paragraph whose first strong letter
+  is Hebrew or Arabic runs right to left. Start it with U+200F (RLM) to make a
+  Latin-first paragraph right to left.
+- **Alignment:** a right-to-left paragraph in `text_area`, `paragraph` and
+  `text_wrapped` with `Align::Start` sits at the right edge.
+- **Caret:** it moves through the text in order but is drawn where the
+  character is. Left and Right move by what is on screen. Where two directions
+  meet, one place in the text is two places on screen; the caret is drawn
+  where the arrow or click put it.
+- **Selection:** one range in the text can be several pieces on screen.
+- **Cost:** none for text without right-to-left characters; it takes a fast
+  path and lays out exactly as before.
+
+The bundled Inter has no Hebrew or Arabic glyphs, so add a font with them to
+the fallback chain.
+
 **Your own engine.** To use another text engine (HarfBuzz, CoreText,
-DirectWrite), implement `FontRasterizer` (three methods).
+DirectWrite), implement `FontRasterizer` (three methods). If your engine
+mirrors brackets in right-to-left text itself, also override `shape_rtl` to
+shape the run as right to left; its default mirrors them for you.
 
 **Sharing fonts between windows.** `Ui::sharing_fonts(&other)` makes windows
 share one font system and atlas, so glyphs are rasterised and uploaded once.
@@ -1054,6 +1075,7 @@ Budget::steady(120).instances(400).assert(&cost);
 |---|---|---|
 | `fontdue` | on | the built-in rasteriser |
 | `theme-toml` | on | TOML themes and layouts (with `serde`) |
+| `bidi` | on | right-to-left and mixed-direction text (`unicode-bidi`) |
 | `shape` | off | rustybuzz shaping |
 | `theme-watch` | off | `ThemeWatcher`, the crate's only filesystem access |
 | `profile` | off | per-phase timings, the crate's only clock |
@@ -1238,6 +1260,8 @@ Everything an application or a custom widget needs (§16 lists it all):
   validated fields, the colour picker, notifications, drag and drop (including
   from the OS).
 - **Platform:** docking, themes from TOML, the keymap.
+- **Right-to-left text:** there is nothing to call; every widget and
+  `libgui_painter_text*` lays it out as Rust does (§11).
 - **Output:** every form of frame output.
 
 What stays Rust-only, and why:
@@ -1361,7 +1385,6 @@ The full signatures are in rustdoc (`cargo doc -p libgui --open`) and in
 **Can block some apps**
 - **No accessibility tree** (AccessKit, screen readers). This is the largest
   gap.
-- **No bidirectional text.** Arabic and Hebrew lay out left to right.
 
 **Widgets**
 - `plot` is a simple bar chart; use `scope` for traces. Scopes have no axis
@@ -1376,6 +1399,10 @@ The full signatures are in rustdoc (`cargo doc -p libgui --open`) and in
 - There is no double-click to select a word.
 - The caret moves by `char` and can split an emoji sequence.
 - There is one font role per `Ui`.
+- Right-to-left text is laid out, but panels are not mirrored for
+  right-to-left languages, a single-line `text_input` keeps its text at the
+  left edge, and where two directions meet one caret is drawn, not a split
+  one. A paragraph's direction can only be set by a mark in its text.
 
 **Drawing**
 - Turning is for drawing only: widgets, layout and hit-testing stay upright,
@@ -1393,4 +1420,5 @@ The full signatures are in rustdoc (`cargo doc -p libgui --open`) and in
 - Container `Id`s are positional by default (§5).
 - Restoring a layout does not restore focus.
 
-**Pre-1.0.** The API changes between versions, so pin an exact one.
+**Pre-1.0.** The API changes between versions, so pin an exact one;
+[`CHANGELOG.md`](CHANGELOG.md) lists what each change asks of you.
