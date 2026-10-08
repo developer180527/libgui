@@ -34,20 +34,17 @@ impl fmt::Display for FontError {
 
 impl std::error::Error for FontError {}
 
-/// Single-channel coverage atlas. `version` bumps whenever pixels change so the
-/// renderer knows when to re-upload.
 /// The default for [`Fonts::set_tab_width`]. Four is the common figure, and it
 /// is a default rather than a rule: tab width is an app's preference, and
 /// often a per-language one (Go is eight, plenty of web repositories are two).
 pub const DEFAULT_TAB_WIDTH: usize = 4;
 
+/// One page of the glyph atlas: a single-channel coverage image, `size` by
+/// `size`. `version` bumps whenever its pixels change, so a renderer uploads a
+/// page again only when that page changed.
 #[derive(Clone)]
-pub struct Atlas {
+pub struct AtlasPage {
     pub size: u32,
-    /// How large it may grow before it starts evicting instead. A single
-    /// channel, so 4096 is 16 MB — enough for CJK at several sizes, or a
-    /// zooming canvas asking for hundreds of them.
-    pub max_size: u32,
     /// Behind an `Rc` so the atlas is cheap to *clone*, which is what lets a
     /// finished frame carry a snapshot of it instead of borrowing the font
     /// system — and so several `Ui`s can share one. Writing to it clones the
@@ -55,45 +52,22 @@ pub struct Atlas {
     /// and drops its frame output never causes.
     pub data: Rc<Vec<u8>>,
     pub version: u64,
-    /// Bumped when the atlas is repacked (reset or grown), which moves every
-    /// glyph: anything holding uv coordinates from before is stale. `version`
-    /// cannot say this — it also bumps for each glyph merely added.
-    pub repacks: u64,
     cursor: (u32, u32),
     row_h: u32,
 }
 
-impl Atlas {
+impl AtlasPage {
     fn new(size: u32) -> Self {
-        Self {
-            size,
-            max_size: 4096,
-            data: Rc::new(vec![0; (size * size) as usize]),
-            version: 1,
-            repacks: 0,
-            cursor: (1, 1),
-            row_h: 0,
-        }
+        Self { size, data: Rc::new(vec![0; (size * size) as usize]), version: 1, cursor: (1, 1), row_h: 0 }
     }
 
-    /// Could a `w` x `h` glyph ever fit, even in a freshly reset atlas *at
-    /// this size*?
+    /// Could a `w` x `h` bitmap fit on an empty page of this size?
     fn fits(&self, w: u32, h: u32) -> bool {
-        let pad = 1;
-        1 + w + pad <= self.size && 1 + h + pad <= self.size
+        // A texel of padding each side.
+        w + 2 <= self.size && h + 2 <= self.size
     }
 
-    /// Could it fit if the atlas were allowed to grow all the way to its
-    /// limit? Distinct from [`Atlas::fits`], which asks about the size it is
-    /// at now: a glyph can be too big for today's atlas and well inside what
-    /// the cap permits.
-    fn could_fit(&self, w: u32, h: u32) -> bool {
-        let pad = 1;
-        1 + w + pad <= self.max_size && 1 + h + pad <= self.max_size
-    }
-
-    /// Shelf packer. Returns None when full (or when the glyph is too large,
-    /// in which case no amount of resetting would help).
+    /// Shelf packer. None when full or the bitmap is too large for the page.
     fn alloc(&mut self, w: u32, h: u32) -> Option<(u32, u32)> {
         let pad = 1;
         if !self.fits(w, h) {
@@ -112,34 +86,73 @@ impl Atlas {
         Some(pos)
     }
 
-    fn reset(&mut self) {
+    /// Empty it for reuse. Its version bumps, so a renderer uploads it again.
+    fn clear(&mut self) {
         Rc::make_mut(&mut self.data).fill(0);
         self.cursor = (1, 1);
         self.row_h = 0;
         self.version += 1;
-        self.repacks += 1;
+    }
+}
+
+/// The glyph atlas: pages of coverage that glyphs and filled paths are packed
+/// into, drawn as [`TextureId::Atlas`](crate::TextureId::Atlas)`(page)`.
+///
+/// **Nothing on screen is ever lost to a full atlas.** Every page records the
+/// frame it was last drawn from. When the pages are full and the budget allows
+/// no more, the page used longest ago is emptied and reused at once, mid-frame
+/// — safe, because nothing drawn this frame points into it. Only a single frame
+/// that needs more glyphs than every page together holds can miss one, and it
+/// is counted ([`FrameCost::atlas_overflows`](crate::testing::FrameCost)).
+#[derive(Clone)]
+pub struct Atlas {
+    /// Behind an `Rc` like each page's texels, so a frame's snapshot of the
+    /// atlas is a reference count, not a copy; the list is copied only when a
+    /// glyph is placed while a snapshot is held.
+    pub pages: Rc<Vec<AtlasPage>>,
+    /// The memory budget, as the side of one square: all pages together hold at
+    /// most `max_size²` texels. The default is 4096 (16 MB, four pages).
+    pub max_size: u32,
+    /// The side of an ordinary page. A glyph too big for one gets a page of
+    /// its own, sized to fit, inside the same budget.
+    pub page_size: u32,
+    /// Bumped whenever a page is emptied for reuse: anything holding uv
+    /// coordinates into the atlas from before may be stale.
+    pub repacks: u64,
+    /// The page new bitmaps go to.
+    open: usize,
+}
+
+impl Atlas {
+    fn new(page_size: u32) -> Self {
+        Self { pages: Rc::new(vec![AtlasPage::new(page_size)]), max_size: 4096, page_size, repacks: 0, open: 0 }
     }
 
-    /// Double it, if it is allowed to get any bigger. Everything in it is lost
-    /// — the callers clear their caches — but it happens once, where resetting
-    /// the same size over and over happens every frame forever.
-    fn grow(&mut self) -> bool {
-        let next = self.size.saturating_mul(2);
-        if next > self.max_size {
-            return false;
-        }
-        self.size = next;
-        self.data = Rc::new(vec![0; (next * next) as usize]);
-        self.cursor = (1, 1);
-        self.row_h = 0;
-        self.version += 1;
-        self.repacks += 1;
-        true
+    /// The first page: where everything goes until it fills.
+    pub fn first(&self) -> &AtlasPage {
+        &self.pages[0]
+    }
+
+    /// Total texels held, all pages.
+    pub fn texels(&self) -> u64 {
+        self.pages.iter().map(|p| p.size as u64 * p.size as u64).sum()
+    }
+
+    fn budget(&self) -> u64 {
+        self.max_size as u64 * self.max_size as u64
+    }
+
+    /// Could a `w` x `h` bitmap ever be placed within the budget?
+    fn could_fit(&self, w: u32, h: u32) -> bool {
+        let side = (w.max(h) + 2).next_power_of_two().max(self.page_size);
+        side <= self.max_size
     }
 }
 
 #[derive(Clone, Copy)]
 struct Glyph {
+    /// The atlas page it is on.
+    page: u32,
     uv: [f32; 4],
     w: f32,
     h: f32,
@@ -175,9 +188,10 @@ struct FontsInner {
     /// (font, px) -> (ascent, descent), in physical px.
     lines: RefCell<FxMap<(u16, u32), (f32, f32)>>,
     atlas: Atlas,
-    /// Filled paths in the atlas: their key at a size -> uv, `None` when it
-    /// can never fit. Cleared with the glyphs on a repack.
-    masks: FxMap<u64, Option<[f32; 4]>>,
+    /// Filled paths in the atlas: their key at a size -> (page, uv), `None`
+    /// when it can never fit. Dropped with the glyphs of a page it shared when
+    /// that page is reused.
+    masks: FxMap<u64, Option<(u32, [f32; 4])>>,
     /// Reused between rasterisations, so a path costs no allocation.
     mask_scratch: Vec<u8>,
     scale: f32,
@@ -186,8 +200,20 @@ struct FontsInner {
     /// Glyphs rasterised since the counter was last taken. A steady frame
     /// rasterises none; a frame that does is doing work it will not repeat.
     rasterized: u32,
-    /// The atlas ran out during a frame. Repacking waits for the boundary.
+    /// A bitmap could not be placed this frame: every page was in use by it.
+    /// It is retried next frame, so the host is asked for one.
     repack_pending: bool,
+    /// Frames begun on this font system, by every `Ui` sharing it: what a
+    /// page's `last_used` is compared with.
+    frame: u64,
+    /// Per atlas page, the frame something on it was last drawn: a page drawn
+    /// from this frame is never reused during it. Kept here, not in the page,
+    /// because it changes every frame and the pages are shared with snapshots.
+    page_used: Vec<u64>,
+    /// Bitmaps that could not be placed, and pages emptied for reuse, since
+    /// the counters were last taken.
+    overflows: u32,
+    evictions: u32,
     /// Strings shaped since the counter was last taken (run-cache misses).
     /// `Cell`, because shaping happens through `&self` on the measure path.
     shaped_runs: std::cell::Cell<u32>,
@@ -222,31 +248,40 @@ pub(crate) struct Line {
 impl FontsInner {
     /// Glyphs rasterised since the last call, and reset. [`Ui`](crate::Ui)
     /// takes it once a frame for [`FrameCost`](crate::testing::FrameCost).
-    /// True while a glyph is waiting for the atlas to be repacked: the host
-    /// needs one more frame before the text is complete.
+    /// True while a bitmap is waiting to be placed: the host needs one more
+    /// frame before the text is complete.
     pub(crate) fn repack_pending(&self) -> bool {
         self.repack_pending
     }
 
-    /// Repack the atlas if a glyph could not be placed during the last frame.
-    /// Grow if allowed — one re-rasterisation of everything, once — else
-    /// reset, which costs the same re-rasterisation every frame the working
-    /// set stays too big. A torture test with 400 font sizes found that the
-    /// expensive way: 1,704 glyphs rasterised, every frame, forever.
-    ///
-    /// Called between frames, never inside one: repacking moves every glyph,
-    /// and instances already emitted hold the old coordinates.
-    pub(crate) fn repack(&mut self) -> bool {
-        if !self.repack_pending {
-            return false;
+    /// A new frame starts: pages drawn from before now may be reused. Called
+    /// by every `Ui` sharing this font system, from `begin_frame`.
+    pub(crate) fn begin_frame(&mut self) {
+        self.frame += 1;
+        // The last frame could not place something: every page was in use by
+        // it. Page-at-a-time reuse cannot help then — a page holding one glyph
+        // still drawn is pinned however much else on it is stale — so start
+        // every page afresh now, between frames, and let this frame rasterise
+        // only what it draws. One frame of missing glyphs, and only when a
+        // frame outgrew the whole budget.
+        if self.repack_pending {
+            for pg in Rc::make_mut(&mut self.atlas.pages).iter_mut() {
+                if pg.size > 0 {
+                    pg.clear();
+                }
+            }
+            self.atlas.repacks += 1;
+            self.atlas.open = 0;
+            self.glyphs.clear();
+            self.masks.clear();
         }
         self.repack_pending = false;
-        if !self.atlas.grow() {
-            self.atlas.reset();
-        }
-        self.glyphs.clear();
-        self.masks.clear();
-        true
+    }
+
+    /// Bitmaps that could not be placed, and pages emptied for reuse, since
+    /// the last call; reset.
+    pub(crate) fn take_atlas_counts(&mut self) -> (u32, u32) {
+        (std::mem::take(&mut self.overflows), std::mem::take(&mut self.evictions))
     }
 
     pub fn take_rasterized(&mut self) -> u32 {
@@ -278,6 +313,10 @@ impl FontsInner {
             zoom: 1.0,
             rasterized: 0,
             repack_pending: false,
+            frame: 1,
+            page_used: vec![0],
+            overflows: 0,
+            evictions: 0,
             shaped_runs: std::cell::Cell::new(0),
             text_draws: 0,
             wraps: RefCell::new(FxMap::default()),
@@ -342,26 +381,26 @@ impl FontsInner {
         &self.atlas
     }
 
-    /// How large the glyph atlas may grow before it starts evicting instead,
-    /// in texels per side. The default is 4096 — 16 MB at one channel.
+    /// The glyph atlas's memory budget, as the side of one square: all its
+    /// pages together hold at most `max²` texels. The default is 4096 — 16 MB
+    /// at one channel, four 2048 pages.
     ///
-    /// Raise it for a UI that genuinely needs more live glyphs than that: CJK
-    /// through a [`FontStack`](crate::FontStack) at several sizes, or a canvas
-    /// zooming through many. Past the cap the atlas resets rather than grows,
-    /// which costs a re-rasterisation of the working set *every frame* it
-    /// stays too big, and shows as a one-frame flicker.
+    /// Raise it for a UI with more live glyphs than that: CJK through a
+    /// [`FontStack`](crate::FontStack) at many sizes, heavy caption work, a
+    /// canvas zooming through many sizes. Past the budget, the page drawn from
+    /// longest ago is emptied and reused, which costs re-rasterising what was
+    /// on it if it is wanted again — never a missing glyph, unless a single
+    /// frame needs more than the whole budget.
     ///
-    /// Lower it for a device where 16 MB of texture is not free. Lowering it
-    /// below the atlas's current size does not shrink what is already
-    /// allocated; it stops the next growth.
+    /// A glyph bigger than an ordinary page gets a page of its own, sized to
+    /// fit and inside the budget: raising the budget is what lets an enormous
+    /// glyph be drawn at all.
     ///
-    /// Rounded up to a power of two, because the atlas grows by doubling and
-    /// a cap between two powers would be indistinguishable from the lower one.
-    /// Clamped to at least the starting size, since a cap under it could never
-    /// be honoured.
+    /// Lower it for a device where 16 MB of texture is not free. Pages
+    /// already allocated are not freed; the budget applies to the next one.
+    /// Rounded up to a power of two and clamped to at least the page size.
     pub fn set_atlas_limit(&mut self, max: u32) {
-        let floor = self.atlas.size.min(2048);
-        self.atlas.max_size = max.max(floor).next_power_of_two();
+        self.atlas.max_size = max.max(self.atlas.page_size).next_power_of_two();
     }
 
     pub(crate) fn set_scale(&mut self, scale: f32) {
@@ -702,46 +741,107 @@ impl FontsInner {
         ((asc - desc) * size / px).ceil()
     }
 
-    /// Put a `w` x `h` coverage bitmap in the atlas and return its uv rect, or
-    /// `None` when it cannot go in this frame. Glyphs and filled paths both
-    /// come through here, so they grow, defer and repack by the same rules.
-    fn place(&mut self, w: u32, h: u32, bitmap: &[u8]) -> Option<[f32; 4]> {
-        let pos = if !self.atlas.fits(w, h) {
-            // Too big for the atlas as it stands. Growing is what would hold
-            // it, and growing is exactly what the limit permits, so ask for
-            // it — `fits` is a question about today's size, not about what the
-            // cap allows. Without this, raising the limit did nothing for the
-            // glyph that motivated raising it: the glyph was cached as
-            // unplaceable and never reconsidered.
-            if self.atlas.size < self.atlas.max_size && self.atlas.could_fit(w, h) {
-                self.repack_pending = true;
-            }
-            None
+    /// Put a `w` x `h` coverage bitmap in the atlas and return its page and
+    /// uv rect, or `None` when it cannot go in this frame. Glyphs and filled
+    /// paths both come through here.
+    ///
+    /// The open page first; then a new page while the budget allows; then the
+    /// page drawn from longest ago, emptied — never one drawn from this frame,
+    /// because instances already emitted point into it. A bitmap too big for
+    /// an ordinary page gets a page of its own the same way.
+    fn place(&mut self, w: u32, h: u32, bitmap: &[u8]) -> Option<(u32, [f32; 4])> {
+        let big = !(w + 2 <= self.atlas.page_size && h + 2 <= self.atlas.page_size);
+        let (page, pos) = if big {
+            let side = (w.max(h) + 2).next_power_of_two();
+            let p = self.new_page(side)?;
+            (p, Rc::make_mut(&mut self.atlas.pages)[p].alloc(w, h)?)
+        } else if let Some(pos) = Rc::make_mut(&mut self.atlas.pages)[self.atlas.open].alloc(w, h) {
+            (self.atlas.open, pos)
         } else {
-            match self.atlas.alloc(w, h) {
-                Some(p) => Some(p),
-                None => {
-                    // Full. Repacking here would move every glyph already in
-                    // it, and the instances emitted earlier *this frame* carry
-                    // uv coordinates into the old packing: the frame would draw
-                    // with whatever now sits at those texels. So it is deferred
-                    // to the frame boundary ([`Fonts::repack`]), and this
-                    // bitmap is simply not drawn this frame.
-                    self.repack_pending = true;
-                    None
-                }
-            }
+            let p = self.new_page(self.atlas.page_size)?;
+            self.atlas.open = p;
+            (p, Rc::make_mut(&mut self.atlas.pages)[p].alloc(w, h)?)
         };
-        let pos = pos?;
-        let s = self.atlas.size;
+        self.page_used[page] = self.frame;
+        let pg = &mut Rc::make_mut(&mut self.atlas.pages)[page];
+        let s = pg.size;
+        let data = Rc::make_mut(&mut pg.data);
         for row in 0..h {
             let dst = ((pos.1 + row) * s + pos.0) as usize;
             let src = (row * w) as usize;
-            Rc::make_mut(&mut self.atlas.data)[dst..dst + w as usize].copy_from_slice(&bitmap[src..src + w as usize]);
+            data[dst..dst + w as usize].copy_from_slice(&bitmap[src..src + w as usize]);
         }
-        self.atlas.version += 1;
+        pg.version += 1;
         let sf = s as f32;
-        Some([pos.0 as f32 / sf, pos.1 as f32 / sf, (pos.0 + w) as f32 / sf, (pos.1 + h) as f32 / sf])
+        Some((page as u32, [pos.0 as f32 / sf, pos.1 as f32 / sf, (pos.0 + w) as f32 / sf, (pos.1 + h) as f32 / sf]))
+    }
+
+    /// An empty page of side `side`: a new one if the budget allows, else the
+    /// page drawn from longest ago (of that size) emptied for reuse, else —
+    /// every page is in use this frame — `None`, counted, and retried next
+    /// frame.
+    fn new_page(&mut self, side: u32) -> Option<usize> {
+        let a = &self.atlas;
+        if a.texels() + side as u64 * side as u64 <= a.budget() {
+            Rc::make_mut(&mut self.atlas.pages).push(AtlasPage::new(side));
+            self.page_used.push(0);
+            return Some(self.atlas.pages.len() - 1);
+        }
+        let frame = self.frame;
+        // Oldest first. A page of a different size is not reused for this one;
+        // an oversized page that has gone unused is dropped to make room.
+        let used = &self.page_used;
+        let mut order: Vec<usize> = (0..a.pages.len()).filter(|&i| used[i] < frame).collect();
+        order.sort_by_key(|&i| used[i]);
+        if let Some(&i) = order.iter().find(|&&i| self.atlas.pages[i].size == side) {
+            self.evict(i);
+            return Some(i);
+        }
+        // No unused page of this size. Release unused pages of other sizes,
+        // oldest first, until a new one fits the budget, then add it.
+        let mut freed = false;
+        for &i in &order {
+            if self.atlas.pages[i].size != side && self.atlas.pages[i].size > 0 {
+                self.evict(i);
+                // A released page shrinks to nothing until its slot is reused;
+                // its version keeps rising, so a renderer never mistakes the
+                // next page in this slot for the one it uploaded.
+                let v = self.atlas.pages[i].version + 1;
+                Rc::make_mut(&mut self.atlas.pages)[i] = AtlasPage { version: v, ..AtlasPage::new(0) };
+                freed = true;
+                if self.atlas.texels() + side as u64 * side as u64 <= self.atlas.budget() {
+                    break;
+                }
+            }
+        }
+        if freed && self.atlas.texels() + side as u64 * side as u64 <= self.atlas.budget() {
+            // Reuse an emptied slot so page numbers stay small.
+            if let Some(i) = (0..self.atlas.pages.len()).find(|&i| self.atlas.pages[i].size == 0) {
+                let v = self.atlas.pages[i].version + 1;
+                Rc::make_mut(&mut self.atlas.pages)[i] = AtlasPage { version: v, ..AtlasPage::new(side) };
+                return Some(i);
+            }
+        }
+        self.overflows += 1;
+        self.repack_pending = true;
+        None
+    }
+
+    /// Empty page `i` and forget everything that pointed into it.
+    fn evict(&mut self, i: usize) {
+        Rc::make_mut(&mut self.atlas.pages)[i].clear();
+        self.atlas.repacks += 1;
+        self.evictions += 1;
+        let p = i as u32;
+        self.glyphs.retain(|_, g| g.page != p || g.w == 0.0);
+        self.masks.retain(|_, m| m.is_none_or(|(pg, _)| pg != p));
+    }
+
+    /// Mark `page` as drawn from this frame.
+    fn touch(&mut self, page: u32) {
+        if let Some(u) = self.page_used.get_mut(page as usize) {
+            *u = self.frame;
+        }
     }
 
     /// A filled path's coverage, from the atlas if it is already there and
@@ -750,13 +850,16 @@ impl FontsInner {
     ///
     /// Cached the way glyphs are, and dropped with them when the atlas is
     /// repacked, so a steady frame of icons rasterises nothing.
-    pub(crate) fn coverage_mask(&mut self, key: u64, w: u32, h: u32, raster: impl FnOnce(&mut Vec<u8>)) -> Option<[f32; 4]> {
-        if let Some(uv) = self.masks.get(&key) {
-            return *uv;
+    pub(crate) fn coverage_mask(&mut self, key: u64, w: u32, h: u32, raster: impl FnOnce(&mut Vec<u8>)) -> Option<(u32, [f32; 4])> {
+        if let Some(m) = self.masks.get(&key).copied() {
+            if let Some((page, _)) = m {
+                self.touch(page);
+            }
+            return m;
         }
-        // The same ceiling glyphs have: bigger than the atlas could ever hold
+        // The same ceiling glyphs have: bigger than the budget could ever hold
         // is not worth rasterising.
-        if w == 0 || h == 0 || w > self.atlas.max_size || h > self.atlas.max_size {
+        if w == 0 || h == 0 || !self.atlas.could_fit(w, h) {
             self.masks.insert(key, None);
             return None;
         }
@@ -765,20 +868,23 @@ impl FontsInner {
         buf.clear();
         buf.resize((w * h) as usize, 0);
         raster(&mut buf);
-        let uv = self.place(w, h, &buf);
+        let at = self.place(w, h, &buf);
         self.mask_scratch = buf;
-        // Not placed because the atlas is full is not cached: the repack at
-        // the frame boundary clears this map, and the next frame tries again.
-        if uv.is_some() || !self.atlas.could_fit(w, h) {
-            self.masks.insert(key, uv);
+        // Not placed because every page is in use this frame is not cached:
+        // the next frame tries again.
+        if at.is_some() {
+            self.masks.insert(key, at);
         }
-        uv
+        at
     }
 
     fn glyph(&mut self, font: FontId, face: u16, id: u32, px: f32) -> Glyph {
         let key = (font.0, face, id, px as u32);
-        if let Some(g) = self.glyphs.get(&key) {
-            return *g;
+        if let Some(g) = self.glyphs.get(&key).copied() {
+            if g.w > 0.0 {
+                self.touch(g.page);
+            }
+            return g;
         }
         // A glyph taller than the atlas could never be stored anyway, and
         // asking a rasteriser for one is not merely wasteful: fontdue indexes
@@ -787,7 +893,7 @@ impl FontsInner {
         // it before it is rasterised; the glyph is not drawn and its advance
         // still counts, so nothing moves. A NaN is not a size either.
         if px > self.atlas.max_size as f32 || px.is_nan() {
-            let g = Glyph { uv: [0.0; 4], w: 0.0, h: 0.0, left: 0.0, bottom: 0.0 };
+            let g = Glyph { page: 0, uv: [0.0; 4], w: 0.0, h: 0.0, left: 0.0, bottom: 0.0 };
             self.glyphs.insert(key, g);
             return g;
         }
@@ -795,25 +901,24 @@ impl FontsInner {
         let m = self.fonts[font.0 as usize].rasterize(face, id, px);
         let bitmap = &m.coverage;
         let (w, h) = (m.width, m.height);
-        let mut uv = [0.0; 4];
-        // Zero when the glyph could not be placed: it is then skipped by `draw`
-        // (invisible) while its advance still counts, so layout stays correct.
-        // Better than aborting on a font size larger than the atlas, which a
-        // theme file or a zoomed canvas can ask for.
-        let mut placed = (w, h);
+        // A glyph too big for the whole budget is cached as invisible: its
+        // advance still counts, so layout stays correct. One that could not
+        // be placed only because every page is in use this frame is *not*
+        // cached, and is placed next frame.
+        let (mut page, mut uv, mut placed) = (0, [0.0; 4], (w, h));
         if w > 0 && h > 0 {
-            match self.place(w, h, bitmap) {
-                Some(at) => uv = at,
-                None => placed = (0, 0),
+            if !self.atlas.could_fit(w, h) {
+                placed = (0, 0);
+            } else {
+                match self.place(w, h, bitmap) {
+                    Some((p, at)) => (page, uv) = (p, at),
+                    None => {
+                        return Glyph { page: 0, uv, w: 0.0, h: 0.0, left: m.left, bottom: m.bottom };
+                    }
+                }
             }
         }
-        let g = Glyph {
-            uv,
-            w: placed.0 as f32,
-            h: placed.1 as f32,
-            left: m.left,
-            bottom: m.bottom,
-        };
+        let g = Glyph { page, uv, w: placed.0 as f32, h: placed.1 as f32, left: m.left, bottom: m.bottom };
         self.glyphs.insert(key, g);
         g
     }
@@ -879,7 +984,7 @@ impl FontsInner {
             if g.w > 0.0 {
                 let gx = round(x0 + (x + sg.offset.x) * r) + g.left;
                 let gy = baseline + round(sg.offset.y * r) - (g.bottom + g.h);
-                dl.glyph(Rect::new(gx / s, gy / s, g.w / s, g.h / s), g.uv, color);
+                dl.glyph(Rect::new(gx / s, gy / s, g.w / s, g.h / s), g.page, g.uv, color);
             }
             x += sg.advance;
         }
@@ -920,7 +1025,7 @@ impl FontsInner {
                 let (du, dv) = ((g.uv[2] - g.uv[0]) / g.w * 0.5, (g.uv[3] - g.uv[1]) / g.h * 0.5);
                 let uv = [g.uv[0] - du, g.uv[1] - dv, g.uv[2] + du, g.uv[3] + dv];
                 let (w, h) = (w + 1.0 / s, h + 1.0 / s);
-                dl.glyph_rotated(Rect::new(c.x - w * 0.5, c.y - h * 0.5, w, h), uv, color, rot);
+                dl.glyph_rotated(Rect::new(c.x - w * 0.5, c.y - h * 0.5, w, h), g.page, uv, color, rot);
             }
             x += sg.advance;
         }
@@ -1080,7 +1185,7 @@ impl Fonts {
 
     // ---- crate-internal ---------------------------------------------------
 
-    pub(crate) fn coverage_mask(&self, key: u64, w: u32, h: u32, raster: impl FnOnce(&mut Vec<u8>)) -> Option<[f32; 4]> {
+    pub(crate) fn coverage_mask(&self, key: u64, w: u32, h: u32, raster: impl FnOnce(&mut Vec<u8>)) -> Option<(u32, [f32; 4])> {
         self.0.borrow_mut().coverage_mask(key, w, h, raster)
     }
 
@@ -1088,8 +1193,12 @@ impl Fonts {
         self.0.borrow().repack_pending()
     }
 
-    pub(crate) fn repack(&self) -> bool {
-        self.0.borrow_mut().repack()
+    pub(crate) fn begin_frame(&self) {
+        self.0.borrow_mut().begin_frame();
+    }
+
+    pub(crate) fn take_atlas_counts(&self) -> (u32, u32) {
+        self.0.borrow_mut().take_atlas_counts()
     }
 
     pub(crate) fn set_scale(&self, scale: f32) {

@@ -13,6 +13,15 @@ const ATTRS: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
     0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4, 4 => Float32x4, 5 => Float32x4
 ];
 
+/// One atlas page as uploaded.
+struct AtlasPage {
+    #[allow(dead_code)] // kept alive for the bind group
+    tex: wgpu::Texture,
+    bg: wgpu::BindGroup,
+    size: u32,
+    version: u64,
+}
+
 pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -20,10 +29,8 @@ pub struct Renderer {
     globals: wgpu::Buffer,
     globals_bg: wgpu::BindGroup,
     tex_layout: wgpu::BindGroupLayout,
-    atlas: wgpu::Texture,
-    atlas_bg: wgpu::BindGroup,
-    atlas_size: u32,
-    atlas_version: u64,
+    /// One texture per atlas page: (texture, bind group, size, version).
+    atlas: Vec<AtlasPage>,
     instances: wgpu::Buffer,
     capacity: usize,
     user: HashMap<u64, wgpu::BindGroup>,
@@ -110,7 +117,6 @@ impl Renderer {
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: globals.as_entire_binding() }],
         });
 
-        let (atlas, atlas_bg) = Self::create_atlas(device, &tex_layout, 1);
         let capacity = 4096;
         let instances = Self::create_instances(device, capacity);
 
@@ -121,10 +127,7 @@ impl Renderer {
             globals,
             globals_bg,
             tex_layout,
-            atlas,
-            atlas_bg,
-            atlas_size: 1,
-            atlas_version: 0,
+            atlas: Vec::new(),
             instances,
             capacity,
             user: HashMap::new(),
@@ -194,27 +197,33 @@ impl Backend for Renderer {
     fn prepare(&mut self, frame: &FrameOutput) {
         self.queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&frame.globals()));
 
-        let atlas = frame.atlas();
-        if atlas.size != self.atlas_size {
-            let (t, bg) = Self::create_atlas(&self.device, &self.tex_layout, atlas.size);
-            self.atlas = t;
-            self.atlas_bg = bg;
-            self.atlas_size = atlas.size;
-            self.atlas_version = 0;
+        // Each atlas page is its own texture, uploaded when its version moves.
+        // A page of size 0 is a slot the atlas freed; it keeps a 1x1 texture.
+        let pages = &frame.atlas().pages;
+        while self.atlas.len() < pages.len() {
+            let (tex, bg) = Self::create_atlas(&self.device, &self.tex_layout, 1);
+            self.atlas.push(AtlasPage { tex, bg, size: 1, version: 0 });
         }
-        if atlas.version != self.atlas_version {
-            self.queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &self.atlas,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                &atlas.data,
-                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(atlas.size), rows_per_image: Some(atlas.size) },
-                wgpu::Extent3d { width: atlas.size, height: atlas.size, depth_or_array_layers: 1 },
-            );
-            self.atlas_version = atlas.version;
+        for (have, page) in self.atlas.iter_mut().zip(pages.iter()) {
+            let size = page.size.max(1);
+            if size != have.size {
+                let (tex, bg) = Self::create_atlas(&self.device, &self.tex_layout, size);
+                *have = AtlasPage { tex, bg, size, version: 0 };
+            }
+            if page.version != have.version && page.size > 0 {
+                self.queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &have.tex,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    &page.data,
+                    wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(page.size), rows_per_image: Some(page.size) },
+                    wgpu::Extent3d { width: page.size, height: page.size, depth_or_array_layers: 1 },
+                );
+                have.version = page.version;
+            }
         }
 
         let inst = frame.instances();
@@ -235,7 +244,10 @@ impl Backend for Renderer {
 
     fn draw(&mut self, pass: &mut wgpu::RenderPass<'_>, texture: TextureId, instances: Range<u32>) {
         let bg = match texture {
-            TextureId::Atlas => &self.atlas_bg,
+            TextureId::Atlas(p) => match self.atlas.get(p as usize) {
+                Some(page) => &page.bg,
+                None => return,
+            },
             TextureId::User(n) => match self.user.get(&n) {
                 Some(bg) => bg,
                 None => return,

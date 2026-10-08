@@ -5,7 +5,10 @@ use std::ops::Range;
 /// for plain shapes); `User` is anything the host registers, e.g. a 3D viewport.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TextureId {
-    Atlas,
+    /// A page of the glyph atlas: [`FrameOutput::atlas`](crate::FrameOutput::atlas)`().pages[n]`.
+    /// Shapes and lines read no texture and ride in whichever atlas batch is
+    /// current, so they never split one.
+    Atlas(u32),
     /// One of the host's own textures. Opaque to libgui: it is whatever the
     /// host's renderer uses to name a texture, and 64 bits so that a native
     /// handle or a pointer fits without being cut down.
@@ -54,6 +57,12 @@ impl Dash {
     }
 }
 
+/// Whether `inst` samples its batch's texture. Shapes, lines and triangles do
+/// not, so they may ride in any atlas batch.
+pub(crate) fn reads_texture(inst: &Instance) -> bool {
+    matches!(PrimitiveKind::from_code(inst.params[3]), Some(PrimitiveKind::Glyph | PrimitiveKind::Image))
+}
+
 /// Where `inst` can put pixels, in window coordinates: the rect, grown for a
 /// shape's blur and border, and turned for a rotated image or glyph. Culling
 /// and a moved cache replay both bound an instance by this.
@@ -70,7 +79,8 @@ pub(crate) fn instance_bounds(inst: &Instance) -> Rect {
                 rotated_bounds(r, rot)
             }
         }
-        // A line's rect is already its grown bounding box (or strip).
+        // A line's rect is already its grown bounding box (or strip), and a
+        // triangle's the box around its padded quad.
         _ => r,
     }
 }
@@ -90,6 +100,7 @@ const KIND_SHAPE: f32 = PrimitiveKind::Shape.code();
 const KIND_GLYPH: f32 = PrimitiveKind::Glyph.code();
 const KIND_IMAGE: f32 = PrimitiveKind::Image.code();
 const KIND_LINE: f32 = PrimitiveKind::Line.code();
+const KIND_TRIANGLE: f32 = PrimitiveKind::Triangle.code();
 
 /// One GPU instance = one quad. Shapes are rounded rects evaluated as an SDF
 /// in the fragment shader, so fills, borders, and shadows are crisp at any DPI.
@@ -141,6 +152,9 @@ pub struct DrawList {
     /// Instances culled while a recording was open: the index they would have
     /// had, and what they were.
     culled_log: Vec<(u32, TextureId, Instance, Rect)>,
+    /// The atlas page last drawn from: where an instance that reads no
+    /// texture goes when the current batch is not an atlas page.
+    last_page: u32,
 }
 
 impl Default for DrawList {
@@ -159,6 +173,7 @@ impl Default for DrawList {
             inner_log: Vec::new(),
             culled_log: Vec::new(),
             barrier: 0,
+            last_page: 0,
         }
     }
 }
@@ -176,6 +191,7 @@ impl DrawList {
         self.inner_log.clear();
         self.culled_log.clear();
         self.barrier = 0;
+        self.last_page = 0;
     }
 
     /// The culled instances recorded from `first` on, in draw order.
@@ -269,6 +285,7 @@ impl DrawList {
     /// Already clipped and transformed when it was recorded, so it goes in
     /// untouched — that is the whole point of having kept it.
     pub(crate) fn replay(&mut self, texture: TextureId, inst: Instance) {
+        let texture = if reads_texture(&inst) { texture } else { self.neutral() };
         let idx = self.instances.len() as u32;
         self.instances.push(inst);
         match self.batches.last_mut() {
@@ -292,7 +309,25 @@ impl DrawList {
         self.instances.len() as u32
     }
 
+    /// The texture an instance that reads none should batch under: the
+    /// current batch's, if it is an atlas page, so it never splits one.
+    fn neutral(&self) -> TextureId {
+        match self.batches.last() {
+            Some(b) if matches!(b.texture, TextureId::Atlas(_)) => b.texture,
+            _ => TextureId::Atlas(self.last_page),
+        }
+    }
+
+    /// [`DrawList::push`] for an instance that reads no texture.
+    fn push_neutral(&mut self, bounds: Rect, inst: Instance) {
+        let t = self.neutral();
+        self.push(t, bounds, inst);
+    }
+
     fn push(&mut self, texture: TextureId, bounds: Rect, mut inst: Instance) {
+        if let TextureId::Atlas(p) = texture {
+            self.last_page = p;
+        }
         // One place for the whole library's opacity, so a disabled scope fades
         // an app's own `add_leaf` painting exactly as it fades a button. The
         // colours here are straight, not premultiplied — the shader does that
@@ -333,8 +368,7 @@ impl DrawList {
     pub fn rect(&mut self, r: Rect, fill: Color, radius: f32, border: f32, border_color: Color) {
         let t = self.xform();
         let (r, radius, border) = (t.rect(r), radius * t.zoom, border * t.zoom);
-        self.push(
-            TextureId::Atlas,
+        self.push_neutral(
             r.expand(1.0),
             Instance {
                 rect: [r.x, r.y, r.w, r.h],
@@ -351,8 +385,7 @@ impl DrawList {
     pub fn shadow(&mut self, r: Rect, radius: f32, blur: f32, color: Color) {
         let t = self.xform();
         let (r, radius, blur) = (t.rect(r), radius * t.zoom, blur * t.zoom);
-        self.push(
-            TextureId::Atlas,
+        self.push_neutral(
             r.expand(blur + 1.0),
             Instance {
                 rect: [r.x, r.y, r.w, r.h],
@@ -365,12 +398,12 @@ impl DrawList {
         );
     }
 
-    pub(crate) fn glyph(&mut self, r: Rect, uv: [f32; 4], color: Color) {
-        self.glyph_rotated(r, uv, color, Rotation::NONE);
+    pub(crate) fn glyph(&mut self, r: Rect, page: u32, uv: [f32; 4], color: Color) {
+        self.glyph_rotated(r, page, uv, color, Rotation::NONE);
     }
 
     /// A glyph turned by `rot` about the centre of `r`.
-    pub(crate) fn glyph_rotated(&mut self, r: Rect, uv: [f32; 4], color: Color, rot: Rotation) {
+    pub(crate) fn glyph_rotated(&mut self, r: Rect, page: u32, uv: [f32; 4], color: Color, rot: Rotation) {
         let r = self.xform().rect(r);
         let [c0, c1] = rot.code();
         let inst = Instance {
@@ -381,7 +414,7 @@ impl DrawList {
             clip: [0.0; 4],
             params: [0.0, 0.0, 0.0, KIND_GLYPH],
         };
-        self.push(TextureId::Atlas, instance_bounds(&inst), inst);
+        self.push(TextureId::Atlas(page), instance_bounds(&inst), inst);
     }
 
     /// Line segment with round caps, in the current canvas's coordinates.
@@ -466,8 +499,7 @@ impl DrawList {
     /// One `Line` instance for the segment `a`-`b`, drawn over `bounds`
     /// (already in window coordinates).
     fn segment(&mut self, a: Vec2, b: Vec2, hw: f32, color: Color, bounds: Rect, [on, off, phase]: [f32; 3]) {
-        self.push(
-            TextureId::Atlas,
+        self.push_neutral(
             bounds,
             Instance {
                 rect: [bounds.x, bounds.y, bounds.w, bounds.h],
@@ -476,6 +508,41 @@ impl DrawList {
                 border_color: [phase, 0.0, 0.0, 0.0],
                 clip: [0.0; 4],
                 params: [hw, on, off, KIND_LINE],
+            },
+        );
+    }
+
+    /// A filled triangle `a`, `b`, `c` in the current canvas's coordinates.
+    /// `outline` has a bit per edge (0: a→b, 1: b→c, 2: c→a) that is part of
+    /// the shape's outline and anti-aliased; an edge shared with another
+    /// triangle of the same shape leaves its bit clear and is drawn exactly,
+    /// so the two meet with no seam and no overlap. Either winding.
+    pub fn triangle(&mut self, a: Vec2, b: Vec2, c: Vec2, outline: u8, color: Color) {
+        let t = self.xform();
+        let (a, b, c) = (t.point(a), t.point(b), t.point(c));
+        let area = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+        if area == 0.0 || area.is_nan() {
+            return; // degenerate or NaN: covers nothing
+        }
+        // The contract's winding; swapping b and c renumbers the edges.
+        let (b, c, outline) = if area > 0.0 {
+            (b, c, outline & 7)
+        } else {
+            (c, b, ((outline >> 2) & 1) | (outline & 2) | ((outline & 1) << 2))
+        };
+        let q = crate::render_contract::triangle_corners([a.x, a.y], [b.x, b.y], [c.x, c.y]);
+        let (x0, x1) = (q[0][0].min(q[1][0]).min(q[2][0]), q[0][0].max(q[1][0]).max(q[2][0]));
+        let (y0, y1) = (q[0][1].min(q[1][1]).min(q[2][1]), q[0][1].max(q[1][1]).max(q[2][1]));
+        let bounds = Rect::new(x0, y0, x1 - x0, y1 - y0);
+        self.push_neutral(
+            bounds,
+            Instance {
+                rect: [bounds.x, bounds.y, bounds.w, bounds.h],
+                uv: [a.x, a.y, b.x, b.y],
+                color: color.to_array(),
+                border_color: [c.x, c.y, outline as f32, 0.0],
+                clip: [0.0; 4],
+                params: [0.0, 0.0, 0.0, KIND_TRIANGLE],
             },
         );
     }

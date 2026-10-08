@@ -318,3 +318,59 @@ fn rotated_images_match_the_gpu() {
         }
     }
 }
+
+/// No seams on the GPU itself: a translucent mesh whose shared edges run
+/// along pixel centres (at 1x) and between them (at 1.5x and 2x) is exactly
+/// one layer everywhere inside. The CPU reference cannot see the failure this
+/// guards against — two triangles interpolating a pixel's position a last bit
+/// apart and both claiming it, or neither — so it is checked here.
+#[test]
+fn a_translucent_mesh_has_no_seams_on_the_gpu() {
+    let Some(g) = gpu() else {
+        eprintln!("parity: no GPU adapter, skipped");
+        return;
+    };
+    for scale in [1.0f32, 1.5, 2.0] {
+        let mut ui = libgui::Ui::new(libgui::Theme::dark(), SCENE_FONT).expect("font");
+        let size = libgui::Vec2::new(120.0, 120.0);
+        ui.begin_frame(libgui::FrameInfo { screen_size: size, scale, dt: 1.0 });
+        ui.container(
+            libgui::Layout::column().width(libgui::Size::Grow(1.0)).height(libgui::Size::Grow(1.0)),
+            libgui::Frame { fill: libgui::Color::BLACK, ..libgui::Frame::none() },
+            |ui| {
+                ui.add_leaf(libgui::Id::new("m"), libgui::Layout::leaf(libgui::Size::Grow(1.0), libgui::Size::Grow(1.0)), libgui::Vec2::ZERO, false, |p, _| {
+                    let mut pts = Vec::new();
+                    for j in 0..5 {
+                        for i in 0..5 {
+                            pts.push(libgui::Vec2::new(10.5 + i as f32 * 20.0, 10.5 + j as f32 * 20.0));
+                        }
+                    }
+                    // A fan into the middle too: many edges meeting at a point.
+                    let mut idx = Vec::new();
+                    for j in 0..4u32 {
+                        for i in 0..4u32 {
+                            let (a, b, c, d) = (j * 5 + i, j * 5 + i + 1, (j + 1) * 5 + i + 1, (j + 1) * 5 + i);
+                            if (i + j) % 2 == 0 { idx.extend([a, b, c, a, c, d]) } else { idx.extend([a, b, d, b, c, d]) }
+                        }
+                    }
+                    p.fill_mesh(&pts, &idx, libgui::Color::rgba(1.0, 1.0, 1.0, 0.5));
+                });
+            },
+        );
+        let out = ui.end_frame();
+        let px = ((size.x * scale) as u32, (size.y * scale) as u32);
+        let img = render_gpu(&g, &out, px);
+        let lo = (13.0 * scale).ceil() as u32;
+        let hi = (88.0 * scale).floor() as u32;
+        let mut bad = Vec::new();
+        for y in lo..hi {
+            for x in lo..hi {
+                let v = img[((y * px.0 + x) * 4) as usize];
+                if v != 128 {
+                    bad.push((x, y, v));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "@{scale}x: {} pixels not exactly one layer, e.g. {:?}", bad.len(), &bad[..bad.len().min(6)]);
+    }
+}

@@ -175,9 +175,60 @@ impl Painter<'_> {
     /// The area between `t` and `baseline` across `r`, filled: under a level
     /// history, inside a waveform. One crisp rect per pixel column.
     pub fn trace_fill(&mut self, r: Rect, t: Trace, range: (f32, f32), baseline: f32, color: Color) {
+        let range = sane_range(range);
+        let cols = self.columns(r);
+        if t.len() <= cols {
+            self.fill_points(r, t, range, baseline, color);
+            return;
+        }
         let mut env = Vec::new();
-        envelope(t, self.columns(r), &mut env);
-        self.fill_envelope(r, &env, sane_range(range), baseline, color);
+        envelope(t, cols, &mut env);
+        self.fill_envelope(r, &env, range, baseline, color);
+    }
+
+    /// The area between the line through the samples and the baseline, as
+    /// triangles: smooth along the line, where columns would step. Each span
+    /// between two samples is a trapezoid, cut in two where the line crosses
+    /// the baseline. The line and the baseline are the outline; the cuts
+    /// between spans are inner edges, so the fill has no seams.
+    pub(crate) fn fill_points(&mut self, r: Rect, t: Trace, range: (f32, f32), baseline: f32, color: Color) {
+        let n = t.len();
+        if n < 2 {
+            return;
+        }
+        let x_of = |i: usize| r.x + r.w * i as f32 / (n - 1) as f32;
+        let yb = y_of(r, range, baseline);
+        for i in 0..n - 1 {
+            let (v0, v1) = (t.get(i), t.get(i + 1));
+            if !(v0.is_finite() && v1.is_finite()) {
+                continue;
+            }
+            // A side is outline where the fill starts or stops: the ends, and
+            // either side of a gap.
+            let first = i == 0 || !t.get(i - 1).is_finite();
+            let last = i + 2 == n || !t.get(i + 2).is_finite();
+            let (x0, x1) = (x_of(i), x_of(i + 1));
+            let (y0, y1) = (y_of(r, range, v0), y_of(r, range, v1));
+            let (d0, d1) = (y0 - yb, y1 - yb);
+            if d0 == 0.0 && d1 == 0.0 {
+                continue;
+            }
+            if (d0 > 0.0 && d1 < 0.0) || (d0 < 0.0 && d1 > 0.0) {
+                // Crosses the baseline: a triangle each side of the crossing.
+                let xc = x0 + (x1 - x0) * (d0 / (d0 - d1));
+                let (p0, c, p1) = (Vec2::new(x0, y0), Vec2::new(xc, yb), Vec2::new(x1, y1));
+                // p0→c on the line (outline), c→(x0,yb) on the baseline
+                // (outline), (x0,yb)→p0 the left side.
+                self.draw.triangle(p0, c, Vec2::new(x0, yb), 1 | 2 | ((first as u8) << 2), color);
+                self.draw.triangle(c, p1, Vec2::new(x1, yb), 1 | ((last as u8) << 1) | 4, color);
+            } else {
+                let (p0, p1, b1, b0) = (Vec2::new(x0, y0), Vec2::new(x1, y1), Vec2::new(x1, yb), Vec2::new(x0, yb));
+                // p0→p1 the line, p1→b1 the right side, b1→p0 the diagonal.
+                self.draw.triangle(p0, p1, b1, 1 | ((last as u8) << 1), color);
+                // p0→b1 the diagonal, b1→b0 the baseline, b0→p0 the left side.
+                self.draw.triangle(p0, b1, b0, 2 | ((first as u8) << 2), color);
+            }
+        }
     }
 
     pub(crate) fn trace_points(&mut self, r: Rect, t: Trace, range: (f32, f32), width: f32, color: Color) {
@@ -423,7 +474,7 @@ impl Ui {
                     Shape::Points(v) => {
                         let t = Trace::new(v);
                         if *fill {
-                            p.trace_fill(plot, t, range, baseline, color.with_alpha(color.a * 0.25));
+                            p.fill_points(plot, t, range, baseline, color.with_alpha(color.a * 0.25));
                         }
                         p.trace_points(plot, t, range, *width, *color);
                     }

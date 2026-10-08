@@ -292,3 +292,10 @@ fn modal_example(ui: &mut Ui, app: &mut ConfirmApp) {
         if cancel || r.cancelled { app.confirm_delete = false; }
     }
 }
+
+#[allow(dead_code, clippy::too_many_arguments)]
+fn fills(p: &mut Painter, region: &[Vec2], plate: &[Vec2], bore_a: &[Vec2], bore_b: &[Vec2], points: &[Vec2], indices: &[u32], accent: Color, steel: Color, colour: Color) {
+    p.fill_polygon(region, accent.with_alpha(0.4));                 // a sketch region
+    p.fill_polygon_with_holes(plate, &[bore_a, bore_b], steel);     // a profile with holes
+    p.fill_mesh(points, indices, colour);                           // your own triangles
+}

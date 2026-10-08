@@ -52,7 +52,11 @@ use crate::Instance;
 /// (`border_color[0..2]`, see [`Rotation`]). Zero in every new field is what
 /// a version-3 instance carries and means what it always did: a solid line,
 /// an upright quad.
-pub const CONTRACT_VERSION: u32 = 4;
+///
+/// 5: the glyph atlas is pages — `TextureId::Atlas(page)`, one texture each,
+/// uploaded per page when its version changes — and a fifth kind,
+/// [`PrimitiveKind::Triangle`], fills polygons that change every frame.
+pub const CONTRACT_VERSION: u32 = 5;
 
 /// How an image or glyph instance is rotated: about the centre of its `rect`,
 /// clockwise on screen (y points down) for a positive angle.
@@ -180,11 +184,34 @@ pub enum PrimitiveKind {
     /// round join, so no join geometry is needed. (Overlap double-blends where
     /// two segments meet, which shows only on translucent strokes.)
     Line = 3,
+    /// A filled triangle, one per instance; a polygon is several.
+    /// `uv` = `[ax, ay, bx, by]`, `border_color` = `[cx, cy, edges, 0]`, the
+    /// three corners in the same space as `rect`, wound so that
+    /// `cross(b − a, c − a) > 0` (clockwise on screen, y down). `edges` holds
+    /// one bit per edge — bit 0 for a→b, 1 for b→c, 2 for c→a — set when the
+    /// edge is the polygon's outline and is anti-aliased; clear for an edge
+    /// shared with another triangle of the same polygon, which is tested
+    /// exactly, with [`triangle_edge`]'s tie rule, so that every pixel on it
+    /// belongs to exactly one of the two triangles. That is what keeps a
+    /// translucent polygon free of seams.
+    ///
+    /// Coverage is evaluated at the **pixel centre divided by
+    /// `Globals::scale`** (`@builtin(position) / scale` in the shader,
+    /// `gl_FragCoord.xy / scale` in GLSL) — not at an interpolated position:
+    /// two triangles sharing an edge interpolate across different corners and
+    /// can disagree in the last bit, which is enough for both to claim a pixel
+    /// on the edge, or neither.
+    ///
+    /// The quad is *not* `rect`: the vertex stage puts its corners on the
+    /// triangle, pushed outward for anti-aliasing ([`triangle_corners`]), so a
+    /// thin triangle shades only the pixels near it. `rect` is its bounding
+    /// box, for culling. `params = [0, 0, 0, kind]`.
+    Triangle = 4,
 }
 
 impl PrimitiveKind {
-    pub const ALL: [PrimitiveKind; 4] =
-        [PrimitiveKind::Shape, PrimitiveKind::Glyph, PrimitiveKind::Image, PrimitiveKind::Line];
+    pub const ALL: [PrimitiveKind; 5] =
+        [PrimitiveKind::Shape, PrimitiveKind::Glyph, PrimitiveKind::Image, PrimitiveKind::Line, PrimitiveKind::Triangle];
 
     /// Value stored in `Instance::params[3]`.
     pub const fn code(self) -> f32 {
@@ -198,6 +225,7 @@ impl PrimitiveKind {
             1 => Some(PrimitiveKind::Glyph),
             2 => Some(PrimitiveKind::Image),
             3 => Some(PrimitiveKind::Line),
+            4 => Some(PrimitiveKind::Triangle),
             _ => None,
         }
     }
@@ -209,7 +237,82 @@ impl PrimitiveKind {
             PrimitiveKind::Glyph => "KIND_GLYPH",
             PrimitiveKind::Image => "KIND_IMAGE",
             PrimitiveKind::Line => "KIND_LINE",
+            PrimitiveKind::Triangle => "KIND_TRIANGLE",
         }
+    }
+}
+
+/// How far, in logical px, a triangle's quad reaches past its edges: room for
+/// the anti-aliased fringe at any scale of 0.5 or more.
+pub const TRIANGLE_PAD: f32 = 1.0;
+
+/// The longest a corner may be pushed out, in multiples of [`TRIANGLE_PAD`]:
+/// a needle-sharp corner would otherwise push its quad corner off to infinity.
+pub const TRIANGLE_MITER_LIMIT: f32 = 16.0;
+
+/// The quad a [`PrimitiveKind::Triangle`] instance is drawn over: its three
+/// corners, each pushed out so that every edge moves out by [`TRIANGLE_PAD`]
+/// (a miter, clamped by [`TRIANGLE_MITER_LIMIT`]). The vertex stage emits
+/// corners 0, 1, 2 and 2 again — the second triangle of the quad is empty.
+/// Written once here and transliterated into the shader, so the mesh path and
+/// the CPU reference cover exactly the pixels the GPU does.
+pub fn triangle_corners(a: [f32; 2], b: [f32; 2], c: [f32; 2]) -> [[f32; 2]; 3] {
+    let v = [a, b, c];
+    let mut out = [[0.0; 2]; 3];
+    for i in 0..3 {
+        let (p, prev, next) = (v[i], v[(i + 2) % 3], v[(i + 1) % 3]);
+        // Outward normals of the two edges meeting at p (the winding is
+        // clockwise on screen, so outward is to the left of each edge).
+        let n1 = outward(prev, p);
+        let n2 = outward(p, next);
+        let m = [n1[0] + n2[0], n1[1] + n2[1]];
+        let d = 1.0 + n1[0] * n2[0] + n1[1] * n2[1];
+        let k = if d > 1e-6 { (TRIANGLE_PAD / d).min(TRIANGLE_PAD * TRIANGLE_MITER_LIMIT * 0.5) } else { 0.0 };
+        out[i] = [p[0] + m[0] * k, p[1] + m[1] * k];
+    }
+    out
+}
+
+/// The unit normal pointing out of the triangle from edge `a`→`b`.
+fn outward(a: [f32; 2], b: [f32; 2]) -> [f32; 2] {
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+    let l = (dx * dx + dy * dy).sqrt();
+    if l <= 0.0 {
+        return [0.0, 0.0];
+    }
+    [dy / l, -dx / l]
+}
+
+/// One edge's contribution to a triangle's coverage at `p`, as the shader
+/// computes it: anti-aliased over `aa` logical px for an `outer` edge, and an
+/// exact inside test for an inner one.
+///
+/// The edge function is computed with the edge's endpoints in a fixed order
+/// (the lesser point first), whichever way the triangle runs along it, so two
+/// triangles sharing an edge compute the same number with opposite signs —
+/// exactly, not to within rounding. A pixel centre exactly on a shared edge
+/// belongs to the triangle that runs along it downward (or leftward, if it is
+/// horizontal), and so to exactly one of the two.
+pub fn triangle_edge(p: [f32; 2], a: [f32; 2], b: [f32; 2], outer: bool, aa: f32) -> f32 {
+    let swap = b[0] < a[0] || (b[0] == a[0] && b[1] < a[1]);
+    let (lo, hi, sgn) = if swap { (b, a, -1.0) } else { (a, b, 1.0) };
+    let d = [hi[0] - lo[0], hi[1] - lo[1]];
+    let e = sgn * (d[0] * (p[1] - lo[1]) - d[1] * (p[0] - lo[0]));
+    if outer {
+        let len = (d[0] * d[0] + d[1] * d[1]).sqrt().max(1e-12);
+        return (0.5 + e / (len * aa)).clamp(0.0, 1.0);
+    }
+    if e > 0.0 {
+        return 1.0;
+    }
+    if e < 0.0 {
+        return 0.0;
+    }
+    let dir = [b[0] - a[0], b[1] - a[1]];
+    if dir[1] > 0.0 || (dir[1] == 0.0 && dir[0] < 0.0) {
+        1.0
+    } else {
+        0.0
     }
 }
 
@@ -299,6 +402,7 @@ pub fn wgsl_prelude() -> String {
     for k in PrimitiveKind::ALL {
         s += &format!("const {}: u32 = {}u;\n", k.shader_name(), k as u32);
     }
+    s += &format!("const TRIANGLE_PAD: f32 = {:?};\nconst TRIANGLE_MITER_LIMIT: f32 = {:?};\n", TRIANGLE_PAD, TRIANGLE_MITER_LIMIT);
     s
 }
 
@@ -330,7 +434,7 @@ mod tests {
         assert_eq!(INSTANCE_STRIDE, 96);
         assert_eq!(INSTANCE_ATTRIBUTES.len(), 6);
         assert_eq!(std::mem::size_of::<Instance>(), INSTANCE_STRIDE);
-        assert_eq!(CONTRACT_VERSION, 4, "bump this when the contract changes meaning");
+        assert_eq!(CONTRACT_VERSION, 5, "bump this when the contract changes meaning");
     }
 
     #[test]

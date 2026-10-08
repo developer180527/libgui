@@ -181,8 +181,8 @@ no closures, and a C++ host is a first-class target.
 instance data at five `vec4`s; GLES2 and WebGL1 have no per-instance attributes
 at all; plenty of engine RHIs expose a vertex-and-index draw and nothing more.
 
-**Decision.** The contract is instanced (`CONTRACT_VERSION = 2`,
-`INSTANCE_STRIDE = 96`). `libgui::mesh` expands the same frame into one quad
+**Decision.** The contract is instanced (`CONTRACT_VERSION` 2 when this was
+decided, 5 now; `INSTANCE_STRIDE = 96` throughout). `libgui::mesh` expands the same frame into one quad
 per primitive — four vertices, six indices, `VERTEX_STRIDE = 112` — with every
 value the fragment shader needs already computed. The vertex mirrors the
 shader's *varyings*, not its inputs, so porting the shader is a four-line
@@ -211,6 +211,30 @@ vertex stage.
   way (contract 4).
 
 ---
+
+### 7.0 Growing the contract without widening it
+
+Three features since have fitted into the same 96 bytes and one pipeline:
+- **Dashes:** a line's spare `params`.
+- **Rotation:** `border_color`, which images and glyphs never used.
+- **Triangles:** a fifth kind, with two corners in `uv` and the third in
+  `border_color`.
+
+A triangle's quad is placed on the triangle itself, padded, rather than on its
+bounding box, so a sliver shades only the pixels near it.
+
+**Shared edges.** Edges two triangles share are tested exactly, with a tie
+rule, so a translucent fill has no seams. That exactness forced a rule:
+coverage is evaluated at the hardware pixel centre over the scale, not at an
+interpolated position. Two triangles interpolate across different corners and
+can disagree in the last bit, which on a real GPU left 577 pixels of seams in
+a test mesh; the CPU reference could not see it. A GPU parity test now guards
+it.
+
+**Atlas pages.** The glyph atlas became pages in the same version (5).
+`TextureId::Atlas(page)` is one texture per page, and shapes that read no
+texture ride in whichever atlas batch is current, so pages do not split
+batches.
 
 ### 7.1 One frame, several uploads, one atlas
 

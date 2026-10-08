@@ -574,11 +574,53 @@ fn modal(ui: &mut Ui) {
     });
 }
 
+/// Filled polygons as triangles: convex, a star (half its corners reflex),
+/// a frame with a hole, a translucent overlap (one layer each, no seams),
+/// a mesh with shared edges, and slivers thinner than a pixel.
+fn polygons(ui: &mut Ui) {
+    let id = ui.make_id("polygons");
+    let fill = Layout::leaf(Size::Grow(1.0), Size::Grow(1.0));
+    ui.add_leaf(id, fill, Vec2::ZERO, false, |p, r| {
+        let (x, y) = (r.x, r.y);
+        let accent = Color::hex(0x4c8dff);
+        let ring = |cx: f32, cy: f32, rad: f32, n: usize| -> Vec<Vec2> {
+            (0..n).map(|i| {
+                let a = i as f32 * std::f32::consts::TAU / n as f32;
+                Vec2::new(cx + rad * a.cos(), cy + rad * a.sin())
+            }).collect()
+        };
+        p.fill_polygon(&ring(x + 45.0, y + 45.0, 35.0, 64), accent);
+        let star: Vec<Vec2> = (0..18).map(|i| {
+            let a = i as f32 * std::f32::consts::PI / 9.0;
+            let rad = if i % 2 == 0 { 38.0 } else { 16.0 };
+            Vec2::new(x + 135.0 + rad * a.cos(), y + 45.0 + rad * a.sin())
+        }).collect();
+        p.fill_polygon(&star, Color::hex(0xffffff));
+        let outer = [Vec2::new(x + 185.0, y + 10.0), Vec2::new(x + 270.0, y + 14.0), Vec2::new(x + 262.0, y + 80.0), Vec2::new(x + 190.0, y + 76.0)];
+        let hole = ring(x + 227.0, y + 45.0, 18.0, 24);
+        p.fill_polygon_with_holes(&outer, &[&hole], Color::hex(0x4ade80));
+        // Translucent and overlapping: each shape one layer, no seams.
+        p.fill_polygon(&ring(x + 40.0, y + 130.0, 32.0, 40), accent.with_alpha(0.5));
+        p.fill_polygon(&ring(x + 70.0, y + 130.0, 32.0, 40), Color::rgba(1.0, 0.6, 0.2, 0.5));
+        // A mesh: a fan of shared edges.
+        let mut pts = vec![Vec2::new(x + 160.0, y + 130.0)];
+        pts.extend(ring(x + 160.0, y + 130.0, 34.0, 12));
+        let idx: Vec<u32> = (1..=12).flat_map(|i| [0, i, if i == 12 { 1 } else { i + 1 }]).collect();
+        p.fill_mesh(&pts, &idx, Color::rgba(1.0, 1.0, 1.0, 0.6));
+        // Slivers: long triangles narrower than a pixel at their widest.
+        for k in 0..6 {
+            let x0 = x + 205.0 + k as f32 * 11.0;
+            p.fill_polygon(&[Vec2::new(x0, y + 98.0), Vec2::new(x0 + 0.6 + k as f32 * 0.15, y + 98.0), Vec2::new(x0 + 4.0, y + 165.0)], Color::WHITE);
+        }
+    });
+}
+
 pub const SCENES: &[Scene] = &[
     Scene { name: "widgets", size: (320.0, 640.0), pointer: Pointer::None, build: widgets },
     Scene { name: "tree", size: (240.0, 230.0), pointer: Pointer::None, build: tree },
     Scene { name: "shapes", size: (280.0, 200.0), pointer: Pointer::None, build: shapes },
     Scene { name: "paths", size: (260.0, 132.0), pointer: Pointer::None, build: paths },
+    Scene { name: "polygons", size: (280.0, 176.0), pointer: Pointer::None, build: polygons },
     Scene { name: "modal", size: (320.0, 260.0), pointer: Pointer::None, build: modal },
     Scene { name: "scope_meters", size: (300.0, 320.0), pointer: Pointer::Hover, build: scope_meters },
     Scene { name: "dashes_rotated", size: (290.0, 190.0), pointer: Pointer::None, build: dashes_rotated },

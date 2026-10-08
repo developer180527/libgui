@@ -148,7 +148,7 @@ fn an_app_sets_its_own_atlas_limit() {
 
     // And never under what is already allocated, which could not be honoured.
     ui.fonts.set_atlas_limit(16);
-    assert!(ui.fonts.atlas().max_size >= ui.fonts.atlas().size.min(2048));
+    assert!(ui.fonts.atlas().max_size >= ui.fonts.atlas().page_size, "a budget smaller than one page");
 }
 
 /// The cap is load-bearing, not decorative: it is what decides whether a glyph
@@ -188,21 +188,22 @@ fn the_atlas_limit_actually_bounds_the_atlas() {
 
 /// Raising the cap has to actually reach the glyph that motivated raising it.
 ///
-/// A glyph too big for the atlas *as it stands* used to be recorded as
-/// unplaceable and never reconsidered, because the check asked whether it fit
-/// the current size rather than whether growing could hold it. So the limit
-/// was settable and inert: the atlas sat at 2048 while the cap said 8192.
+/// A glyph too big for an ordinary atlas page gets a page of its own, sized to
+/// fit and inside the budget. (A glyph too big for the atlas *as it stood*
+/// used to be recorded as unplaceable and never reconsidered, so the limit was
+/// settable and inert.)
 #[test]
-fn a_glyph_too_big_for_today_s_atlas_asks_it_to_grow() {
+fn a_glyph_too_big_for_a_page_gets_one_of_its_own() {
     let mut ui = Ui::new(Theme::dark(), FONT).expect("font");
-    let start = ui.fonts.atlas().size;
+    let page = ui.fonts.atlas().page_size;
     ui.fonts.set_atlas_limit(8192);
     for _ in 0..8 {
         ui.begin_frame(INFO);
         ui.text_with("W", 5000.0, Color::WHITE);
         let _ = ui.end_frame();
     }
-    let grown = ui.fonts.atlas().size;
-    assert!(grown > start, "the atlas never grew: {start} -> {grown}");
-    assert!(grown <= 8192, "the atlas grew past its limit: {grown}");
+    let atlas = ui.fonts.atlas();
+    let biggest = atlas.pages.iter().map(|p| p.size).max().unwrap();
+    assert!(biggest > page, "no page large enough for the glyph: {biggest}");
+    assert!(atlas.texels() <= 8192 * 8192, "the atlas went past its budget: {} texels", atlas.texels());
 }

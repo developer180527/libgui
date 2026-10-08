@@ -43,6 +43,15 @@ pub struct FrameCost {
     /// anything else means text is churning, usually a string rebuilt with
     /// different content every frame.
     pub glyphs_rasterized: u32,
+    /// Glyphs and paths that could not be placed because every atlas page was
+    /// drawn from this frame: the frame needs more than the whole budget
+    /// ([`crate::Fonts::set_atlas_limit`]). They are missing for this frame.
+    /// Should be **zero**; anything else, raise the budget.
+    pub atlas_overflows: u32,
+    /// Atlas pages emptied for reuse this frame. Normal now and then for a UI
+    /// whose text changes; every frame means the working set is about the size
+    /// of the budget and glyphs are being rasterised again and again.
+    pub atlas_evictions: u32,
     /// Strings shaped this frame: a run-cache miss each. A steady frame
     /// shapes **none**. Anything else means text is being rebuilt with
     /// different content every frame — a frame counter, a timestamp, a float

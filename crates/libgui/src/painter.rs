@@ -98,10 +98,10 @@ impl<'a> Painter<'a> {
             return;
         }
         let key = path.key(w, h);
-        let Some(uv) = self.fonts.coverage_mask(key, w, h, |buf| path.rasterize(w, h, buf)) else { return };
+        let Some((page, uv)) = self.fonts.coverage_mask(key, w, h, |buf| path.rasterize(w, h, buf)) else { return };
         // Back into the coordinates the draw list expects; it applies the
         // transform itself.
-        self.draw.glyph(t.inv_rect(window), uv, color);
+        self.draw.glyph(t.inv_rect(window), page, uv, color);
     }
 
     /// A linear gradient from `from` to `to` across `r`: left to right for
@@ -148,7 +148,7 @@ impl<'a> Painter<'a> {
                 *c = ((i as u32 * 255 + (N - 1) / 2) / (N - 1)) as u8;
             }
         };
-        let Some(uv) = self.fonts.coverage_mask(key, w, h, fill) else { return };
+        let Some((page, uv)) = self.fonts.coverage_mask(key, w, h, fill) else { return };
         // Centre of the first texel to centre of the last, and the middle of
         // the one texel across: the ends are exactly 0 and 1, and bilinear
         // sampling never reaches a neighbour in the atlas.
@@ -158,7 +158,56 @@ impl<'a> Painter<'a> {
             Axis::X => [u0, v0, uv[2] - du * 0.5, v0],
             Axis::Y => [u0, v0, u0, uv[3] - dv * 0.5],
         };
-        self.draw.glyph(r, uv, to);
+        self.draw.glyph(r, page, uv, to);
+    }
+
+    /// A filled polygon: `points` in order, either winding, concave or not.
+    /// Edges are anti-aliased; the triangles inside it meet exactly, so a
+    /// translucent fill has no seams. Drawn as triangles every call — nothing
+    /// is rasterised on the CPU or cached in the atlas — so it is for shapes
+    /// that change (a sketch region being dragged, an area chart, a selection
+    /// lasso); for a fixed icon, [`Painter::fill_path`] is cheaper per frame.
+    ///
+    /// Simple polygons: an outline that crosses itself draws something, but
+    /// not a defined fill rule.
+    pub fn fill_polygon(&mut self, points: &[Vec2], color: Color) {
+        self.fill_polygon_with_holes(points, &[], color);
+    }
+
+    /// [`Painter::fill_polygon`] with `holes` cut out of it.
+    pub fn fill_polygon_with_holes(&mut self, outline: &[Vec2], holes: &[&[Vec2]], color: Color) {
+        if color.a <= 0.0 {
+            return;
+        }
+        let mut tris = Vec::new();
+        crate::tess::triangulate(outline, holes, &mut tris);
+        for (a, b, c, edges) in tris {
+            self.draw.triangle(a, b, c, edges, color);
+        }
+    }
+
+    /// Triangles you have already made — a CAD kernel's face, a mesh from a
+    /// file: `indices` in threes into `points`. An edge used by one triangle
+    /// is the outline and anti-aliased; an edge two triangles share is drawn
+    /// exactly, so they meet with no seam.
+    pub fn fill_mesh(&mut self, points: &[Vec2], indices: &[u32], color: Color) {
+        if color.a <= 0.0 {
+            return;
+        }
+        let key = |a: u32, b: u32| if a < b { (a, b) } else { (b, a) };
+        let mut uses: crate::hash::FxMap<(u32, u32), u8> = Default::default();
+        let tris = indices.chunks_exact(3).filter(|t| t.iter().all(|&i| (i as usize) < points.len()));
+        for t in tris.clone() {
+            for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+                *uses.entry(key(a, b)).or_insert(0) += 1;
+            }
+        }
+        for t in tris {
+            let edge = |a: u32, b: u32| (uses.get(&key(a, b)) == Some(&1)) as u8;
+            let bits = edge(t[0], t[1]) | (edge(t[1], t[2]) << 1) | (edge(t[2], t[0]) << 2);
+            let p = |i: u32| points[i as usize];
+            self.draw.triangle(p(t[0]), p(t[1]), p(t[2]), bits, color);
+        }
     }
 
     /// Straight line with round caps.

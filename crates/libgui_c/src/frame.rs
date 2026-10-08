@@ -19,7 +19,8 @@ pub struct LibguiBatch {
     /// or a pointer survives the trip. It used to be 32, which silently cut
     /// anything wider in half.
     pub texture_index: u64,
-    /// 0 = the glyph atlas, 1 = one of your own textures.
+    /// 0 = a page of the glyph atlas (`texture_index` is the page, see
+    /// `libgui_frame_atlas_pages`), 1 = one of your own textures.
     pub texture_kind: u32,
     pub first: u32,
     pub count: u32,
@@ -82,15 +83,26 @@ pub struct LibguiPlatformOutput {
 
 /// Captured at `libgui_end_frame`, because `FrameOutput` borrows the `Ui` and
 /// cannot itself be handed to C.
+/// One page of the glyph atlas: a single-channel coverage image, `size` by
+/// `size`. Upload it to its own texture when `version` changed; a page of
+/// size 0 is a slot the atlas released and draws nothing.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct LibguiAtlasPage {
+    pub data: *const u8,
+    pub size: u32,
+    pub _pad: u32,
+    pub version: u64,
+}
+
 pub(crate) struct FrameData {
     pub instances: *const libgui::Instance,
     pub instance_count: u64,
     /// Converted once per frame into a buffer this struct keeps and reuses, so
     /// a steady frame allocates nothing here either.
     pub batches: Vec<LibguiBatch>,
-    pub atlas: *const u8,
-    pub atlas_size: u32,
-    pub atlas_version: u64,
+    /// The atlas pages, reused between frames.
+    pub atlas_pages: Vec<LibguiAtlasPage>,
     pub globals: LibguiGlobals,
     pub clear: LibguiColor,
     pub platform: LibguiPlatformOutput,
@@ -122,9 +134,7 @@ impl Default for FrameData {
             instances: std::ptr::null(),
             instance_count: 0,
             batches: Vec::new(),
-            atlas: std::ptr::null(),
-            atlas_size: 0,
-            atlas_version: 0,
+            atlas_pages: Vec::new(),
             globals: LibguiGlobals::default(),
             clear: LibguiColor::default(),
             platform: LibguiPlatformOutput::default(),
@@ -151,7 +161,7 @@ pub(crate) fn capture(out: &libgui::FrameOutput, into: &mut FrameData) {
     into.batches.clear();
     into.batches.extend(out.batches().iter().map(|b| {
         let (kind, index) = match b.texture {
-            libgui::TextureId::Atlas => (0, 0),
+            libgui::TextureId::Atlas(p) => (0, p as u64),
             libgui::TextureId::User(i) => (1, i),
         };
         LibguiBatch {
@@ -162,10 +172,13 @@ pub(crate) fn capture(out: &libgui::FrameOutput, into: &mut FrameData) {
             _pad: 0,
         }
     }));
-    let atlas = out.atlas();
-    into.atlas = atlas.data.as_ptr();
-    into.atlas_size = atlas.size;
-    into.atlas_version = atlas.version;
+    into.atlas_pages.clear();
+    into.atlas_pages.extend(out.atlas().pages.iter().map(|p| LibguiAtlasPage {
+        data: p.data.as_ptr(),
+        size: p.size,
+        _pad: 0,
+        version: p.version,
+    }));
     into.globals = LibguiGlobals {
         screen_width: g.screen_size[0],
         screen_height: g.screen_size[1],
@@ -208,7 +221,7 @@ pub(crate) fn capture(out: &libgui::FrameOutput, into: &mut FrameData) {
         }));
         into.mesh_batches.extend(into.mesh.batches.iter().map(|b| {
             let (kind, index) = match b.texture {
-                libgui::TextureId::Atlas => (0, 0),
+                libgui::TextureId::Atlas(p) => (0, p as u64),
                 libgui::TextureId::User(i) => (1, i),
             };
             LibguiBatch {
@@ -285,14 +298,17 @@ pub unsafe extern "C" fn libgui_frame_batches(ui: *mut LibguiUi, out_count: *mut
     p
 }
 
-/// The glyph atlas: a single-channel coverage image, `size` by `size`.
-/// Re-upload it when `version` changed.
+/// The first page of the glyph atlas: a single-channel coverage image,
+/// `size` by `size`. Re-upload it when `version` changed. The atlas has more
+/// pages once it outgrows one; read them all with `libgui_frame_atlas_pages`.
 ///
 /// # Safety
 /// As above.
 #[no_mangle]
 pub unsafe extern "C" fn libgui_frame_atlas(ui: *mut LibguiUi, out_size: *mut u32, out_version: *mut u64) -> *const u8 {
-    let (p, s, v) = crate::handle::with_frame(ui, (std::ptr::null(), 0, 0), |f| (f.atlas, f.atlas_size, f.atlas_version));
+    let (p, s, v) = crate::handle::with_frame(ui, (std::ptr::null(), 0, 0), |f| {
+        f.atlas_pages.first().map_or((std::ptr::null(), 0, 0), |a| (a.data, a.size, a.version))
+    });
     if let Some(slot) = unsafe { out_size.as_mut() } {
         *slot = s;
     }
@@ -640,4 +656,33 @@ pub unsafe extern "C" fn libgui_rect_of(ui: *mut LibguiUi, id: u64, out: *mut cr
         (Some(_), None) => 1,
         _ => 0,
     }
+}
+
+/// Every page of the glyph atlas, `*out_count` of them: page `n` is what a
+/// batch with `texture_kind` 0 and `texture_index` n samples. Upload each to
+/// its own texture when its `version` changed. Valid until the next
+/// `libgui_end_frame`.
+///
+/// # Safety
+/// `ui` null or live; `out_count` null or writable.
+#[no_mangle]
+pub unsafe extern "C" fn libgui_frame_atlas_pages(ui: *mut LibguiUi, out_count: *mut u64) -> *const LibguiAtlasPage {
+    let (p, n) = crate::handle::with_frame(ui, (std::ptr::null(), 0), |f| (f.atlas_pages.as_ptr(), f.atlas_pages.len() as u64));
+    if let Some(slot) = unsafe { out_count.as_mut() } {
+        *slot = n;
+    }
+    p
+}
+
+/// The glyph atlas's memory budget, as the side of one square: its pages
+/// together hold at most `max * max` texels. Default 4096 (16 MB, four 2048
+/// pages). Raise it for heavy caption or CJK work at many sizes; a frame that
+/// needs more than the whole budget is the only one that can miss a glyph.
+/// A glyph bigger than a page gets one of its own inside the budget.
+///
+/// # Safety
+/// `ui` null or live.
+#[no_mangle]
+pub unsafe extern "C" fn libgui_set_atlas_limit(ui: *mut LibguiUi, max: u32) {
+    with_ui(ui, (), |u| u.fonts.set_atlas_limit(max));
 }

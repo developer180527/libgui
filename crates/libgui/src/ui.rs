@@ -1957,11 +1957,11 @@ impl Ui {
         self.cached_seen.clear();
         self.dup_ids.clear();
         let _ = self.fonts.take_rasterized();
-        // Between frames is the only safe moment: a repack moves every glyph,
-        // and last frame's instances are gone while this frame's are not
-        // emitted yet. Recordings made under the old packing are dropped by
-        // the `atlas_repacks` check in `Ui::cached`.
-        self.fonts.repack();
+        // A new frame for the atlas: pages drawn from before now may be
+        // reused. Recordings that point into a reused page are dropped by the
+        // `atlas_repacks` check in `Ui::cached`.
+        self.fonts.begin_frame();
+        let _ = self.fonts.take_atlas_counts();
         let _ = self.fonts.take_shaped_runs();
         self.dnd_begin_frame();
         self.popup_stack.clear();
@@ -2046,11 +2046,14 @@ impl Ui {
         let paint_ms = t.ms();
         let offscreen = sink.offscreen;
         let dup = &self.dup_ids;
+        let atlas_counts = self.fonts.take_atlas_counts();
         self.cost = crate::testing::FrameCost {
             nodes: self.nodes.len(),
             instances: self.draw.instances.len(),
             batches: self.draw.batches.len(),
             glyphs_rasterized: self.fonts.take_rasterized(),
+            atlas_overflows: atlas_counts.0,
+            atlas_evictions: atlas_counts.1,
             text_shaped: self.fonts.take_shaped_runs(),
             offscreen_nodes: offscreen,
             // Only the interactive ones matter: `space` and `separator` share
@@ -4187,11 +4190,18 @@ fn paint(
             inst.rect[1] += d.y;
             // A line's endpoints are positions too, carried in `uv`: left
             // behind, a moved line is drawn where it was and clipped away.
-            if crate::render_contract::PrimitiveKind::from_code(inst.params[3]) == Some(crate::render_contract::PrimitiveKind::Line) {
+            // A triangle's corners too: two in `uv`, the third in
+            // `border_color`.
+            let kind = crate::render_contract::PrimitiveKind::from_code(inst.params[3]);
+            if matches!(kind, Some(crate::render_contract::PrimitiveKind::Line | crate::render_contract::PrimitiveKind::Triangle)) {
                 inst.uv[0] += d.x;
                 inst.uv[1] += d.y;
                 inst.uv[2] += d.x;
                 inst.uv[3] += d.y;
+            }
+            if kind == Some(crate::render_contract::PrimitiveKind::Triangle) {
+                inst.border_color[0] += d.x;
+                inst.border_color[1] += d.y;
             }
             let Some(c) = inner.translate(d.x, d.y).intersect(&outer) else { continue };
             // Culled again here rather than trusted from the recording, so a

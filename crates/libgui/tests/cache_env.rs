@@ -186,13 +186,15 @@ fn a_subtree_scrolling_under_the_pointer_is_not_replayed() {
     }
 }
 
-/// Repacking the atlas moves every glyph, so recordings made before it hold
-/// uvs into texels that now belong to something else. The atlas only repacks
-/// between frames (see `Fonts::repack`), so the check is that a repack is
-/// followed by a rebuild rather than a replay.
+/// Reusing an atlas page means recordings made before it hold uvs into texels
+/// that now belong to something else. A page drawn from this frame is never
+/// reused during it, so the check is that a reuse is followed by a rebuild
+/// rather than a replay. The budget is one page here, so the flood has to
+/// reuse it: with the default four pages it simply fits.
 #[test]
 fn an_atlas_repack_forces_a_rebuild() {
     let mut ui = ui();
+    ui.fonts.set_atlas_limit(2048);
     // Many sizes of real glyphs: what a zoomed canvas asks of the atlas.
     let text = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     let frame = |ui: &mut Ui, flood: bool, live: u32| {
@@ -212,9 +214,9 @@ fn an_atlas_repack_forces_a_rebuild() {
     }
     assert_eq!(ui.profile().cached_hits, 1, "the subtree should be replaying by now");
 
-    // Overflow the atlas. The frame that hits a full atlas repaints itself
-    // rather than repacking mid-frame, which would have moved the glyphs of
-    // everything already drawn.
+    // Overflow the atlas. The frame that fills its one page cannot reuse it —
+    // everything already drawn points into it — so it asks for another frame,
+    // and that one reuses the page.
     let (before, repaint) = frame(&mut ui, true, 4);
     assert_eq!(repaint, Some(0.0), "a frame that outgrew the atlas did not ask for another");
     let (after, _) = frame(&mut ui, true, 5);

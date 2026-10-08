@@ -40,7 +40,16 @@
  *  - NO depth test, NO culling, NO scissor: clipping is per-instance, in the
  *    fragment shader.
  *  - THE CONTRACT VERSION: libgui_contract_version(). A port of the shader is
- *    a port of one version. Version 4 added dashed lines (a line's
+ *    a port of one version. Version 5: the atlas is pages (one texture
+ *    each, libgui_frame_atlas_pages), and KIND_TRIANGLE (4) fills polygons:
+ *    uv = corners a, b; border_color = corner c, edge bits (an inner edge is
+ *    an exact test with a tie rule, an outline edge is anti-aliased). An
+ *    instancing port puts the quad on the padded triangle in its vertex
+ *    stage (triangle_corners in ui.wgsl); the expanded mesh already does, so
+ *    a mesh-path port adds only the fragment test. Evaluate a triangle's
+ *    coverage at gl_FragCoord.xy / scale, NOT at the interpolated position,
+ *    and pass its corners flat: two triangles sharing an edge must compute
+ *    bit-identical numbers or a translucent fill shows seams. Version 4 added dashed lines (a line's
  *    params[1..3] and border_color[0]) and turned images and glyphs
  *    (border_color[0..2] = cos-1, sin). The expanded mesh turns its quads on
  *    the CPU, so a mesh-path port needs only the dash test in its fragment
@@ -244,6 +253,16 @@ void libgui_painter_image_tinted(LibguiPainter* p, LibguiRect r, uint64_t textur
                                  float u0, float v0, float u1, float v1, float radius, LibguiColor tint);
 /* `points` is `count` pairs of floats. */
 void libgui_painter_polyline(LibguiPainter* p, const float* points, uint64_t count, float width, LibguiColor c);
+/* Filled shapes, drawn as triangles every call (nothing cached): for shapes
+ * that change every frame. Points are x, y pairs, either winding, concave or
+ * not; edges anti-aliased, no seams inside. A mesh's edges used by one
+ * triangle are its outline; shared edges meet exactly. */
+void libgui_painter_fill_polygon(LibguiPainter* p, const float* xy, uint64_t count, LibguiColor c);
+void libgui_painter_fill_polygon_with_holes(LibguiPainter* p, const float* xy, uint64_t count,
+                                            const float* const* holes, const uint64_t* hole_counts,
+                                            uint64_t hole_count, LibguiColor c);
+void libgui_painter_fill_mesh(LibguiPainter* p, const float* xy, uint64_t count,
+                              const uint32_t* indices, uint64_t index_count, LibguiColor c);
 /* Dashed: `on` drawn, `off` skipped, from `phase` into the pattern at the
  * first point. Zero for `on` or `off` is solid. The polyline's pattern runs on
  * across its joins, and it returns the phase at its last point. Dash ends are
@@ -466,6 +485,23 @@ typedef struct {
 const void*        libgui_frame_instances(LibguiUi* ui, uint64_t* out_count);
 const LibguiBatch* libgui_frame_batches(LibguiUi* ui, uint64_t* out_count);
 const uint8_t*     libgui_frame_atlas(LibguiUi* ui, uint32_t* out_size, uint64_t* out_version);
+
+/* The glyph atlas is pages: a batch with texture_kind 0 samples page
+ * texture_index. Upload each page to its own R8 texture when its version
+ * changed; a page of size 0 is a released slot and is never drawn from.
+ * libgui_frame_atlas above is page 0 only. When the pages fill, the one drawn
+ * from longest ago is emptied and reused (its version moves), so nothing on
+ * screen goes missing. The budget is libgui_set_atlas_limit: all pages
+ * together hold at most max*max texels (4096 by default: four 2048 pages). */
+typedef struct {
+    const uint8_t* data;
+    uint32_t       size;
+    uint32_t       _pad;
+    uint64_t       version;
+} LibguiAtlasPage;
+
+const LibguiAtlasPage* libgui_frame_atlas_pages(LibguiUi* ui, uint64_t* out_count);
+void                   libgui_set_atlas_limit(LibguiUi* ui, uint32_t max);
 void               libgui_frame_globals(LibguiUi* ui, LibguiGlobals* out);
 void               libgui_frame_clear_color(LibguiUi* ui, LibguiColor* out);
 void               libgui_frame_platform(LibguiUi* ui, LibguiPlatformOutput* out);
@@ -1316,6 +1352,7 @@ uint64_t libgui_sizeof_meter_options(void);
 uint64_t libgui_sizeof_meter_response(void);
 uint64_t libgui_sizeof_modal_options(void);
 uint64_t libgui_sizeof_modal_response(void);
+uint64_t libgui_sizeof_atlas_page(void);
 uint64_t libgui_sizeof_validated_options(void);
 uint64_t libgui_sizeof_validated_response(void);
 

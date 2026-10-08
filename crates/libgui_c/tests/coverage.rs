@@ -2565,3 +2565,74 @@ fn a_c_modal_blocks_and_reports() {
         libgui_ui_free(u);
     }
 }
+
+/// Text at sizes that need more than one atlas page.
+extern "C" fn big_text(p: *mut LibguiPainter, r: LibguiRect, _: *mut c_void) {
+    let line = c("Sphinx of black quartz, judge my vow 0123456789");
+    let white = LibguiColor { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
+    let mut y = r.y;
+    for size in [40.0f32, 120.0, 200.0, 280.0, 360.0] {
+        unsafe { libgui_painter_text(p, r.x, y, size, white, line.as_ptr()) };
+        y += size * 1.3;
+    }
+}
+
+/// Filled shapes and atlas pages from C: polygons, holes and meshes reach the
+/// frame as triangles; the atlas is reported page by page, batches name their
+/// page, and the budget is settable.
+#[test]
+fn c_polygons_and_atlas_pages() {
+    extern "C" fn paint(p: *mut LibguiPainter, r: LibguiRect, _: *mut c_void) {
+        let c = LibguiColor { r: 1.0, g: 1.0, b: 1.0, a: 0.5 };
+        let (x, y) = (r.x, r.y);
+        let square = [x, y, x + 40.0, y, x + 40.0, y + 40.0, x, y + 40.0];
+        let hole = [x + 10.0, y + 10.0, x + 30.0, y + 10.0, x + 30.0, y + 30.0, x + 10.0, y + 30.0];
+        let holes = [hole.as_ptr()];
+        let counts = [4u64];
+        let idx = [0u32, 1, 2, 0, 2, 3, 0, 1, 99];
+        unsafe {
+            libgui_painter_fill_polygon(p, square.as_ptr(), 4, c);
+            libgui_painter_fill_polygon_with_holes(p, square.as_ptr(), 4, holes.as_ptr(), counts.as_ptr(), 1, c);
+            libgui_painter_fill_mesh(p, square.as_ptr(), 4, idx.as_ptr(), idx.len() as u64, c);
+            // Nulls.
+            libgui_painter_fill_polygon(p, std::ptr::null(), 4, c);
+            libgui_painter_fill_polygon_with_holes(p, square.as_ptr(), 4, std::ptr::null(), std::ptr::null(), 3, c);
+            libgui_painter_fill_mesh(std::ptr::null_mut(), square.as_ptr(), 4, idx.as_ptr(), 6, c);
+        }
+    }
+    unsafe {
+        let u = ui();
+        libgui_set_atlas_limit(u, 8192);
+        let big = |u| {
+            // Wide enough for the 360 px line: glyphs past the edge are culled,
+            // and the test needs the ones on the second page drawn.
+            libgui_begin_frame(u, 12000.0, 2000.0, 1.0, 1.0 / 60.0);
+            libgui_add_leaf(u, 5, leaf_layout(200.0, 100.0), 0, LibguiPaintFn { paint: Some(paint), drop_user: None, user: std::ptr::null_mut() });
+            libgui_add_leaf(u, 6, leaf_layout(12000.0, 1600.0), 0, LibguiPaintFn { paint: Some(big_text), drop_user: None, user: std::ptr::null_mut() });
+            libgui_end_frame(u);
+        };
+        big(u);
+        big(u);
+        let mut n = 0u64;
+        let inst = std::slice::from_raw_parts(libgui_frame_instances(u, &mut n) as *const libgui::Instance, n as usize);
+        let tris = inst.iter().filter(|i| i.params[3] == libgui::render_contract::PrimitiveKind::Triangle.code()).count();
+        // A square is 2, the square with a hole 8, the mesh 2 (the triangle
+        // with an index out of range is dropped), and the square again from
+        // the call whose hole list is null — the outline still fills.
+        assert_eq!(tris, 14, "the C polygons did not all become triangles");
+        let mut pages = 0u64;
+        let list = std::slice::from_raw_parts(libgui_frame_atlas_pages(u, &mut pages), pages as usize);
+        assert!(pages > 1, "the text did not need more than one page");
+        let (mut size, mut version) = (0u32, 0u64);
+        let first = libgui_frame_atlas(u, &mut size, &mut version);
+        assert_eq!((first, size, version), (list[0].data, list[0].size, list[0].version), "libgui_frame_atlas is not page 0");
+        let mut nb = 0u64;
+        let batches = std::slice::from_raw_parts(libgui_frame_batches(u, &mut nb), nb as usize);
+        assert!(batches.iter().any(|b| b.texture_kind == 0 && b.texture_index > 0), "no batch named a page past the first");
+        assert!(batches.iter().all(|b| b.texture_kind != 0 || b.texture_index < pages));
+        assert_eq!(libgui_frame_atlas_pages(std::ptr::null_mut(), &mut pages), std::ptr::null());
+        libgui_set_atlas_limit(std::ptr::null_mut(), 1);
+        assert_eq!(libgui_ui_poisoned(u), 0);
+        libgui_ui_free(u);
+    }
+}

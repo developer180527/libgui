@@ -36,7 +36,7 @@ use std::collections::HashMap;
 use std::ops::Range;
 
 // This file is a port of the shader for one version of the contract.
-const _: () = assert!(CONTRACT_VERSION == 4, "the contract changed: update libgui_soft to match ui.wgsl");
+const _: () = assert!(CONTRACT_VERSION == 5, "the contract changed: update libgui_soft to match ui.wgsl");
 
 /// An RGBA8 image: what the UI is drawn into. Pixels are premultiplied, like
 /// a GPU framebuffer after the UI pass; with an opaque clear colour (the usual
@@ -150,9 +150,8 @@ impl TexRef<'_> {
 pub struct SoftRenderer {
     globals: Globals,
     instances: Vec<Instance>,
-    atlas: Vec<u8>,
-    atlas_size: u32,
-    atlas_version: u64,
+    /// Each atlas page as uploaded: (size, texels, version).
+    atlas: Vec<(u32, Vec<u8>, u64)>,
     user: HashMap<u64, Texture>,
     next_user: u64,
 }
@@ -236,10 +235,10 @@ impl SoftRenderer {
 
     fn texture(&self, id: TextureId) -> Option<TexRef<'_>> {
         match id {
-            TextureId::Atlas => Some(TexRef {
-                width: self.atlas_size as i32,
-                height: self.atlas_size as i32,
-                texels: Texels::R8(&self.atlas),
+            TextureId::Atlas(p) => self.atlas.get(p as usize).map(|(size, data, _)| TexRef {
+                width: *size as i32,
+                height: *size as i32,
+                texels: Texels::R8(data),
             }),
             TextureId::User(n) => self.user.get(&n).map(|t| TexRef {
                 width: t.width as i32,
@@ -257,12 +256,17 @@ impl Backend for SoftRenderer {
         self.globals = frame.globals();
         self.instances.clear();
         self.instances.extend_from_slice(frame.instances());
-        let atlas = frame.atlas();
-        if atlas.size != self.atlas_size || atlas.version != self.atlas_version {
-            self.atlas.clear();
-            self.atlas.extend_from_slice(&atlas.data);
-            self.atlas_size = atlas.size;
-            self.atlas_version = atlas.version;
+        // Each page uploaded only when its version moved, as a GPU backend
+        // does it.
+        let pages = &frame.atlas().pages;
+        self.atlas.resize_with(pages.len(), || (0, Vec::new(), 0));
+        for (have, page) in self.atlas.iter_mut().zip(pages.iter()) {
+            if have.0 != page.size || have.2 != page.version {
+                have.1.clear();
+                have.1.extend_from_slice(&page.data);
+                have.0 = page.size;
+                have.2 = page.version;
+            }
         }
     }
 
@@ -284,6 +288,16 @@ impl Backend for SoftRenderer {
 /// pixel centre inside it, blended into the target.
 fn draw_instance(target: &mut Target, g: &Globals, inst: &Instance, tex: &TexRef) {
     let Some(kind) = PrimitiveKind::from_code(inst.params[3]) else { return };
+    if kind == PrimitiveKind::Triangle {
+        let q = libgui::render_contract::triangle_corners(
+            [inst.uv[0], inst.uv[1]],
+            [inst.uv[2], inst.uv[3]],
+            [inst.border_color[0], inst.border_color[1]],
+        );
+        let flat = Flat { color: inst.color, border_color: inst.border_color, clip: inst.clip, params: inst.params, half_size: [0.0; 2], seg: inst.uv };
+        draw_triangle(target, g, q, &flat, tex);
+        return;
+    }
     let [rx, ry, rw, rh] = inst.rect;
 
     // vs_main: the quad, grown for softness + AA on shapes only.
@@ -432,6 +446,15 @@ fn fragment(kind: PrimitiveKind, v: &Varyings, aa: f32, tex: &TexRef) -> [f32; 4
             }
         }
         PrimitiveKind::Glyph => scale4(premul(v.color), tex.sample(v.uv[0], v.uv[1])[0]),
+        PrimitiveKind::Triangle => {
+            use libgui::render_contract::triangle_edge;
+            let edges = v.border_color[2].round() as u32;
+            let (a, b, c) = ([v.seg[0], v.seg[1]], [v.seg[2], v.seg[3]], [v.border_color[0], v.border_color[1]]);
+            let cov = triangle_edge(v.world, a, b, edges & 1 != 0, aa)
+                .min(triangle_edge(v.world, b, c, edges & 2 != 0, aa))
+                .min(triangle_edge(v.world, c, a, edges & 4 != 0, aa));
+            scale4(premul(v.color), cov)
+        }
         PrimitiveKind::Shape => {
             let r = p[0].min(half[0].min(half[1]));
             let soft = p[2] + aa;
@@ -461,6 +484,12 @@ fn fragment(kind: PrimitiveKind, v: &Varyings, aa: f32, tex: &TexRef) -> [f32; 4
 /// directly.
 fn draw_quad(target: &mut Target, g: &Globals, verts: &[libgui::mesh::Vertex], tex: &TexRef) {
     let Some(kind) = PrimitiveKind::from_code(verts[0].params[3]) else { return };
+    if kind == PrimitiveKind::Triangle {
+        let v0 = &verts[0];
+        let flat = Flat { color: v0.color, border_color: v0.border_color, clip: v0.clip, params: v0.params, half_size: v0.half_size, seg: v0.seg };
+        draw_triangle(target, g, [verts[0].pos, verts[1].pos, verts[2].pos], &flat, tex);
+        return;
+    }
     // Corners in `Mesh::build`'s order: top-left, top-right, bottom-left,
     // bottom-right.
     let (v0, v3) = (&verts[0], &verts[3]);
@@ -529,6 +558,73 @@ fn draw_quad(target: &mut Target, g: &Globals, verts: &[libgui::mesh::Vertex], t
                 continue;
             }
             blend(&mut target.data[row + px as usize * 4..row + px as usize * 4 + 4], src);
+        }
+    }
+}
+
+/// Rasterise a triangle instance over its padded quad `q` (the corners
+/// `vs_main` puts it on): every pixel whose centre is inside `q` runs the
+/// fragment stage, which decides the coverage. Shared by the instanced and the
+/// expanded paths, so the two agree pixel for pixel. Pixels on `q`'s own edge
+/// need no tie rule: the pad puts them outside the triangle's fringe, where
+/// coverage is zero either way.
+fn draw_triangle(target: &mut Target, g: &Globals, q: [[f32; 2]; 3], f: &Flat, tex: &TexRef) {
+    let (w, h) = (target.width as f32, target.height as f32);
+    let (sx, sy) = (w / g.screen_size[0], h / g.screen_size[1]);
+    let xs = [q[0][0], q[1][0], q[2][0]];
+    let ys = [q[0][1], q[1][1], q[2][1]];
+    let span = |a: f32, b: f32, n: u32| -> Range<u32> {
+        let lo = (a - 0.5).ceil().max(0.0);
+        let hi = (b - 0.5).ceil().min(n as f32);
+        if hi <= lo {
+            0..0
+        } else {
+            lo as u32..hi as u32
+        }
+    };
+    let min3 = |v: [f32; 3]| v[0].min(v[1]).min(v[2]);
+    let max3 = |v: [f32; 3]| v[0].max(v[1]).max(v[2]);
+    let px = span(min3(xs) * sx, max3(xs) * sx, target.width);
+    let py = span(min3(ys) * sy, max3(ys) * sy, target.height);
+    let inside = |p: [f32; 2]| -> bool {
+        (0..3).all(|i| {
+            let (a, b) = (q[i], q[(i + 1) % 3]);
+            (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]) >= 0.0
+        })
+    };
+    let clip = f.clip;
+    let aa = 1.0 / g.scale;
+    for y in py {
+        let wy = (y as f32 + 0.5) / sy;
+        if wy < clip[1] || wy > clip[3] {
+            continue;
+        }
+        let row = (y * target.width) as usize * 4;
+        for x in px.clone() {
+            let wx = (x as f32 + 0.5) / sx;
+            if wx < clip[0] || wx > clip[2] || !inside([wx, wy]) {
+                continue;
+            }
+            // Coverage is evaluated at the pixel centre over `scale`, as the
+            // shader does with `@builtin(position) / scale` — not at the
+            // interpolated position, which differs between two triangles
+            // sharing an edge. Which pixels are shaded is still the quad's.
+            let at = [(x as f32 + 0.5) / g.scale, (y as f32 + 0.5) / g.scale];
+            let vary = Varyings {
+                world: at,
+                local: [0.0; 2],
+                uv: [0.0; 2],
+                color: f.color,
+                border_color: f.border_color,
+                params: f.params,
+                half_size: f.half_size,
+                seg: f.seg,
+            };
+            let src = fragment(PrimitiveKind::Triangle, &vary, aa, tex);
+            if src[3] <= 0.0 && src[0] <= 0.0 && src[1] <= 0.0 && src[2] <= 0.0 {
+                continue;
+            }
+            blend(&mut target.data[row + x as usize * 4..row + x as usize * 4 + 4], src);
         }
     }
 }

@@ -27,8 +27,14 @@
 //!   space and passes everything else through, which is four lines; and
 //! - `fs_main` transliterated, reading the varyings it already reads.
 //!
-//! Nothing needs `@interpolate(flat)`: a value that is constant across a quad
-//! interpolates to itself, so the dialects without a flat qualifier are fine.
+//! Nothing needs `@interpolate(flat)` for correctness of shapes, glyphs, images
+//! or lines: a value that is constant across a quad interpolates to itself, to
+//! within a last bit. **Triangles are the exception**
+//! ([`PrimitiveKind::Triangle`]): their coverage is evaluated at the pixel
+//! centre over the scale (`gl_FragCoord.xy / scale`), not at the interpolated
+//! `pos`, and their corners (`seg`, `border_color`) must reach the fragment
+//! stage bit-exact — use a flat qualifier where the dialect has one — or two
+//! triangles sharing an edge can both claim a pixel on it, or neither.
 //!
 //! # What it costs
 //!
@@ -273,12 +279,25 @@ impl Mesh {
         let base = (self.vertices.len() - chunk_v0) as u32;
         // Corners in the order the indices below assume: top-left, top-right,
         // bottom-left, bottom-right.
-        for (cx, cy) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
+        // A triangle's quad is the triangle itself, padded: corners 0, 1, 2
+        // and 2 again, as `vs_main` places them.
+        let tri = (kind == PrimitiveKind::Triangle).then(|| {
+            crate::render_contract::triangle_corners(
+                [inst.uv[0], inst.uv[1]],
+                [inst.uv[2], inst.uv[3]],
+                [inst.border_color[0], inst.border_color[1]],
+            )
+        });
+        for (k, (cx, cy)) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)].into_iter().enumerate() {
             let local = [(cx * 2.0 - 1.0) * ext[0], (cy * 2.0 - 1.0) * ext[1]];
             let turned = if rot.is_none() { local } else { rot.apply(local) };
             let (ux, uy) = if turned_image { uv_at(local, half_size) } else { (cx, cy) };
+            let pos = match tri {
+                Some(q) => q[k.min(2)],
+                None => [center[0] + turned[0], center[1] + turned[1]],
+            };
             self.vertices.push(Vertex {
-                pos: [center[0] + turned[0], center[1] + turned[1]],
+                pos,
                 local,
                 uv: [mix(inst.uv[0], inst.uv[2], ux), mix(inst.uv[1], inst.uv[3], uy)],
                 color: inst.color,
@@ -332,7 +351,7 @@ mod tests {
         let mut dl = DrawList::default();
         let n = instances.len() as u32;
         dl.instances = instances;
-        dl.batches = vec![crate::Batch { texture: TextureId::Atlas, range: 0..n }];
+        dl.batches = vec![crate::Batch { texture: TextureId::Atlas(0), range: 0..n }];
         dl
     }
 
@@ -414,13 +433,13 @@ mod tests {
         let mut dl = DrawList::default();
         dl.instances = vec![shape(Rect::new(0.0, 0.0, 1.0, 1.0), 0.0); 5];
         dl.batches = vec![
-            crate::Batch { texture: TextureId::Atlas, range: 0..2 },
+            crate::Batch { texture: TextureId::Atlas(0), range: 0..2 },
             crate::Batch { texture: TextureId::User(7), range: 2..5 },
         ];
         let mut mesh = Mesh::new();
         mesh.build(&dl);
         assert_eq!(mesh.batches.len(), 2);
-        assert_eq!(mesh.batches[0], MeshBatch { texture: TextureId::Atlas, indices: 0..12 });
+        assert_eq!(mesh.batches[0], MeshBatch { texture: TextureId::Atlas(0), indices: 0..12 });
         assert_eq!(mesh.batches[1], MeshBatch { texture: TextureId::User(7), indices: 12..30 });
         assert_eq!(mesh.indices.len(), 30);
     }

@@ -53,7 +53,7 @@ fn frame(ui: &mut Ui, rows: usize, names: &[String]) -> (usize, u64, Option<f32>
     ui.begin_frame(FrameInfo::default());
     panel(ui, rows, names);
     let o = ui.end_frame();
-    (o.draw.instances.len(), o.atlas.version, o.platform.repaint_after)
+    (o.draw.instances.len(), o.atlas.first().version, o.platform.repaint_after)
 }
 
 /// Lowest of `runs` samples: noise only ever adds time, so the minimum is the

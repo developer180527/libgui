@@ -109,6 +109,8 @@ runs after layout, with its final rectangle. The available calls:
 - shapes: `rect`, `rect_bordered`, `shadow`, `gradient`;
 - lines: `line`, `polyline`, `dashed_line`, `dashed_polyline`, `bezier`,
   `wire`, `chevron`, `hairline`;
+- fills: `fill_polygon`, `fill_polygon_with_holes`, `fill_mesh` (triangles,
+  for shapes that change every frame);
 - data: `trace` and `trace_fill`, which decimate any number of samples to one
   stroke per pixel column;
 - text: `text`, `text_left`, `text_centered`, `text_right`, `text_wrapped`,
@@ -601,6 +603,27 @@ ui.add_leaf(id, Layout::leaf(Size::Fixed(16.0), Size::Fixed(16.0)), Vec2::ZERO, 
 `p.image_with_alpha(…, ImageAlpha::Straight)`. If your renderer filters in
 hardware, premultiply the texture when you upload it, or edges get dark halos.
 
+### Filled shapes that change
+
+```rust
+p.fill_polygon(&region, accent.with_alpha(0.4));                 // a sketch region
+p.fill_polygon_with_holes(&plate, &[&bore_a, &bore_b], steel);   // a profile with holes
+p.fill_mesh(&points, &indices, colour);                          // your own triangles
+```
+
+These are drawn as triangles every frame, with nothing rasterised on the CPU
+and nothing cached in the atlas. That makes them right for shapes that change:
+a region being dragged, an area chart, a lasso.
+
+- **Outlines:** concave outlines are fine, in either winding, and the edges are
+  anti-aliased.
+- **No seams:** triangles inside a shape meet exactly, so a translucent fill is
+  one layer everywhere.
+- **Cost:** a 2,000-corner outline is 1,998 instances, with no atlas work at
+  all.
+- **Fixed icons:** for an icon that never changes, `fill_path` is cheaper per
+  frame.
+
 ### Gradients and crisp lines
 
 - `p.gradient(r, from, to, Axis::X)` draws a gradient as two instances, with
@@ -909,15 +932,25 @@ A renderer needs four things from the frame:
 - `instances()`: plain data, 96 bytes each;
 - `batches()`: instance ranges grouped by texture;
 - `globals()`: 16 bytes;
-- `atlas()`: a single-channel coverage texture.
+- `atlas()`: the glyph atlas, as pages of single-channel coverage.
 
 The work per frame:
 1. **Pipeline:** create one pipeline from `libgui_shaders`: six `float4`s per
    instance, premultiplied alpha, no depth.
-2. **Upload:** upload the globals and instances, and the atlas whenever
-   `Atlas::version` changes.
-3. **Draw:** for each batch, bind its texture and draw 6 vertices × N
-   instances.
+2. **Upload:** upload the globals and instances. Give each atlas page its own
+   texture, and upload a page whenever its `version` changes. A page of size 0
+   is a released slot that is never drawn from.
+3. **Draw:** for each batch, bind its texture (`TextureId::Atlas(page)` or
+   your own) and draw 6 vertices × N instances.
+
+**The atlas never runs out mid-frame.** When its pages fill, the page drawn
+from longest ago is emptied and reused, so text on screen never goes missing.
+- **Budget:** `ui.fonts.set_atlas_limit(n)` (C: `libgui_set_atlas_limit`) sets
+  the memory: all pages together hold at most n² texels (4096 by default,
+  16 MB as four 2048 pages). Raise it for heavy captions or CJK at many sizes.
+- **Watching it:** `FrameCost::atlas_evictions` counts reused pages.
+  `atlas_overflows` should stay zero; it counts glyphs a single frame could
+  not fit even in the whole budget.
 
 `libgui::render_contract` holds every exact detail (strides, blend mode,
 formats), with a version number.
@@ -1168,9 +1201,14 @@ Everything an application or a custom widget needs (§16 lists it all):
 - **Custom widgets:** focusable custom widgets and the full Painter, including
   `libgui_painter_dashed_line` / `_dashed_polyline`,
   `libgui_painter_image_rotated`, `libgui_painter_text_rotated`, and
-  `libgui_painter_trace` / `_trace_fill`. A host with its own port of the
-  shader checks `libgui_contract_version()`: version 4 added dashes and
-  rotation (see the rendering rules at the top of `libgui.h`).
+  `libgui_painter_trace` / `_trace_fill`, and filled shapes:
+  `libgui_painter_fill_polygon` / `_with_holes` / `_fill_mesh`.
+- **The atlas as pages:** `libgui_frame_atlas_pages`, with a batch's
+  `texture_index` naming its page, and `libgui_set_atlas_limit`.
+- **Shader ports:** a host with its own port of the shader checks
+  `libgui_contract_version()`. Version 4 added dashes and rotation; version 5
+  added atlas pages and triangles. The rendering rules at the top of
+  `libgui.h` give the details.
 - **Input and state:** raw key and button state, animation and springs,
   validated fields, the colour picker, notifications, drag and drop (including
   from the OS).
@@ -1263,6 +1301,7 @@ Rust names are methods on `Ui` unless stated otherwise. C names drop the
 |---|---|---|
 | hit test | `interact`, `interact_drag`, `interact_focusable(_drag)` | `interact`, `interact_drag`, `interact_focusable` |
 | leaf | `add_leaf` + `Painter` | `add_leaf` + `painter_*` |
+| filled shapes | `fill_polygon`, `fill_polygon_with_holes`, `fill_mesh` | `painter_fill_polygon`, `painter_fill_polygon_with_holes`, `painter_fill_mesh` |
 | dashes, turning | `dashed_line`, `dashed_polyline`, `image_rotated`, `text_rotated` | `painter_dashed_line`, `painter_dashed_polyline`, `painter_image_rotated`, `painter_text_rotated` |
 | focus | `focused`, `set_focus`, `scroll_to` | `focused`, `set_focus`, `scroll_to` |
 | raw input | `key_pressed`, `key_down`, `button_down`, `button_pressed`, `hover_time`, `pointer_velocity` | `key_pressed`, `key_down`, `pointer_button_down`, `pointer_button_pressed`, `hover_time`, `pointer_velocity` |
@@ -1284,7 +1323,8 @@ Rust names are methods on `Ui` unless stated otherwise. C names drop the
 | What | Rust | C |
 |---|---|---|
 | theme | `Theme::dark/light/midnight`, `ui.theme`, TOML | `set_theme`, `set_theme_toml`, `theme_to_toml` |
-| draw data | `out.draw`, `atlas`, `platform` | `frame_instances`, `frame_batches`, `frame_atlas`, `frame_platform` |
+| draw data | `out.draw`, `atlas` (pages), `platform` | `frame_instances`, `frame_batches`, `frame_atlas_pages`, `frame_platform` |
+| atlas budget | `fonts.set_atlas_limit` | `set_atlas_limit` |
 | mesh | `libgui::mesh` | `enable_mesh`, `mesh_*`, `set_mesh_limits` |
 | reference | `libgui_soft` | `enable_reference_render`, `reference_pixels`, `conformance_*` |
 
@@ -1316,8 +1356,12 @@ The full signatures are in rustdoc (`cargo doc -p libgui --open`) and in
   and a vector `Path` icon is not turned (turn its points instead).
 - Dash ends are square; there are no round or custom dash caps, and no
   arrowheads.
-- The glyph atlas is one page; when it fills, it resets with a one-frame
-  flicker.
+- A frame that needs more glyphs than the whole atlas budget misses some for
+  that frame (`FrameCost::atlas_overflows`); raise the budget.
+- Filled shapes thinner than a pixel are drawn approximately and can break
+  up; use a line for a hairline.
+- `fill_polygon` expects a simple outline; one that crosses itself fills
+  something, but not by a defined rule.
 
 **Structure**
 - Container `Id`s are positional by default (§5).

@@ -123,12 +123,9 @@ Run any of them with `cargo run --release -p <name>`.
 2. **Text:**
    - bidirectional text;
    - word wrap in `text_area`;
-   - double-click to select a word;
-   - a multi-page glyph atlas.
-3. **Drawing:**
-   - a triangle primitive for shapes that change every frame;
-4. **Tables:** a 2-D cell cursor, cell editing, reordering columns by drag.
-5. **Compositions:**
+   - double-click to select a word.
+3. **Tables:** a 2-D cell cursor, cell editing, reordering columns by drag.
+4. **Compositions:**
    - a searchable dropdown;
    - a command palette;
    - a split button;

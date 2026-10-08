@@ -52,11 +52,11 @@ fn a_second_window_draws_from_the_first_windows_atlas() {
     // the same allocation behind both.
     let a = main.fonts.atlas();
     let b = torn.fonts.atlas();
-    assert_eq!(a.version, b.version, "the two windows disagree about the atlas");
-    assert_eq!(a.data.as_ptr(), b.data.as_ptr(), "the atlas was copied rather than shared");
+    assert_eq!(a.first().version, b.first().version, "the two windows disagree about the atlas");
+    assert_eq!(a.first().data.as_ptr(), b.first().data.as_ptr(), "the atlas was copied rather than shared");
     assert_ne!(
-        a.data.as_ptr(),
-        separate.fonts.atlas().data.as_ptr(),
+        a.first().data.as_ptr(),
+        separate.fonts.atlas().first().data.as_ptr(),
         "an unshared window must have its own atlas"
     );
 }

@@ -14,9 +14,10 @@
 //!    premultiplied-alpha blend, no depth.
 //! 2. [`Backend::prepare`]: write [`Globals`] to a 16-byte uniform buffer, copy
 //!    `frame.draw.instances` into a (per-frame-in-flight) instance buffer, and
-//!    re-upload the R8 atlas when [`Atlas::version`] changed.
+//!    upload each R8 atlas page whose [`AtlasPage::version`](crate::AtlasPage)
+//!    changed (one texture per page; a page of size 0 is unused).
 //! 3. [`Backend::begin`]: bind pipeline, globals, instance buffer.
-//! 4. [`Backend::draw`]: bind the texture for `TextureId` (atlas or your own,
+//! 4. [`Backend::draw`]: bind the texture for `TextureId` (an atlas page or your own,
 //!    e.g. a viewport render target), then draw `6` vertices × `instances`.
 //!
 //! [`Backend::render`] drives 3–4 for a whole frame.
@@ -108,7 +109,7 @@ mod tests {
     /// and a template for a custom RHI.
     #[derive(Default)]
     struct Recorder {
-        atlas_version: u64,
+        atlas_versions: Vec<u64>,
         uploads: usize,
         instances: usize,
     }
@@ -117,9 +118,13 @@ mod tests {
         type Pass<'p> = Vec<String>;
 
         fn prepare(&mut self, frame: &FrameOutput) {
-            if frame.atlas().version != self.atlas_version {
-                self.atlas_version = frame.atlas().version;
-                self.uploads += 1;
+            let pages = &frame.atlas().pages;
+            self.atlas_versions.resize(pages.len(), 0);
+            for (i, p) in pages.iter().enumerate() {
+                if p.version != self.atlas_versions[i] {
+                    self.atlas_versions[i] = p.version;
+                    self.uploads += 1;
+                }
             }
             self.instances = frame.instances().len();
         }
