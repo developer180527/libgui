@@ -348,8 +348,7 @@ impl Ui {
         self.add_leaf(id, Layout::leaf(Size::Grow(1.0), Size::Fixed(h)), Vec2::new(80.0, h), false, move |p, r| {
             if show_label {
                 let top = Rect::new(r.x, r.y, r.w, m.y);
-                p.text_left(top, size, s.label, label);
-                p.text_right(top, size, s.value, &text);
+                p.label_value(top, size, s.label, label, s.value, &text);
             }
             let track = Rect::new(r.x, r.bottom() - track_h, r.w, track_h);
             p.rect(track, s.track, track_h * 0.5);
@@ -404,8 +403,7 @@ impl Ui {
         let h = m.y + 8.0 + 2.0 * kr0;
         self.add_leaf(id, Layout::leaf(Size::Grow(1.0), Size::Fixed(h)), Vec2::new(m.x + 40.0, h), true, move |p, r| {
             let top = Rect::new(r.x, r.y, r.w, m.y);
-            p.text_left(top, size, s.label, label);
-            p.text_right(top, size, s.value.lerp(s.value_active, drag), &value_text);
+            p.label_value(top, size, s.label, label, s.value.lerp(s.value_active, drag), &value_text);
             let cy = r.bottom() - kr0 - 2.0;
             let th = s.track_height;
             let track = Rect::new(r.x + kr0, cy - th * 0.5, r.w - 2.0 * kr0, th);
@@ -487,8 +485,7 @@ impl Ui {
             let border = s.border.lerp(s.border_hover, hover).lerp(s.border_focus, drag);
             p.rect_bordered(r, s.fill, s.radius, 1.0, border);
             if show_label {
-                p.text_left(r.shrink(s.padding_x, 0.0, 0.0, 0.0), size, s.placeholder, label);
-                p.text_right(r.shrink(0.0, 0.0, s.padding_x, 0.0), size, sl.value.lerp(sl.value_active, drag), &text);
+                p.label_value(r.shrink(s.padding_x, 0.0, s.padding_x, 0.0), size, s.placeholder, label, sl.value.lerp(sl.value_active, drag), &text);
             } else {
                 p.text_centered(r, size, sl.value.lerp(sl.value_active, drag), &text);
             }
@@ -838,7 +835,9 @@ impl Ui {
             }
             let fg = if enabled { s.text.lerp(s.text_hover, hot) } else { s.text_disabled };
             p.text_left(r.shrink(s.gutter, 0.0, 0.0, 0.0), size, fg, label);
-            if !hint.is_empty() {
+            // The shortcut is a hint: in a menu too narrow for both, the
+            // label is what the row is.
+            if !hint.is_empty() && s.gutter + m.x + hint_w <= r.w {
                 p.text_right(r, size, s.shortcut, hint);
             }
         });

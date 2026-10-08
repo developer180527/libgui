@@ -457,15 +457,24 @@ impl Panels<'_> {
         let resp = ui.viewport("main", self.viewport_tex, move |p: &mut Painter, r: Rect| {
             let t = p.theme;
             let small = t.metrics.font_size_small;
+            // Pills sized to the text, which is larger at touch density.
+            let pill = p.measure(small, "Ag").y + 10.0;
+            let mut under = r.x;
             if overlay {
                 let w = p.measure(small, &stats).x + 20.0;
-                let badge = Rect::new(r.x + 12.0, r.y + 12.0, w, 24.0);
-                p.rect_bordered(badge, t.palette.bg_panel.with_alpha(0.85), 12.0, 1.0, t.palette.border);
+                let badge = Rect::new(r.x + 12.0, r.y + 12.0, w, pill);
+                p.rect_bordered(badge, t.palette.bg_panel.with_alpha(0.85), pill * 0.5, 1.0, t.palette.border);
                 p.text_centered(badge, small, t.palette.text, &stats);
+                under = badge.right() + 8.0;
             }
             let tw = p.measure(small, &title).x + 24.0;
-            let tag = Rect::new(r.right() - tw - 12.0, r.y + 12.0, tw, 24.0);
-            p.rect(tag, t.palette.accent.with_alpha(0.2), 12.0);
+            let mut tag = Rect::new(r.right() - tw - 12.0, r.y + 12.0, tw, pill);
+            // Too narrow for both side by side: the name goes under the badge.
+            if tag.x < under {
+                tag.x = r.x + 12.0;
+                tag.y += pill + 6.0;
+            }
+            p.rect(tag, t.palette.accent.with_alpha(0.2), pill * 0.5);
             p.text_centered(tag, small, t.palette.accent_hover, &title);
             p.text(Vec2::new(r.x + 14.0, r.bottom() - 26.0), small, t.palette.text_faint, "Drag to orbit  ·  Scroll or pinch to zoom");
         });

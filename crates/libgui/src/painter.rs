@@ -414,6 +414,50 @@ impl<'a> Painter<'a> {
         self.fonts.draw(self.draw, self.font, size, Vec2::new(r.x, r.y + (r.h - m.y) * 0.5), color, s);
     }
 
+    /// A label at the left of `r` and a value at its right, as sliders and
+    /// fields show them, never overlapping. The value is shown in full; the
+    /// label gets the room left, cut short with "…" when it does not fit, and
+    /// is left out when not even that does. Nothing is allocated.
+    #[allow(clippy::too_many_arguments)]
+    pub fn label_value(&mut self, r: Rect, size: f32, label_color: Color, label: impl PaintText, value_color: Color, value: impl PaintText) {
+        let arena: &'a [u8] = self.strs;
+        let (label, value) = (label.get(arena), value.get(arena));
+        let font = self.font;
+        let vw = self.fonts.measure(font, size, value).x;
+        self.text_right(r, size, value_color, value);
+        if label.is_empty() {
+            return;
+        }
+        let room = r.w - vw - size * 0.5;
+        let m = self.fonts.measure(font, size, label);
+        let y = r.y + (r.h - m.y) * 0.5;
+        if m.x <= room {
+            self.fonts.draw(self.draw, font, size, Vec2::new(r.x, y), label_color, label);
+            return;
+        }
+        const MORE: &str = "…";
+        let room = room - self.fonts.measure(font, size, MORE).x;
+        // The longest prefix that fits, by bisection over char boundaries.
+        let ends: (usize, usize) = (0, label.chars().count());
+        let (mut lo, mut hi) = ends;
+        let at = |n: usize| label.char_indices().nth(n).map_or(label.len(), |(b, _)| b);
+        while lo < hi {
+            let mid = (lo + hi).div_ceil(2);
+            if self.fonts.measure(font, size, &label[..at(mid)]).x <= room {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        if lo == 0 {
+            return;
+        }
+        let head = label[..at(lo)].trim_end();
+        let w = self.fonts.measure(font, size, head).x;
+        self.fonts.draw(self.draw, font, size, Vec2::new(r.x, y), label_color, head);
+        self.fonts.draw(self.draw, font, size, Vec2::new(r.x + w, y), label_color, MORE);
+    }
+
     /// Right-aligned, vertically centred in `r`.
     pub fn text_right(&mut self, r: Rect, size: f32, color: Color, text: impl PaintText) {
         let arena: &'a [u8] = self.strs;
