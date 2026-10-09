@@ -212,6 +212,20 @@ impl<T> DockNode<T> {
     }
 }
 
+fn find_in<T>(node: &DockNode<T>, is: &mut impl FnMut(&T) -> bool) -> Option<(u64, usize)> {
+    match node {
+        DockNode::Leaf(l) => l.tabs.iter().position(&mut *is).map(|i| (l.id, i)),
+        DockNode::Split(s) => find_in(&s.first, is).or_else(|| find_in(&s.second, is)),
+    }
+}
+
+fn has_leaf<T>(node: &DockNode<T>, id: u64) -> bool {
+    match node {
+        DockNode::Leaf(l) => l.id == id,
+        DockNode::Split(s) => has_leaf(&s.first, id) || has_leaf(&s.second, id),
+    }
+}
+
 /// Remove empty leaves and collapse splits with a missing side.
 fn prune<T>(node: DockNode<T>) -> Option<DockNode<T>> {
     match node {
@@ -332,6 +346,16 @@ impl<T> Surface<T> {
     fn is_single_tab(&self) -> bool {
         matches!(&self.root, Some(DockNode::Leaf(l)) if l.tabs.len() == 1)
     }
+}
+
+/// Where a tab is: which surface, which pane, which position in its stack.
+/// From [`DockState::find_tab`]; valid until the dock next changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TabLocation {
+    pub surface: SurfaceId,
+    /// The pane: a [`Leaf`]'s id.
+    pub leaf: u64,
+    pub index: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -464,7 +488,81 @@ impl<T> DockState<T> {
         }
     }
 
+    /// Take the tab at `at` out of the dock, and tidy up after it: a pane
+    /// left empty goes, its split collapses into the sibling, and a floating
+    /// window left with nothing in it closes. The main surface may end up
+    /// empty; it is never removed.
+    ///
+    /// None when `at` no longer names a tab — the dock changed since it was
+    /// found. A drag in progress is cancelled, since the tab it holds may be
+    /// this one, or have moved under it.
+    ///
+    /// ```ignore
+    /// // A View menu's "Hide Timeline":
+    /// if let Some(at) = dock.find_tab(|t| *t == Panel::Timeline) {
+    ///     dock.remove_tab(at);
+    /// }
+    /// ```
+    pub fn remove_tab(&mut self, at: TabLocation) -> Option<T> {
+        let si = self.index_of(at.surface)?;
+        let leaf = self.surfaces[si].root.as_mut()?.leaf_mut(at.leaf)?;
+        if at.index >= leaf.tabs.len() {
+            return None;
+        }
+        let tab = leaf.tabs.remove(at.index);
+        if leaf.active > at.index || leaf.active >= leaf.tabs.len() {
+            leaf.active = leaf.active.saturating_sub(1);
+        }
+        self.drag = None;
+        self.reorder_shift = None;
+        self.touch();
+        let s = &mut self.surfaces[si];
+        s.root = s.root.take().and_then(prune);
+        s.stale_geom = 2;
+        if s.root.is_none() && at.surface != SurfaceId::MAIN {
+            self.surfaces.remove(si);
+        }
+        if self.focused_leaf == Some(at.leaf) && self.find_leaf(at.leaf).is_none() {
+            self.focused_leaf = None;
+        }
+        Some(tab)
+    }
+
+    /// Make the tab at `at` the one its pane shows, focus that pane, and show
+    /// its window if it was hidden. False when `at` no longer names a tab.
+    pub fn focus_tab(&mut self, at: TabLocation) -> bool {
+        let Some(s) = self.surface_mut(at.surface) else { return false };
+        let Some(leaf) = s.root.as_mut().and_then(|r| r.leaf_mut(at.leaf)) else { return false };
+        if at.index >= leaf.tabs.len() {
+            return false;
+        }
+        leaf.active = at.index;
+        s.visible = true;
+        self.focused_leaf = Some(at.leaf);
+        self.touch();
+        true
+    }
+
     // ---- queries --------------------------------------------------------
+
+    /// The first tab, in surface then tree order, that `is` accepts.
+    ///
+    /// ```ignore
+    /// let open = dock.find_tab(|t| *t == Panel::Console).is_some();
+    /// ```
+    pub fn find_tab(&self, mut is: impl FnMut(&T) -> bool) -> Option<TabLocation> {
+        for s in &self.surfaces {
+            let Some(root) = &s.root else { continue };
+            if let Some((leaf, index)) = find_in(root, &mut is) {
+                return Some(TabLocation { surface: s.id, leaf, index });
+            }
+        }
+        None
+    }
+
+    fn find_leaf(&self, leaf: u64) -> Option<SurfaceId> {
+        self.surfaces.iter().find(|s| s.root.as_ref().is_some_and(|r| has_leaf(r, leaf))).map(|s| s.id)
+    }
 
     pub fn surfaces(&self) -> &[Surface<T>] {
         &self.surfaces
@@ -1598,5 +1696,62 @@ mod tests {
         d.close_surface(sid);
         assert_eq!(d.surfaces.len(), 1);
         assert_eq!(leaves(d.surfaces[0].root.as_ref().unwrap())[0], vec!["outliner", "inspector", "console"]);
+    }
+
+    /// The View menu's "hide this panel": the tab goes, the pane it leaves
+    /// empty goes, and the split collapses into what is left.
+    #[test]
+    fn removing_the_last_tab_of_a_pane_collapses_its_split() {
+        let mut d = fresh();
+        let at = d.find_tab(|t| *t == "viewport").expect("viewport is docked");
+        assert_eq!(d.remove_tab(at), Some("viewport"));
+        assert_eq!(leaves(d.surfaces[0].root.as_ref().unwrap()), vec![vec!["outliner", "inspector"]]);
+        assert!(matches!(d.surfaces[0].root, Some(DockNode::Leaf(_))), "the split did not collapse");
+        assert_eq!(d.remove_tab(at), None, "a stale location removed something");
+        assert!(d.find_tab(|t| *t == "viewport").is_none());
+    }
+
+    /// Removing a tab before the active one keeps the same tab showing.
+    #[test]
+    fn removing_a_tab_keeps_the_shown_one_shown() {
+        let mut d = fresh();
+        let inspector = d.find_tab(|t| *t == "inspector").unwrap();
+        assert!(d.focus_tab(inspector));
+        d.remove_tab(d.find_tab(|t| *t == "outliner").unwrap());
+        let Some(DockNode::Split(s)) = &d.surfaces[0].root else { panic!("split went away") };
+        let DockNode::Leaf(l) = &*s.first else { panic!() };
+        assert_eq!(l.tabs[l.active], "inspector");
+    }
+
+    /// A floating window emptied by removal closes; the main one never does.
+    #[test]
+    fn an_emptied_floating_window_closes_and_main_stays() {
+        let mut d = fresh();
+        let sid = SurfaceId(99);
+        let leaf = d.leaf(vec!["console"]);
+        d.surfaces.push(Surface::new(sid, Some(leaf), true));
+        let at = d.find_tab(|t| *t == "console").unwrap();
+        assert_eq!(at.surface, sid);
+        d.remove_tab(at);
+        assert!(d.surface(sid).is_none(), "the empty window stayed open");
+        for t in ["outliner", "inspector", "viewport"] {
+            d.remove_tab(d.find_tab(|x| *x == t).unwrap());
+        }
+        assert!(d.surface(SurfaceId::MAIN).is_some_and(|s| s.root.is_none()));
+    }
+
+    /// Focus picks the tab, focuses the pane, shows a hidden window, and
+    /// asks every surface to redraw.
+    #[test]
+    fn focusing_a_tab_shows_it() {
+        let mut d = fresh();
+        let at = d.find_tab(|t| *t == "inspector").unwrap();
+        d.surfaces[0].visible = false;
+        let before = d.revision;
+        assert!(d.focus_tab(at));
+        assert_eq!(d.focused_leaf, Some(at.leaf));
+        assert!(d.surfaces[0].visible);
+        assert_ne!(d.revision, before);
+        assert!(!d.focus_tab(TabLocation { index: 9, ..at }));
     }
 }

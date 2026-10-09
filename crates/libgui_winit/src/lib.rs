@@ -238,7 +238,16 @@ pub struct PlatformState {
 }
 
 impl PlatformState {
+    /// Bring the window in line with what the UI asked for.
+    ///
+    /// An output [`Ui::end_frame`](libgui::Ui::end_frame) did not make — a
+    /// `PlatformOutput::default()` standing in on a frame that was only
+    /// re-presented — is ignored, so the window keeps what the last built
+    /// frame asked for.
     pub fn apply(&mut self, window: &Window, out: &PlatformOutput) {
+        if !out.built {
+            return;
+        }
         if out.pointer_lock != self.locked {
             self.locked = out.pointer_lock;
             if self.locked {

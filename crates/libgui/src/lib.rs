@@ -54,7 +54,7 @@ mod widgets;
 mod wrap;
 
 pub use backend::{Backend, Globals, INSTANCE_STRIDE, VERTICES_PER_INSTANCE};
-pub use dock::{DockConfig, FloatingMode, DockNode, DockState, DropKind, DropTarget, Side, Surface, SurfaceId, TabViewer};
+pub use dock::{DockConfig, DockNode, DockState, DropKind, DropTarget, FloatingMode, Leaf, Side, Split, Surface, SurfaceId, TabLocation, TabViewer};
 pub use dock_layout::{DockLayout, LayoutError, NodeLayout, Restored, SurfaceLayout};
 pub use dnd::{DragSource, DropZone, Payload};
 pub use draw::{Batch, Dash, DrawList, Instance, TextureId};

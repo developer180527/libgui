@@ -643,4 +643,14 @@ pub struct PlatformOutput {
     /// (animating, dragging), `Some(t)` = in `t` seconds (caret blink), `None`
     /// = only after new input. Idle tools can sleep instead of redrawing.
     pub repaint_after: Option<f32>,
+    /// True only on output [`Ui::end_frame`](crate::Ui::end_frame) made.
+    ///
+    /// A host that re-presents a frame without rebuilding it has no output
+    /// for that frame, and the tempting stand-in — `PlatformOutput::default()`
+    /// — says "arrow cursor, no IME, no lock". Applied, that undoes what the
+    /// last real frame asked for: the cursor flickers back to an arrow over a
+    /// text field on every frame that was not rebuilt. A default output has
+    /// this false, so a host can tell it apart, and
+    /// `libgui_winit::PlatformState::apply` ignores it.
+    pub built: bool,
 }

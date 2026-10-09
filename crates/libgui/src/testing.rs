@@ -32,9 +32,24 @@ use crate::{FrameInfo, Ui};
 /// What one frame cost, in counts that are identical on every machine.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FrameCost {
-    /// Layout nodes built. The closest thing to "how much UI did you describe",
-    /// and the number a missing virtualisation blows up.
+    /// Layout nodes built this frame, every layer included. The closest thing
+    /// to "how much UI did you describe", and the number a missing
+    /// virtualisation blows up.
+    ///
+    /// A subtree [`Ui::cached`] replayed is *not* built, and counts here as
+    /// the one node that stands in for it; the nodes it stands for are in
+    /// [`FrameCost::replayed_nodes`]. Asserting "the editor built" on this
+    /// number alone fails on exactly the frames where the editor was cheapest.
     pub nodes: usize,
+    /// Nodes a replayed [`Ui::cached`] subtree stood for but did not build,
+    /// beyond the one placeholder `nodes` already counts. `nodes +
+    /// replayed_nodes` ([`FrameCost::described_nodes`]) is the size of the
+    /// UI on screen, whatever the cache did.
+    pub replayed_nodes: usize,
+    /// Of `nodes`, those inside floating layers — modals, popups, menus,
+    /// tooltips, anything built with [`Ui::layer`]. `nodes - layer_nodes` is
+    /// the main tree.
+    pub layer_nodes: usize,
     /// Draw instances emitted. Work the GPU is asked to do.
     pub instances: usize,
     /// Draw batches: one per contiguous run sharing a texture.
@@ -80,6 +95,18 @@ pub struct FrameCost {
     /// failure rather than something you find with a profiler. A field with no
     /// text, or one whose widget did not build, reads nothing.
     pub text_scanned: usize,
+}
+
+impl FrameCost {
+    /// The UI this frame showed, in nodes: built plus replayed.
+    pub fn described_nodes(&self) -> usize {
+        self.nodes + self.replayed_nodes
+    }
+
+    /// Nodes built outside floating layers.
+    pub fn main_nodes(&self) -> usize {
+        self.nodes - self.layer_nodes
+    }
 }
 
 /// Upper bounds on a [`FrameCost`]. Unset fields are not checked.

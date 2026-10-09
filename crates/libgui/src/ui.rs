@@ -614,6 +614,9 @@ struct CachedOpen {
     env: crate::subtree_cache::Env,
     start: u32,
     settled_before: u64,
+    /// `replayed_nodes_this_frame` when it opened, so a nested replay is
+    /// counted into this recording too.
+    replayed_before: u32,
 }
 
 pub struct Ui {
@@ -1125,6 +1128,28 @@ impl Ui {
     /// True while the pointer is over, or dragging, UI: don't route it to the game.
     pub fn wants_pointer(&self) -> bool {
         self.active.is_some() || self.hovered.is_some()
+    }
+
+    /// The interactive widget at `pos` (logical px), topmost first; None over
+    /// empty space — a label, a panel's background, a gap in a title bar.
+    ///
+    /// Pure geometry: unlike [`Ui::wants_pointer`], it does not depend on what
+    /// is hovered or held, so it answers for any point, not only the
+    /// pointer's. It reads the most recent layout: called after
+    /// [`Ui::end_frame`] that is the frame just built; called while building,
+    /// it is the previous frame's — the same one hover is decided against, so
+    /// it agrees with what every widget is seeing this frame.
+    ///
+    /// ```ignore
+    /// // Drag the window by its title bar, but not by a button on it. After
+    /// // the frame's output has been handed to the renderer:
+    /// if pressed_in_title_bar && ui.hit_test(pointer).is_none() {
+    ///     window.drag_window();
+    /// }
+    /// ```
+    pub fn hit_test(&self, pos: Vec2) -> Option<Id> {
+        let top = self.top_hits.iter().rev().find(|(_, r)| r.contains(pos));
+        top.or_else(|| self.hits.iter().rev().find(|(_, r)| r.contains(pos))).map(|(id, _)| *id)
     }
 
     /// True while a text field has focus: don't route keys to the game.
@@ -1866,8 +1891,7 @@ impl Ui {
         self.fonts.set_scale(input.scale);
         // Hit-test against last frame's layout; later entries were painted on top.
         self.hovered = if input.mouse_inside {
-            let top = self.top_hits.iter().rev().find(|(_, r)| r.contains(input.mouse_pos));
-            top.or_else(|| self.hits.iter().rev().find(|(_, r)| r.contains(input.mouse_pos))).map(|(id, _)| *id)
+            self.hit_test(input.mouse_pos)
         } else {
             None
         };
@@ -1964,6 +1988,7 @@ impl Ui {
         let _ = self.fonts.take_atlas_counts();
         let _ = self.fonts.take_shaped_runs();
         self.dnd_begin_frame();
+        self.cache.replayed_nodes_this_frame = 0;
         self.popup_stack.clear();
         // A keyboard choice that no row took — the menu closed under it — is
         // not carried into another frame.
@@ -2047,8 +2072,18 @@ impl Ui {
         let offscreen = sink.offscreen;
         let dup = &self.dup_ids;
         let atlas_counts = self.fonts.take_atlas_counts();
+        let kids = &self.kids;
+        let layer_nodes = self.nodes[0]
+            .children
+            .range()
+            .map(|k| kids[k] as usize)
+            .filter(|&k| self.nodes[k].absolute.is_some())
+            .map(|k| subtree_len(&self.nodes, kids, k))
+            .sum();
         self.cost = crate::testing::FrameCost {
             nodes: self.nodes.len(),
+            replayed_nodes: self.cache.replayed_nodes_this_frame as usize,
+            layer_nodes,
             instances: self.draw.instances.len(),
             batches: self.draw.batches.len(),
             glyphs_rasterized: self.fonts.take_rasterized(),
@@ -2173,6 +2208,7 @@ impl Ui {
             wants_keyboard: self.wants_keyboard(),
             pointer_lock: self.lock_request,
             repaint_after,
+            built: true,
         };
         FrameOutput {
             profile: self.profile,
@@ -2663,7 +2699,6 @@ impl Ui {
         self.profile
     }
 
-    /// What the last completed frame cost. See [`crate::testing`].
     /// This frame's draw list, after [`Ui::end_frame`].
     ///
     /// The same data [`FrameOutput::draw`] carries, reachable without holding
@@ -2674,6 +2709,7 @@ impl Ui {
         &self.draw
     }
 
+    /// What the last completed frame cost. See [`crate::testing`].
     pub fn frame_cost(&self) -> crate::testing::FrameCost {
         self.cost
     }
@@ -2919,6 +2955,7 @@ impl Ui {
             let min = self.cache.entry_min(id).unwrap_or_default();
             self.cache.mark_seen(id, &mut self.seen);
             self.cache.hits_this_frame += 1;
+            self.cache.replayed_nodes_this_frame += self.cache.entry_nodes(id).saturating_sub(1);
             let mut n = Node::new(id, Layout::leaf(Size::Fixed(min.x), Size::Fixed(min.y)));
             n.cached = true;
             self.attach(n);
@@ -2933,7 +2970,8 @@ impl Ui {
         n.recording = true;
         let i = self.attach(n);
         self.open(i);
-        self.cached_open.push(CachedOpen { id, node: i, deps, pointer, env, start, settled_before });
+        let replayed_before = self.cache.replayed_nodes_this_frame;
+        self.cached_open.push(CachedOpen { id, node: i, deps, pointer, env, start, settled_before, replayed_before });
         true
     }
 
@@ -2967,7 +3005,10 @@ impl Ui {
         );
         self.close();
         self.cache.close_ids(o.id, o.start);
-        self.cache.set_deps(o.id, o.deps, o.pointer, o.env);
+        // Nodes are pushed in build order, so the subtree is everything from
+        // its own node on — plus whatever nested replays stood in for.
+        let nodes = (self.nodes.len() - o.node) as u32 + (self.cache.replayed_nodes_this_frame - o.replayed_before);
+        self.cache.set_deps(o.id, o.deps, o.pointer, o.env, nodes);
         // A subtree that is still animating cannot be replayed next frame: its
         // pixels are going to move on their own.
         if self.unsettled != o.settled_before {
@@ -4160,6 +4201,11 @@ impl HitSink<'_> {
             self.rects_order.len() as u32,
         )
     }
+}
+
+/// How many nodes the subtree under `i` holds, `i` included.
+fn subtree_len(nodes: &[Node], kids: &[u32], i: usize) -> usize {
+    1 + nodes[i].children.range().map(|k| subtree_len(nodes, kids, kids[k] as usize)).sum::<usize>()
 }
 
 #[allow(clippy::too_many_arguments)]

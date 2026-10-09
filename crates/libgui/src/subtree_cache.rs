@@ -59,6 +59,8 @@ pub(crate) struct Pending {
     pub deps: u64,
     pub pointer: Pointer,
     pub env: Env,
+    /// Nodes the subtree stood for, nested replays included.
+    pub nodes: u32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -125,6 +127,8 @@ struct Entry {
     hits: Span,
     rects: Span,
     ids: Span,
+    /// Nodes it stood for when built, so a replay can say how much UI it is.
+    nodes: u32,
     /// Frames since it was last used, so a subtree the app stopped building
     /// does not hold its recording forever.
     idle: u32,
@@ -148,12 +152,18 @@ pub(crate) struct Cache {
     deps: FxMap<Id, Pending>,
     pub(crate) hits_this_frame: u32,
     pub(crate) misses_this_frame: u32,
+    /// Nodes replays stood in for beyond their one placeholder each.
+    pub(crate) replayed_nodes_this_frame: u32,
 }
 
 impl Cache {
     /// An id registered inside an open recording.
     pub fn saw(&mut self, id: Id) {
         self.pending.push(id);
+    }
+
+    pub fn entry_nodes(&self, id: Id) -> u32 {
+        self.entries.get(&id).map_or(1, |e| e.nodes)
     }
 
     pub fn entry_min(&self, id: Id) -> Option<Vec2> {
@@ -204,8 +214,8 @@ impl Cache {
     }
 
     /// What the build half hashed `deps` to.
-    pub fn set_deps(&mut self, id: Id, deps: u64, pointer: Pointer, env: Env) {
-        self.deps.insert(id, Pending { deps, pointer, env });
+    pub fn set_deps(&mut self, id: Id, deps: u64, pointer: Pointer, env: Env, nodes: u32) {
+        self.deps.insert(id, Pending { deps, pointer, env, nodes });
     }
 
     /// What the build half recorded alongside the pixels-to-come.
@@ -232,6 +242,7 @@ impl Cache {
             hits: Span { start: marks.1, end: self.hits.len() as u32 },
             rects: Span { start: marks.2, end: self.rects.len() as u32 },
             ids,
+            nodes: pending.nodes,
             idle: 0,
         };
         self.entries.insert(id, e);

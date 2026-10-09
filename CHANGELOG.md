@@ -21,6 +21,28 @@ Newest first.
 
 ---
 
+## Unreleased: host queries and dock tabs
+
+**Rust only.** Things to check when you move past this:
+
+- `PlatformOutput` has a new `built` field, true only on output
+  `end_frame` made. `libgui_winit::PlatformState::apply` now **ignores** an
+  output with `built` false. If your host passes `PlatformOutput::default()`
+  on frames it only re-presents, that is now harmless (it used to reset the
+  cursor to the arrow). If you construct a `PlatformOutput` yourself and want
+  it applied, set `built: true`.
+- `FrameCost` has two new fields, `replayed_nodes` and `layer_nodes`. Struct
+  literals need `..FrameCost::default()`. `nodes` still counts only nodes
+  *built*, so a subtree `Ui::cached` replayed counts as one node. Use
+  `described_nodes()` for "how much UI was on screen" and `main_nodes()` to
+  leave out modals, popups and other layers.
+
+Added: `DockState::find_tab`, `remove_tab` (also removes empty panes,
+collapses their splits and closes a floating window it empties) and
+`focus_tab`, plus `TabLocation`. `Leaf` and `Split` are exported.
+`Ui::hit_test(pos)` returns the interactive widget at a point, or None
+over empty space.
+
 ## Unreleased: right-to-left text (WO-4)
 
 **Rust and C, no API change.** Hebrew, Arabic and mixed-direction text are now
