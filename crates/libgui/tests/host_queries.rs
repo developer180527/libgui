@@ -79,3 +79,45 @@ fn hit_test_finds_widgets_and_not_empty_space() {
     assert_eq!(ui.hit_test(Vec2::new(700.0, 500.0)), None);
     assert!(!ui.wants_pointer(), "the pointer is nowhere; hit_test did not need it");
 }
+
+/// Two combos and two drag fields with the same label, told apart by key:
+/// opening one does not open the other, and each keeps its own id.
+#[test]
+fn keyed_widgets_with_the_same_label_stay_apart() {
+    let mut ui = Ui::new(Theme::dark(), FONT).unwrap();
+    let (mut a, mut b) = (0usize, 0usize);
+    let (mut x, mut y) = (0.0f32, 0.0f32);
+    ui.begin_frame(info());
+    let ca = ui.combo_keyed(("mode", 1), &mut a, &["One", "Two"]);
+    let cb = ui.combo_keyed(("mode", 2), &mut b, &["One", "Two"]);
+    let da = ui.drag_value_keyed(1, "X", &mut x, 1.0);
+    let db = ui.drag_value_range_keyed(2, "X", &mut y, 1.0, 0.0..=1.0);
+    drop(ui.end_frame());
+    assert_ne!(ca.id, cb.id);
+    assert_ne!(da.id, db.id);
+    assert_eq!(ui.frame_cost().unkeyed_duplicates, 0);
+
+    // The unkeyed forms are the keyed ones with the label as key, so the
+    // ids existing apps already have do not move.
+    let id_of = |keyed: bool| {
+        let mut ui = Ui::new(Theme::dark(), FONT).unwrap();
+        let mut v = 0.0f32;
+        let mut k = 0usize;
+        ui.begin_frame(info());
+        let ids = match keyed {
+            false => (ui.drag_value("X", &mut v, 1.0).id, ui.combo("Mode", &mut k, &["A"]).id),
+            true => (ui.drag_value_keyed("X", "X", &mut v, 1.0).id, ui.combo_keyed("Mode", &mut k, &["A"]).id),
+        };
+        drop(ui.end_frame());
+        ids
+    };
+    assert_eq!(id_of(false), id_of(true));
+}
+
+#[test]
+fn screen_size_is_what_the_frame_was_given() {
+    let mut ui = Ui::new(Theme::dark(), FONT).unwrap();
+    ui.begin_frame(info());
+    assert_eq!(ui.screen_size(), Vec2::new(800.0, 600.0));
+    drop(ui.end_frame());
+}

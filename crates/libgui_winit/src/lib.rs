@@ -222,6 +222,7 @@ pub fn cursor_icon(c: Cursor) -> CursorIcon {
         Cursor::Grab => CursorIcon::Grab,
         Cursor::Grabbing => CursorIcon::Grabbing,
         Cursor::Text => CursorIcon::Text,
+        Cursor::Crosshair => CursorIcon::Crosshair,
     }
 }
 

@@ -1120,6 +1120,11 @@ impl Ui {
         &self.input_state.bindings
     }
 
+    /// The window's size this frame, logical px: what `begin_frame` was given.
+    pub fn screen_size(&self) -> Vec2 {
+        self.input.screen_size
+    }
+
     /// This frame's input (after `begin_frame`).
     pub fn input(&self) -> &FrameInput {
         &self.input

@@ -617,6 +617,8 @@ pub enum Cursor {
     Grab,
     Grabbing,
     Text,
+    /// Precise picking: a razor, an eyedropper, a sample point.
+    Crosshair,
 }
 
 /// Everything the UI asks of the host after a frame. One struct, so a host

@@ -425,8 +425,18 @@ impl Ui {
     /// `speed` is units per pixel dragged. Hold Alt (Option) for fine
     /// control, Shift for coarse.
     /// Unbounded unless you pass a range to [`Ui::drag_value_range`].
+    ///
+    /// The label is also the widget's identity: two "X" fields in one
+    /// container share their drag and focus state. Give each its own key with
+    /// [`Ui::drag_value_keyed`] — the position fields of a list of objects,
+    /// say.
     pub fn drag_value(&mut self, label: &str, value: &mut f32, speed: f32) -> Response {
-        self.drag_value_range(label, value, speed, f32::NEG_INFINITY..=f32::INFINITY)
+        self.drag_value_range_keyed(label, label, value, speed, f32::NEG_INFINITY..=f32::INFINITY)
+    }
+
+    /// [`Ui::drag_value`] with an explicit key, for labels that repeat.
+    pub fn drag_value_keyed(&mut self, key: impl Hash, label: &str, value: &mut f32, speed: f32) -> Response {
+        self.drag_value_range_keyed(key, label, value, speed, f32::NEG_INFINITY..=f32::INFINITY)
     }
 
     /// [`Ui::drag_value`] clamped to a range.
@@ -437,9 +447,21 @@ impl Ui {
         speed: f32,
         range: std::ops::RangeInclusive<f32>,
     ) -> Response {
+        self.drag_value_range_keyed(label, label, value, speed, range)
+    }
+
+    /// [`Ui::drag_value_range`] with an explicit key, for labels that repeat.
+    pub fn drag_value_range_keyed(
+        &mut self,
+        key: impl Hash,
+        label: &str,
+        value: &mut f32,
+        speed: f32,
+        range: std::ops::RangeInclusive<f32>,
+    ) -> Response {
         let s = self.theme.text_input;
         let sl = self.theme.slider;
-        let id = self.make_id(("drag_value", label));
+        let id = self.make_id(("drag_value", key));
         let size = self.theme.metrics.font_size;
         let h = self.theme.metrics.control_height;
         let m = self.text_size(size, label);
@@ -533,10 +555,19 @@ impl Ui {
     }
 
     /// A dropdown: shows the chosen option, opens a menu of them.
+    ///
+    /// `label` is not drawn; it is the widget's identity, so two combos with
+    /// the same label in one container share their open menu. Use
+    /// [`Ui::combo_keyed`] when it repeats.
     pub fn combo(&mut self, label: &str, selected: &mut usize, options: &[&str]) -> Response {
+        self.combo_keyed(label, selected, options)
+    }
+
+    /// [`Ui::combo`] identified by `key` rather than a label.
+    pub fn combo_keyed(&mut self, key: impl Hash, selected: &mut usize, options: &[&str]) -> Response {
         let s = self.theme.text_input;
         let menu = self.theme.menu;
-        let id = self.make_id(("combo", label));
+        let id = self.make_id(("combo", key));
         let popup_id = id.with("menu");
         let size = self.theme.metrics.font_size;
         let h = self.theme.metrics.control_height;

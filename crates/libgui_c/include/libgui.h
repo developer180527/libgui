@@ -469,6 +469,8 @@ typedef struct {
 } LibguiGlobals;
 
 typedef struct {
+    /* 0 default, 1 pointer, 2 resize horizontal, 3 resize vertical,
+     * 4 resize diagonal, 5 grab, 6 grabbing, 7 text, 8 crosshair. */
     uint32_t cursor;
     uint8_t  has_copied_text;
     uint8_t  paste_requested;

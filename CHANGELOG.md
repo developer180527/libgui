@@ -36,12 +36,17 @@ Newest first.
   *built*, so a subtree `Ui::cached` replayed counts as one node. Use
   `described_nodes()` for "how much UI was on screen" and `main_nodes()` to
   leave out modals, popups and other layers.
+- `Cursor` has a new variant, `Crosshair` (8 in C). A host with its own
+  exhaustive `match` on `Cursor` needs an arm for it. `libgui_winit`
+  already maps it.
 
 Added: `DockState::find_tab`, `remove_tab` (also removes empty panes,
 collapses their splits and closes a floating window it empties) and
 `focus_tab`, plus `TabLocation`. `Leaf` and `Split` are exported.
 `Ui::hit_test(pos)` returns the interactive widget at a point, or None
-over empty space.
+over empty space. `Ui::screen_size()`. `combo_keyed`, `drag_value_keyed`
+and `drag_value_range_keyed`, for labels that repeat. The unkeyed forms
+keep the ids they had.
 
 ## Unreleased: right-to-left text (WO-4)
 
