@@ -412,6 +412,9 @@ pub struct DockState<T> {
     reorder_shift: Option<(u64, usize, f32)>,
     /// Moves whenever the dock changes in a way some surface must redraw for.
     revision: u64,
+    /// The tab each pane's bar last scrolled into view (leaf → index): a
+    /// newly active tab is revealed once, then the bar is the user's to scroll.
+    revealed: std::collections::HashMap<u64, usize>,
 }
 
 enum Action {
@@ -429,6 +432,7 @@ impl<T> DockState<T> {
             drag: None,
             focused_leaf: None,
             reorder_shift: None,
+            revealed: std::collections::HashMap::new(),
             revision: 0,
         }
     }
@@ -1065,6 +1069,7 @@ impl<T> DockState<T> {
             focused: self.focused_leaf,
             geoms: Vec::new(),
             actions: Vec::new(),
+            revealed: &mut self.revealed,
         };
         let root_id = Id::new(("dock_root", surface.0));
         ui.container_id(root_id, Layout::column().shrink(), Frame::none(), |ui| match &mut root {
@@ -1213,6 +1218,7 @@ struct ShowCtx<'a, V: TabViewer> {
     focused: Option<u64>,
     geoms: Vec<LeafGeom>,
     actions: Vec<Action>,
+    revealed: &'a mut std::collections::HashMap<u64, usize>,
 }
 
 fn empty_hint(ui: &mut Ui) {
@@ -1321,21 +1327,35 @@ fn show_leaf<V: TabViewer>(ui: &mut Ui, leaf: &mut Leaf<V::Tab>, cx: &mut ShowCt
 
     ui.container_id(leaf_id, Layout::column().shrink(), Frame { clip: true, ..Frame::none() }, |ui| {
         let ts = ui.theme.tab;
-        let bar_layout = Layout::row()
-            .height(Size::Fixed(ts.height))
-            .padding(Insets { left: cfg.tab_bar_padding, top: 0.0, right: cfg.tab_bar_padding, bottom: 0.0 })
-            .gap(ts.gap)
-            .align(crate::Align::Start, crate::Align::End)
-            .shrink();
+        let bar_layout = Layout::row().height(Size::Fixed(ts.height)).shrink();
         let bar_frame = Frame { fill: ts.bar_fill, ..Frame::none() };
         ui.container_id(bar_id, bar_layout, bar_frame, |ui| {
-            // One id per tab, built above from the same `leaf.tabs`.
-            for (i, &tab_id) in tab_ids.iter().enumerate() {
-                let pressed = tab(ui, leaf, i, tab_id, focused, cx);
-                if pressed {
-                    leaf.active = i;
+            // Tabs that do not fit scroll sideways (the wheel works too)
+            // rather than being squeezed or cut off at the pane's edge.
+            let strip = ScrollOptions {
+                padding: Insets { left: cfg.tab_bar_padding, top: 0.0, right: cfg.tab_bar_padding, bottom: 0.0 },
+                bars: false,
+                ..ScrollOptions::horizontal(Size::Grow(1.0), Size::Fixed(ts.height))
+            };
+            ui.scroll_area_with("dock_tabs", strip, |ui| {
+                let row = Layout::row().height(Size::Fixed(ts.height)).gap(ts.gap).align(crate::Align::Start, crate::Align::End);
+                ui.container(row, Frame::none(), |ui| {
+                    // One id per tab, built above from the same `leaf.tabs`.
+                    for (i, &tab_id) in tab_ids.iter().enumerate() {
+                        let pressed = tab(ui, leaf, i, tab_id, focused, cx);
+                        if pressed {
+                            leaf.active = i;
+                        }
+                    }
+                });
+                // A tab that has just become active (clicked, or focused from
+                // a menu) is brought into view, once.
+                let active = leaf.active.min(tab_ids.len() - 1);
+                if cx.revealed.get(&leaf.id) != Some(&active) && ui.rect_of(tab_ids[active]).is_some() {
+                    ui.scroll_to(tab_ids[active]);
+                    cx.revealed.insert(leaf.id, active);
                 }
-            }
+            });
         });
 
         let active = leaf.active;

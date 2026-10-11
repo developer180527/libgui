@@ -66,44 +66,60 @@ pub struct Path {
     view: Vec2,
     segs: Vec<Seg>,
     rule: FillRule,
+    /// A running hash of the segments, folded in as each is added: the
+    /// shape's identity is ready when the path is, at no cost per frame.
+    hash: u64,
+}
+
+/// Fold one segment into a running hash. Tagged, so `line, quad` and
+/// `quad, line` over the same points differ.
+fn fold(h: u64, seg: &Seg) -> u64 {
+    let mut hs = crate::id::StableHasher::new();
+    h.hash(&mut hs);
+    match *seg {
+        Seg::Move(p) => (0u8, p.x.to_bits(), p.y.to_bits()).hash(&mut hs),
+        Seg::Line(p) => (1u8, p.x.to_bits(), p.y.to_bits()).hash(&mut hs),
+        Seg::Quad(c, p) => (2u8, c.x.to_bits(), c.y.to_bits(), p.x.to_bits(), p.y.to_bits()).hash(&mut hs),
+        Seg::Cubic(a, b, p) => {
+            (3u8, a.x.to_bits(), a.y.to_bits(), b.x.to_bits(), b.y.to_bits()).hash(&mut hs);
+            (p.x.to_bits(), p.y.to_bits()).hash(&mut hs);
+        }
+        Seg::Close => 4u8.hash(&mut hs),
+    }
+    hs.finish()
 }
 
 impl Path {
     /// An empty path whose coordinates run from `(0, 0)` to `(width, height)`,
     /// the box that is scaled into the rect it is drawn in.
     pub fn new(width: f32, height: f32) -> Self {
-        Self { view: Vec2::new(width, height), segs: Vec::new(), rule: FillRule::NonZero }
+        Self { view: Vec2::new(width, height), segs: Vec::new(), rule: FillRule::NonZero, hash: 0 }
     }
 
     /// Start a new contour at `p`.
-    pub fn move_to(mut self, p: Vec2) -> Self {
-        self.segs.push(Seg::Move(p));
-        self
+    pub fn move_to(self, p: Vec2) -> Self {
+        self.push(Seg::Move(p))
     }
 
-    pub fn line_to(mut self, p: Vec2) -> Self {
-        self.segs.push(Seg::Line(p));
-        self
+    pub fn line_to(self, p: Vec2) -> Self {
+        self.push(Seg::Line(p))
     }
 
     /// A quadratic curve through control point `c` to `p`.
-    pub fn quad_to(mut self, c: Vec2, p: Vec2) -> Self {
-        self.segs.push(Seg::Quad(c, p));
-        self
+    pub fn quad_to(self, c: Vec2, p: Vec2) -> Self {
+        self.push(Seg::Quad(c, p))
     }
 
     /// A cubic curve through control points `c1` and `c2` to `p`.
-    pub fn cubic_to(mut self, c1: Vec2, c2: Vec2, p: Vec2) -> Self {
-        self.segs.push(Seg::Cubic(c1, c2, p));
-        self
+    pub fn cubic_to(self, c1: Vec2, c2: Vec2, p: Vec2) -> Self {
+        self.push(Seg::Cubic(c1, c2, p))
     }
 
     /// Close the current contour back to where it started. A contour left
     /// open is closed anyway when filled — a fill has no open edges — but
     /// saying so keeps the outline honest for anything else that reads it.
-    pub fn close(mut self) -> Self {
-        self.segs.push(Seg::Close);
-        self
+    pub fn close(self) -> Self {
+        self.push(Seg::Close)
     }
 
     pub fn fill_rule(mut self, rule: FillRule) -> Self {
@@ -157,29 +173,24 @@ impl Path {
         !self.segs.iter().any(|s| !matches!(s, Seg::Move(_) | Seg::Close))
     }
 
+    fn push(mut self, seg: Seg) -> Self {
+        self.hash = fold(self.hash, &seg);
+        self.segs.push(seg);
+        self
+    }
+
     /// The path's identity at a size, for the atlas cache. A strong hash,
     /// because a collision here draws the wrong icon rather than merely
     /// costing a probe.
+    ///
+    /// This runs for every icon on every frame, cache hit or not, so the
+    /// segments are not walked here: their hash was folded in as the path
+    /// was built. (Walking them every frame was a quarter of an editor's
+    /// CPU while it played video.)
     pub(crate) fn key(&self, w: u32, h: u32) -> u64 {
-        // Hashed straight into the hasher rather than gathered first: this
-        // runs for every icon on every frame, cache hit or not, and a frame
-        // that is not changing must not allocate. A tag per segment keeps
-        // `line, quad` and `quad, line` over the same points apart.
         let mut hs = crate::id::StableHasher::new();
         "fill_path".hash(&mut hs);
-        (w, h, self.rule as u32, self.view.x.to_bits(), self.view.y.to_bits()).hash(&mut hs);
-        for s in &self.segs {
-            match *s {
-                Seg::Move(p) => (0u8, p.x.to_bits(), p.y.to_bits()).hash(&mut hs),
-                Seg::Line(p) => (1u8, p.x.to_bits(), p.y.to_bits()).hash(&mut hs),
-                Seg::Quad(c, p) => (2u8, c.x.to_bits(), c.y.to_bits(), p.x.to_bits(), p.y.to_bits()).hash(&mut hs),
-                Seg::Cubic(a, b, p) => {
-                    (3u8, a.x.to_bits(), a.y.to_bits(), b.x.to_bits(), b.y.to_bits()).hash(&mut hs);
-                    (p.x.to_bits(), p.y.to_bits()).hash(&mut hs);
-                }
-                Seg::Close => 4u8.hash(&mut hs),
-            }
-        }
+        (w, h, self.rule as u32, self.view.x.to_bits(), self.view.y.to_bits(), self.hash).hash(&mut hs);
         hs.finish()
     }
 
@@ -190,6 +201,7 @@ impl Path {
         self.view = Vec2::new(width, height);
         self.segs.clear();
         self.rule = FillRule::NonZero;
+        self.hash = 0;
     }
 
     /// Rasterise into `out`, a `w` x `h` coverage buffer already zeroed, with
@@ -415,6 +427,23 @@ pub(crate) fn pixel_box(r: Rect, scale: f32) -> (Rect, u32, u32) {
 
 #[cfg(test)]
 mod tests {
+
+    /// The key is remembered, and forgotten by any change to the shape.
+    #[test]
+    fn keys_follow_the_shape() {
+        let a = Path::polygon(24.0, 24.0, &[Vec2::new(1.0, 1.0), Vec2::new(20.0, 2.0), Vec2::new(4.0, 18.0)]);
+        let k = a.key(16, 16);
+        assert_eq!(a.key(16, 16), k, "same shape, same size");
+        assert_ne!(a.key(32, 32), k, "the size is part of it");
+        assert_eq!(a.clone().key(16, 16), k, "a copy keeps it");
+        let b = a.clone().line_to(Vec2::new(9.0, 9.0));
+        assert_ne!(b.key(16, 16), k, "a changed shape is a different key");
+        assert_ne!(a.clone().fill_rule(FillRule::EvenOdd).key(16, 16), k);
+        let mut c = a.clone();
+        c.reset(24.0, 24.0);
+        assert_ne!(c.key(16, 16), k);
+    }
+
     use super::*;
 
     fn raster(p: &Path, w: u32, h: u32) -> Vec<u8> {

@@ -131,6 +131,11 @@ pub struct ScrollOptions {
     /// Override [`Ui::scroll`] for this area: a timeline and an inspector do
     /// not have to feel the same.
     pub config: Option<ScrollConfig>,
+    /// Draw scrollbars (on by default). Off for a strip too thin to give one
+    /// room — a tab bar — which still scrolls by wheel, trackpad, touch and
+    /// [`Ui::scroll_to`], and whose bar would otherwise sit on its content
+    /// and take its clicks.
+    pub bars: bool,
 }
 
 impl ScrollOptions {
@@ -145,6 +150,7 @@ impl ScrollOptions {
             padding: Insets::all(0.0),
             stick_to_end: false,
             config: None,
+            bars: true,
         }
     }
 
@@ -3103,6 +3109,7 @@ impl Ui {
             hot_y: 0.0,
             style: self.theme.scrollbar,
             snap: snap_text,
+            bars: false,
         });
         let i = self.attach(n);
         self.open(i);
@@ -3837,6 +3844,7 @@ impl Ui {
             hot_y,
             style: self.theme.scrollbar,
             snap: !moving,
+            bars: opts.bars,
         });
         let i = self.attach(n);
         self.open(i);
@@ -4542,6 +4550,9 @@ fn drag_bar(st: &mut ScrollAxis, bar: &Response, axis: Axis) {
 /// Overlay scrollbars: thin, fading in while the pointer is over the area and
 /// widening under it. Drawn per axis, and only where the content overflows.
 fn scrollbars(p: &mut Painter, sink: &mut HitSink, rect: Rect, content: Vec2, sc: Scroll) {
+    if !sc.bars {
+        return;
+    }
     if sc.scroll_y {
         bar(p, sink, rect, content.y, sc.offset.y, Axis::Y, sc.bar_y, sc.vis_y, sc.hot_y, sc.style);
     }

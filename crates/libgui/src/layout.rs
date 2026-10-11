@@ -164,6 +164,8 @@ pub(crate) struct Scroll {
     pub style: crate::ScrollbarStyle,
     /// This scroll is standing still, so its content sits on the pixel grid.
     pub snap: bool,
+    /// Scrollbars are drawn (and hit).
+    pub bars: bool,
 }
 
 pub(crate) struct Node {
@@ -620,6 +622,7 @@ mod tests {
             hot_y: 0.0,
             style: crate::Theme::dark().scrollbar,
             snap: true,
+            bars: true,
         });
         let sc = t.add(0, sc);
         let rows: Vec<usize> = (0..10).map(|_| t.leaf(sc, Size::Grow(1.0), Size::Fixed(20.0), Vec2::ZERO)).collect();
