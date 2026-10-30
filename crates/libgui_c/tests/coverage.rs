@@ -2815,3 +2815,87 @@ fn c_system_fonts_fill_in_what_the_font_lacks() {
         assert!(libgui_ui_new_with_system_fonts(empty.as_ptr(), lens.as_ptr(), 1, std::ptr::null()).is_null());
     }
 }
+
+/// Font roles, rich text and Markdown from C: a bad role is refused, a
+/// tagged run is clicked where it was drawn, and a Markdown link is written
+/// back; a changed source is parsed again.
+#[test]
+fn c_rich_text_and_markdown() {
+    const RED: LibguiColor = LibguiColor { r: 1.0, g: 0.0, b: 0.0, a: 1.0 };
+    let glyph = libgui::render_contract::PrimitiveKind::Glyph.code();
+    let glyphs = |u: *mut LibguiUi| unsafe {
+        let mut n = 0u64;
+        let inst = libgui_frame_instances(u, &mut n) as *const libgui::Instance;
+        std::slice::from_raw_parts(inst, n as usize).iter().filter(|i| i.params[3] == glyph).map(|i| (i.rect, i.color)).collect::<Vec<_>>()
+    };
+    unsafe {
+        let u = ui();
+        let fonts = [FONT.as_ptr()];
+        let lens = [FONT.len() as u64];
+        assert_eq!(libgui_set_font_role(u, 9, fonts.as_ptr(), lens.as_ptr(), 1, 0), 0, "role 9 was accepted");
+        assert!(!libgui_last_error().is_null());
+        assert_eq!(libgui_set_font_role(u, 1, std::ptr::null(), lens.as_ptr(), 1, 0), 0);
+        assert_eq!(libgui_set_font_role(u, 1, fonts.as_ptr(), lens.as_ptr(), 1, 0), 1);
+        assert_eq!(libgui_set_font_role(u, 4, fonts.as_ptr(), lens.as_ptr(), 1, 1), 1);
+
+        let none = LibguiColor { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
+        let (see, here) = (c("see "), c("here"));
+        let runs = [
+            LibguiTextRun { text: see.as_ptr(), role: 0, size: 0.0, color: none, background: none, underline: 0, strike: 0, _pad: [0; 2], tag: 0 },
+            LibguiTextRun { text: here.as_ptr(), role: 1, size: 0.0, color: RED, background: none, underline: 1, strike: 0, _pad: [0; 2], tag: 3 },
+        ];
+        let step = |u| {
+            libgui_begin_frame(u, 400.0, 100.0, 1.0, 1.0 / 60.0);
+            let r = libgui_rich_text(u, c("p").as_ptr(), runs.as_ptr(), 2, 0);
+            libgui_end_frame(u);
+            r
+        };
+        step(u);
+        step(u);
+        let red: Vec<_> = glyphs(u).into_iter().filter(|g| g.1 == [1.0, 0.0, 0.0, 1.0]).collect();
+        assert_eq!(red.len(), 4, "the tagged run is not drawn in its colour");
+        libgui_push_pointer_moved(u, red[1].0[0] + 1.0, red[1].0[1] + 2.0);
+        assert_eq!(step(u).hovered_tag, 3);
+        libgui_push_pointer_button(u, 0, 1);
+        step(u);
+        libgui_push_pointer_button(u, 0, 0);
+        assert_eq!(step(u).clicked_tag, 3, "the click on the tagged run was not reported");
+        libgui_rich_text(std::ptr::null_mut(), c("p").as_ptr(), runs.as_ptr(), 2, 0);
+        libgui_ui_free(u);
+    }
+    unsafe {
+        let u = ui();
+        let mut link = [0u8; 64];
+        let md = |u, src: &str, link: &mut [u8; 64]| {
+            libgui_begin_frame(u, 400.0, 300.0, 1.0, 1.0 / 60.0);
+            let n = libgui_markdown(u, c("doc").as_ptr(), c(src).as_ptr(), link.as_mut_ptr() as *mut _, 64);
+            libgui_end_frame(u);
+            n
+        };
+        let src = "# Title\n\nsee [docs](https://x.io/d) now";
+        md(u, src, &mut link);
+        md(u, src, &mut link);
+        let accent = glyphs(u);
+        let theme_accent = libgui::Theme::dark().palette.accent.to_array();
+        let at: Vec<_> = accent.iter().filter(|g| g.1 == theme_accent).collect();
+        assert_eq!(at.len(), 4, "the link is not drawn in the accent colour");
+        libgui_push_pointer_moved(u, at[1].0[0] + 1.0, at[1].0[1] + 2.0);
+        md(u, src, &mut link);
+        libgui_push_pointer_button(u, 0, 1);
+        md(u, src, &mut link);
+        libgui_push_pointer_button(u, 0, 0);
+        let n = md(u, src, &mut link);
+        assert_eq!(n as usize, "https://x.io/d".len());
+        assert_eq!(std::ffi::CStr::from_ptr(link.as_ptr() as *const _).to_str().unwrap(), "https://x.io/d");
+        assert_eq!(md(u, src, &mut link), 0, "a click was reported twice");
+        // A new source is drawn, not the cached parse.
+        let before = glyphs(u).len();
+        md(u, "short", &mut link);
+        md(u, "short", &mut link);
+        assert_eq!(glyphs(u).len(), "short".len(), "the old document was drawn (had {before} glyphs)");
+        assert_eq!(libgui_ui_poisoned(u), 0);
+        libgui_ui_free(u);
+    }
+    assert_eq!(libgui_sizeof_text_run() as usize, std::mem::size_of::<LibguiTextRun>());
+    assert_eq!(libgui_sizeof_rich_response() as usize, std::mem::size_of::<LibguiRichResponse>());
+}

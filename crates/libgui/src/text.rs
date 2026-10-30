@@ -219,6 +219,38 @@ fn reorder_visual(idx: &mut [usize], levels: &mut [u8]) {
     }
 }
 
+/// What a face is for. The body font is [`Ui::font`](crate::Ui::font); the
+/// others are set with [`Ui::set_font_role`](crate::Ui::set_font_role) and
+/// read with [`Ui::font_for`](crate::Ui::font_for), which falls back to the
+/// body font for a role not set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum FontRole {
+    Body = 0,
+    Bold = 1,
+    Italic = 2,
+    BoldItalic = 3,
+    /// Fixed-width, for code.
+    Mono = 4,
+}
+
+impl FontRole {
+    pub const COUNT: usize = 5;
+    pub const ALL: [FontRole; 5] = [FontRole::Body, FontRole::Bold, FontRole::Italic, FontRole::BoldItalic, FontRole::Mono];
+
+    /// The role for text with these styles; mono wins over the others, since
+    /// code faces seldom come in bold and italic.
+    pub fn of(bold: bool, italic: bool, mono: bool) -> FontRole {
+        match (mono, bold, italic) {
+            (true, _, _) => FontRole::Mono,
+            (_, true, true) => FontRole::BoldItalic,
+            (_, true, false) => FontRole::Bold,
+            (_, false, true) => FontRole::Italic,
+            _ => FontRole::Body,
+        }
+    }
+}
+
 /// A colour for a byte range of text: `start..end`, in bytes of the string
 /// it is drawn with. For syntax highlighting, search hits, diffs.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1048,6 +1080,12 @@ impl FontsInner {
         ((asc - desc) * size / px).ceil()
     }
 
+    /// From the top of a line of text to its baseline, in logical px.
+    pub fn ascent(&self, font: FontId, size: f32) -> f32 {
+        let px = self.px(size);
+        self.line(font, px).0 * size / px
+    }
+
     /// Put a `w` x `h` coverage bitmap in the atlas and return its page and
     /// uv rect, or `None` when it cannot go in this frame. Glyphs and filled
     /// paths both come through here.
@@ -1563,6 +1601,12 @@ impl Fonts {
 
     pub fn line_height(&self, font: FontId, size: f32) -> f32 {
         self.0.borrow().line_height(font, size)
+    }
+
+    /// From the top of a line of text (where [`Fonts::draw`] puts it) to its
+    /// baseline, in logical px: what lines up text of two sizes or faces.
+    pub fn ascent(&self, font: FontId, size: f32) -> f32 {
+        self.0.borrow().ascent(font, size)
     }
 
     #[allow(clippy::too_many_arguments)]

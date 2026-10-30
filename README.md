@@ -71,7 +71,8 @@ C and C++ hosts: `add_subdirectory(crates/libgui_c)`, then link
   moves.
 - **Text.** Font fallback chains with the system's fonts behind them, real
   shaping with rustybuzz, right-to-left and mixed-direction text (Unicode
-  bidi), and coloured spans for syntax highlighting.
+  bidi), coloured spans for syntax highlighting, font roles (bold, italic,
+  mono), rich text with links, and Markdown.
 - **Rendering.** One shader in five languages and a wgpu backend. A mesh form
   serves renderers that cannot instance (bgfx, GLES2), and a CPU reference
   renderer gives pixel-exact tests.
@@ -104,6 +105,7 @@ The full list is in [MANUAL §17](MANUAL.md#17-limitations).
 | `libgui_soft` | CPU reference renderer, for golden-image tests |
 | `libgui_units` | Expression evaluator with units, plus a `number_input` |
 | `libgui_sysfonts` | The system's installed fonts as a lazy fallback, so text in any script draws |
+| `libgui_markdown` | Markdown (CommonMark, tables, task lists) drawn with libgui's own widgets |
 | `libgui_nodes` | Node-graph editing, built on libgui |
 | `libgui_c` | C ABI (`libgui.h`) and C++ header (`libgui.hpp`), with CMake and vcpkg packaging |
 

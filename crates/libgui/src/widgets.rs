@@ -99,7 +99,7 @@ impl Ui {
         };
         let ft = self.frame_text(text);
         let node = self.nodes.len() as u32;
-        self.wrapping.push((node, ft, size));
+        self.wrapping.push((node, crate::ui::Wrap::Plain(ft, size)));
         let layout = Layout::leaf(Size::Grow(1.0), Size::Fit);
         self.add_leaf(id, layout, Vec2::new(min_w, h), false, move |p, r| {
             p.text_wrapped(r, size, color, align, ft);

@@ -228,4 +228,6 @@ sizeof_fns! {
     libgui_sizeof_validated_options => crate::text::LibguiValidatedOptions,
     libgui_sizeof_validated_response => crate::text::LibguiValidatedResponse,
     libgui_sizeof_text_span => crate::text::LibguiTextSpan,
+    libgui_sizeof_text_run => crate::rich_c::LibguiTextRun,
+    libgui_sizeof_rich_response => crate::rich_c::LibguiRichResponse,
 }

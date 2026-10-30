@@ -188,7 +188,9 @@ pub struct LibguiTextAreaOptions {
     pub wrap: u8,
     /// A gutter of line numbers.
     pub line_numbers: u8,
-    pub _pad: [u8; 2],
+    /// Draw in the mono face (`libgui_set_font_role` with role 4), for code.
+    pub mono: u8,
+    pub _pad: [u8; 1],
 }
 
 /// # Safety
@@ -197,7 +199,7 @@ pub struct LibguiTextAreaOptions {
 pub unsafe extern "C" fn libgui_text_area_options_default(out: *mut LibguiTextAreaOptions) {
     if let Some(o) = unsafe { out.as_mut() } {
         let d = libgui::TextAreaOptions::default();
-        *o = LibguiTextAreaOptions { rows: d.rows as u32, height_kind: 1, height: 0.0, wrap: d.wrap as u8, line_numbers: d.line_numbers as u8, _pad: [0; 2] };
+        *o = LibguiTextAreaOptions { rows: d.rows as u32, height_kind: 1, height: 0.0, wrap: d.wrap as u8, line_numbers: d.line_numbers as u8, mono: 0, _pad: [0; 1] };
     }
 }
 
@@ -234,6 +236,7 @@ unsafe fn area_options(opts: *const LibguiTextAreaOptions) -> libgui::TextAreaOp
             },
             line_numbers: o.line_numbers != 0,
             wrap: o.wrap != 0,
+            mono: o.mono != 0,
         },
         None => libgui::TextAreaOptions::default(),
     }

@@ -34,6 +34,8 @@ libgui_soft = { path = "../libgui_soft" }
 # read the filesystem turns it off, and libgui_ui_new_with_system_fonts then
 # refuses.
 libgui_sysfonts = { path = "../libgui_sysfonts", optional = true }
+# Markdown drawn with libgui's own widgets, for libgui_markdown.
+libgui_markdown = { path = "../libgui_markdown" }
 
 [features]
 default = ["system-fonts"]

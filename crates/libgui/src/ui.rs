@@ -4,7 +4,7 @@ use crate::hash::{FxMap, FxSet};
 use crate::input::UiEvent;
 use crate::input_state::InputState;
 use crate::scroll::{ScrollConfig, Smoothing};
-use crate::{Align, Axis, Atlas, Color, Cursor, DrawList, FontId, Fonts, FrameInfo, FrameInput, Gesture, Id, InputEvent, Insets, Key, KeyBindings, Layout, Painter, PlatformOutput, PointerButton, PointerKind, Rect, Shortcut, Size, Theme, Transform, UiAction, Vec2};
+use crate::{Align, Axis, Atlas, Color, Cursor, DrawList, FontId, FontRole, Fonts, FrameInfo, FrameInput, Gesture, Id, InputEvent, Insets, Key, KeyBindings, Layout, Painter, PlatformOutput, PointerButton, PointerKind, Rect, Shortcut, Size, Theme, Transform, UiAction, Vec2};
 use std::hash::Hash;
 
 /// `v` if it is a real number, else `fallback`.
@@ -625,10 +625,19 @@ struct CachedOpen {
     replayed_before: u32,
 }
 
+/// A paragraph whose height depends on the width layout gives it.
+pub(crate) enum Wrap {
+    Plain(crate::FrameText, f32),
+    Rich(std::rc::Rc<crate::RichText>, Align),
+}
+
 pub struct Ui {
     pub theme: Theme,
     pub fonts: Fonts,
     pub font: FontId,
+    /// The faces for bold, italic, bold italic and code; `None` falls back.
+    /// See [`Ui::font_for`].
+    font_roles: [Option<FontId>; FontRole::COUNT],
     /// Cursor requested by widgets this frame; apply it in the host.
     pub cursor: Cursor,
     pub(crate) input: FrameInput,
@@ -859,7 +868,7 @@ pub struct Ui {
     /// paragraph's height depends on the width it is *given*, which layout
     /// only knows after it has run, so these are re-measured between the two
     /// passes. See `Ui::rewrap`.
-    pub(crate) wrapping: Vec<(u32, crate::FrameText, f32)>,
+    pub(crate) wrapping: Vec<(u32, Wrap)>,
     cost: crate::testing::FrameCost,
     profile: crate::Profile,
     /// Subtree recordings, for [`Ui::cached`].
@@ -978,7 +987,38 @@ impl Ui {
     /// input, focus and retained widget state — only the font system is
     /// shared.
     pub fn sharing_fonts(theme: Theme, other: &Ui) -> Self {
-        Self::with_fonts(theme, other.fonts.share(), other.font)
+        let mut ui = Self::with_fonts(theme, other.fonts.share(), other.font);
+        ui.font_roles = other.font_roles;
+        ui
+    }
+
+    /// Use `font` for `role`: the face bold, italic or code text is drawn in.
+    /// Add the face first with `ui.fonts.add_font(bytes)` (or
+    /// `add_rasterizer`, for a fallback chain of its own). `Body` sets the
+    /// default font, the same as assigning [`Ui::font`].
+    pub fn set_font_role(&mut self, role: FontRole, font: FontId) {
+        if role == FontRole::Body {
+            self.font = font;
+        } else {
+            self.font_roles[role as usize] = Some(font);
+        }
+    }
+
+    /// The face for `role`. One not set falls back: bold italic to bold, then
+    /// to the body font; italic, bold and mono to the body font. So text
+    /// asked for in a role is always drawn, if plainly.
+    pub fn font_for(&self, role: FontRole) -> FontId {
+        let get = |r: FontRole| self.font_roles[r as usize];
+        match role {
+            FontRole::Body => self.font,
+            FontRole::BoldItalic => get(FontRole::BoldItalic).or(get(FontRole::Bold)).unwrap_or(self.font),
+            r => get(r).unwrap_or(self.font),
+        }
+    }
+
+    /// Whether `role` has a face of its own, rather than falling back.
+    pub fn has_font_role(&self, role: FontRole) -> bool {
+        role == FontRole::Body || self.font_roles[role as usize].is_some()
     }
 
     fn with_fonts(theme: Theme, fonts: Fonts, font: FontId) -> Self {
@@ -986,6 +1026,7 @@ impl Ui {
             theme,
             fonts,
             font,
+            font_roles: [None; FontRole::COUNT],
             cursor: Cursor::Default,
             input: FrameInput::default(),
             input_state: InputState::new(),
@@ -3033,14 +3074,20 @@ impl Ui {
     /// True when any of them changed height, so the solve has to run again.
     fn rewrap(&mut self) -> bool {
         let mut changed = false;
-        for &(node, text, size) in &self.wrapping {
+        for (node, wrap) in &self.wrapping {
+            let node = *node;
             let n = &self.nodes[node as usize];
             let w = n.rect.w;
             if w <= 0.0 {
                 continue;
             }
-            let s = crate::PaintText::get(&text, self.strs.bytes());
-            let h = self.fonts.measure_wrapped(self.font, size, s, w).y;
+            let h = match wrap {
+                Wrap::Plain(text, size) => {
+                    let s = crate::PaintText::get(text, self.strs.bytes());
+                    self.fonts.measure_wrapped(self.font, *size, s, w).y
+                }
+                Wrap::Rich(rich, align) => crate::rich::layout(&self.fonts, rich, w, *align).size.y,
+            };
             if (self.nodes[node as usize].intrinsic.y - h).abs() > 0.01 {
                 self.nodes[node as usize].intrinsic.y = h;
                 changed = true;

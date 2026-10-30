@@ -132,6 +132,8 @@ int main(int argc, char** argv) {
     CHECK_SIZE(LibguiAtlasPage, libgui_sizeof_atlas_page);
     CHECK_SIZE(LibguiTextAreaOptions, libgui_sizeof_text_area_options);
     CHECK_SIZE(LibguiTextSpan, libgui_sizeof_text_span);
+    CHECK_SIZE(LibguiTextRun, libgui_sizeof_text_run);
+    CHECK_SIZE(LibguiRichResponse, libgui_sizeof_rich_response);
     CHECK_SIZE(LibguiValidatedOptions, libgui_sizeof_validated_options);
     CHECK_SIZE(LibguiValidatedResponse, libgui_sizeof_validated_response);
 

@@ -255,6 +255,7 @@ pub unsafe extern "C" fn libgui_ui_free(ui: *mut LibguiUi) {
     }
     let handle = unsafe { Box::from_raw(ui) };
     crate::text::clear_overflow(handle.ui);
+    crate::rich_c::forget(handle.ui);
     if handle.owns_ui && !handle.ui.is_null() {
         drop(unsafe { Box::from_raw(handle.ui) });
     }

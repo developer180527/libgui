@@ -12,7 +12,7 @@
 use crate::input::UiEvent as Event;
 use crate::text_history::{Change, Edited, History};
 use crate::text::Ink;
-use crate::{FrameText, Id, TextSpan};
+use crate::{FontId, FontRole, FrameText, Id, TextSpan};
 use crate::{Color, Cursor, Insets, Layout, Motion, Rect, Response, Size, Ui, UiAction, Vec2};
 
 /// Retained per-field state. **Indices are byte offsets** into the app's
@@ -571,7 +571,8 @@ struct Edited2 {
 /// Shared by both fields: the single-line one differs only in refusing
 /// newlines, and in treating Enter as "commit" because it has nowhere to put
 /// a line break.
-fn apply_events(ui: &mut Ui, id: Id, text: &mut String, st: &mut TextState, multiline: bool, wrap: Option<f32>, align: Option<f32>) -> Edited2 {
+#[allow(clippy::too_many_arguments)]
+fn apply_events(ui: &mut Ui, id: Id, font: FontId, text: &mut String, st: &mut TextState, multiline: bool, wrap: Option<f32>, align: Option<f32>) -> Edited2 {
     let mut out = Edited2 { changed: false, submitted: false, cancelled: false, can_undo: false, can_redo: false };
     let mut hist = ui.text_history.remove(&id).unwrap_or_default();
     // No whole-document comparison here to spot the app writing the string
@@ -649,7 +650,7 @@ fn apply_events(ui: &mut Ui, id: Id, text: &mut String, st: &mut TextState, mult
                 }
             }
             Event::Action(a @ UiAction::Delete(_)) => {
-                let cols = LineColumns { fonts: &ui.fonts, font: ui.font, size, wrap, align };
+                let cols = LineColumns { fonts: &ui.fonts, font, size, wrap, align };
                 out.changed |= edited(&mut e, &mut hist, Edited::Deleting, now, pause, |e| {
                     e.action(a, &mut None, &cols);
                 });
@@ -657,7 +658,7 @@ fn apply_events(ui: &mut Ui, id: Id, text: &mut String, st: &mut TextState, mult
             Event::Action(a @ (UiAction::Move { .. } | UiAction::SelectAll)) => {
                 // A caret move ends the run: what is typed next is its own step.
                 hist.break_run();
-                let cols = LineColumns { fonts: &ui.fonts, font: ui.font, size, wrap, align };
+                let cols = LineColumns { fonts: &ui.fonts, font, size, wrap, align };
                 out.changed |= e.action(a, &mut st.goal, &cols);
             }
             _ => continue,
@@ -725,7 +726,7 @@ impl Ui {
         let (mut can_undo, mut can_redo) = (false, false);
         // While a popup is open the keys are its, even with focus here.
         if self.focused == Some(id) && self.keys_reach() {
-            let out = apply_events(self, id, text, &mut st, false, None, None);
+            let out = apply_events(self, id, self.font, text, &mut st, false, None, None);
             changed = out.changed;
             submitted = out.submitted;
             cancelled = out.cancelled;
@@ -995,11 +996,14 @@ pub struct TextAreaOptions {
     /// or a description reads. Off, long lines scroll sideways, which is what
     /// code wants. On by default.
     pub wrap: bool,
+    /// Draw in the [`FontRole::Mono`] face, for code; the body font when no
+    /// mono face is set.
+    pub mono: bool,
 }
 
 impl Default for TextAreaOptions {
     fn default() -> Self {
-        Self { rows: 6, height: Size::Fit, line_numbers: false, wrap: true }
+        Self { rows: 6, height: Size::Fit, line_numbers: false, wrap: true, mono: false }
     }
 }
 
@@ -1256,10 +1260,11 @@ impl Ui {
         mut highlight: Option<&mut Highlighter>,
     ) -> TextResponse {
         let id = self.make_id(("text_area", key));
+        let font = if opts.mono { self.font_for(FontRole::Mono) } else { self.font };
         let s = self.theme.text_input;
         let size = self.theme.metrics.font_size;
         let pad = s.padding_x;
-        let lh = self.fonts.line_height(self.font, size);
+        let lh = self.fonts.line_height(font, size);
         let resp = self.interact_drag(id);
         if resp.hovered {
             self.cursor = Cursor::Text;
@@ -1292,7 +1297,7 @@ impl Ui {
         {
             // The field may be narrower or wider than last frame: the anchor's
             // line may now have fewer rows.
-            let cols = LineColumns { fonts: &self.fonts, font: self.font, size, wrap, align: Some(view.w) };
+            let cols = LineColumns { fonts: &self.fonts, font, size, wrap, align: Some(view.w) };
             let n = cols.rows(line_from(text, st.top_byte)).count();
             st.top_row = st.top_row.min(n - 1);
         }
@@ -1302,7 +1307,7 @@ impl Ui {
         // a wrapped row. The point is inside the view, so the row it names is
         // reached from the anchor, not from the start of the document.
         let row_at = |ui: &Ui, p: Vec2, text: &str, st: &TextState| -> (usize, bool) {
-            let cols = LineColumns { fonts: &ui.fonts, font: ui.font, size, wrap, align: Some(view.w) };
+            let cols = LineColumns { fonts: &ui.fonts, font, size, wrap, align: Some(view.w) };
             let delta = ((p.y - view.y + st.top_frac) / lh).floor().max(0.0) as usize;
             let mut probe = *st;
             for _ in 0..delta {
@@ -1342,7 +1347,7 @@ impl Ui {
         let (mut can_undo, mut can_redo) = (false, false);
         // While a popup is open the keys are its, even with focus here.
         if self.focused == Some(id) && self.keys_reach() {
-            let out = apply_events(self, id, text, &mut st, true, wrap, Some(view.w));
+            let out = apply_events(self, id, font, text, &mut st, true, wrap, Some(view.w));
             changed = out.changed;
             submitted = out.submitted;
             cancelled = out.cancelled;
@@ -1366,7 +1371,7 @@ impl Ui {
         }
 
         let fonts = self.fonts.clone();
-        let cols = LineColumns { fonts: &fonts, font: self.font, size, wrap, align: Some(view.w) };
+        let cols = LineColumns { fonts: &fonts, font, size, wrap, align: Some(view.w) };
         {
             // An edit inside the anchor's line can take rows away from it.
             let n = cols.rows(line_from(text, st.top_byte)).count();
@@ -1494,12 +1499,12 @@ impl Ui {
             // This row's share of the selection, if any. Measured only when
             // there is one: a caret table per visible line is what made an
             // idle text area allocate on every frame.
-            let (bidi, rtl) = fonts.bidi_of(self.font, size, line);
+            let (bidi, rtl) = fonts.bidi_of(font, size, line);
             let sel: Vec<(f32, f32)> = if sel_b > sel_a && sel_b > rs && sel_a <= re && !(sel_a == re && !last) {
                 if bidi {
                     let o = cols.offset(line, (r0, r1));
                     let mut spans: Vec<(f32, f32)> = fonts
-                        .spans_in(self.font, size, line, (r0, r1), sel_a.max(rs) - at, sel_b.min(re) - at)
+                        .spans_in(font, size, line, (r0, r1), sel_a.max(rs) - at, sel_b.min(re) - at)
                         .into_iter()
                         .map(|(a, b)| (a + o, b + o))
                         .collect();
@@ -1510,8 +1515,8 @@ impl Ui {
                     }
                     spans
                 } else {
-                    let x0 = fonts.caret_x(self.font, size, caret_src, sel_a.max(rs) - rs);
-                    let x1 = fonts.caret_x(self.font, size, caret_src, sel_b.min(re) - rs);
+                    let x0 = fonts.caret_x(font, size, caret_src, sel_a.max(rs) - rs);
+                    let x1 = fonts.caret_x(font, size, caret_src, sel_b.min(re) - rs);
                     // A selected newline shows as a sliver past the last glyph.
                     let x1 = if last && sel_b > re { x1 + size * 0.35 } else { x1 };
                     vec![(x0, x1)]
@@ -1531,15 +1536,15 @@ impl Ui {
                 // A bidi row is not split around the composition: it is drawn
                 // over the row at the caret.
                 Some((t, c)) if is_caret_row && bidi => {
-                    let w = fonts.measure(self.font, size, t).x;
-                    pre_caret = fonts.measure(self.font, size, &t[..*c]).x;
+                    let w = fonts.measure(font, size, t).x;
+                    pre_caret = fonts.measure(font, size, &t[..*c]).x;
                     ime_w = w.max(1.0);
                     Some((rd, Compose { pre: self.frame_text(t), tail: self.frame_text(""), x: caret_x, w }))
                 }
                 Some((t, c)) if is_caret_row => {
                     let split = st.cursor - at;
-                    let w = fonts.measure(self.font, size, t).x;
-                    pre_caret = fonts.measure(self.font, size, &t[..*c]).x;
+                    let w = fonts.measure(font, size, t).x;
+                    pre_caret = fonts.measure(font, size, &t[..*c]).x;
                     ime_w = w.max(1.0);
                     let cut = split.clamp(r0, rd.max(r0));
                     Some((cut, Compose { pre: self.frame_text(t), tail: self.frame_text(&line[cut..rd.max(cut)]), x: caret_x, w }))
@@ -1579,6 +1584,9 @@ impl Ui {
         let caret_pos = Vec2::new(if wrap.is_some() { caret_x.min(view.w - 1.0) } else { caret_x }, caret_y);
         let layout = Layout::leaf(Size::Grow(1.0), height);
         self.add_leaf(id, layout, Vec2::new(80.0, lh + pad * 2.0), true, move |p, r| {
+            // Drawn in the face it was measured in (mono, for code).
+            let body = p.font;
+            p.font = font;
             let radius = s.radius;
             if focus_t > 0.01 {
                 p.rect_bordered(r.expand(3.0), Color::TRANSPARENT, radius + 3.0, 2.0, s.focus_ring.with_alpha(s.focus_ring.a * focus_t));
@@ -1619,6 +1627,7 @@ impl Ui {
                 p.rect(Rect::new(x - 0.75, view.y + caret_pos.y - 1.0, 1.5, lh + 2.0), s.caret, 0.75);
             }
             p.draw.pop_clip();
+            p.font = body;
         });
 
         if focused {

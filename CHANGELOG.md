@@ -21,10 +21,9 @@ Newest first.
 
 ---
 
-## Unreleased: coloured text and system fonts
+## Unreleased: coloured text, system fonts, font roles, rich text, Markdown
 
-**Rust and C.** Additions, plus one internal type change a custom font
-backend can see.
+**Rust and C.** Additions, plus a few changes the compiler will point at.
 
 - **Coloured spans.** `TextSpan { start, end, color }`, `p.text_spans(..)`
   and `ui.text_area_highlighted(key, text, opts, |line_index, line, spans| ..)`
@@ -34,6 +33,15 @@ backend can see.
 - **System fonts.** New crate `libgui_sysfonts`, and in the core the trait
   `FontSource` and `FontStack::with_source`. `FontdueRasterizer::from_collection`
   reads one face of a `.ttc`. C: `libgui_ui_new_with_system_fonts`.
+- **Font roles.** `FontRole` (`Body`, `Bold`, `Italic`, `BoldItalic`,
+  `Mono`), `Ui::set_font_role`, `font_for`, `has_font_role`;
+  `TextAreaOptions::mono`. C: `libgui_set_font_role`, and
+  `LibguiTextAreaOptions::mono` (a padding byte before, so no layout change).
+- **Rich text.** `RichText`, `TextRun`, `Ui::rich_text(_with)` with
+  `RichResponse`, `rich_layout`, `rich_min_width`, `Painter::rich`,
+  `Fonts::ascent`. C: `LibguiTextRun`, `libgui_rich_text`.
+- **Markdown.** New crate `libgui_markdown`. C: `libgui_markdown`; C++
+  `ui.markdown`.
 
 **What you change:**
 - **Vendoring:** `libgui_c` now depends on `libgui_sysfonts`, which brings
@@ -42,6 +50,10 @@ backend can see.
   `libgui_ui_new_with_system_fonts` then returns null with a reason.
 - `FontStack::faces()` can now grow while the app runs, when its source adds
   a face. Nothing else about a stack without a source changes.
+- `TextAreaOptions` has a new field, `mono`. A struct literal without
+  `..Default::default()` needs it.
+- **Vendoring:** `libgui_c` also depends on `libgui_markdown`, which brings
+  `pulldown-cmark`.
 
 ## Unreleased: host queries and dock tabs
 

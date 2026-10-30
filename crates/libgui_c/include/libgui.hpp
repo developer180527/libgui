@@ -709,6 +709,18 @@ public:
         });
     }
 
+    // Markdown; returns the link clicked this frame, or "" for none. A link
+    // longer than 4 KB comes back cut short.
+    std::string markdown(const char* key, const char* source) {
+        std::string link(4096, '\0');
+        uint64_t n = libgui_markdown(h_, key, source, link.data(), static_cast<uint64_t>(link.size()));
+        link.resize(n < link.size() ? static_cast<std::size_t>(n) : link.size() - 1);
+        return link;
+    }
+    LibguiRichResponse rich_text(const char* key, const LibguiTextRun* runs, uint64_t count, uint32_t align = 0) {
+        return libgui_rich_text(h_, key, runs, count, align);
+    }
+
     // A widget you draw yourself, from a lambda. The lambda is copied to the
     // heap and deleted through `drop_user`, so it may capture freely.
     template <class F>

@@ -28,6 +28,7 @@ mod modal;
 mod meter;
 mod paint_arena;
 mod painter;
+mod rich;
 mod profile;
 pub mod render_contract;
 mod path;
@@ -83,7 +84,8 @@ pub use font::{FontRasterizer, FontSource, FontStack, GlyphBitmap, LineMetrics, 
 pub use font::FontdueRasterizer;
 #[cfg(feature = "shape")]
 pub use shape::{ShapeRasterizer, TextDirection};
-pub use text::{Atlas, AtlasPage, FontError, FontId, Fonts, TextSpan, DEFAULT_TAB_WIDTH};
+pub use rich::{layout as rich_layout, min_width as rich_min_width, RichLayout, RichPiece, RichResponse, RichText, TextRun};
+pub use text::{Atlas, AtlasPage, FontError, FontId, FontRole, Fonts, TextSpan, DEFAULT_TAB_WIDTH};
 pub use table::{Column, Sort, TableOptions, TableResponse, TableState};
 pub use text_arena::{FrameText, PaintText};
 pub use theme::{

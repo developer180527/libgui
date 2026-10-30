@@ -82,6 +82,7 @@ crate:
 | `libgui_soft` | CPU renderer, for pixel-exact tests |
 | `libgui_units` | expression evaluator with units, for number fields |
 | `libgui_sysfonts` | the system's installed fonts, as a fallback for scripts yours lack |
+| `libgui_markdown` | Markdown drawn with libgui's widgets and rich text |
 | `libgui_nodes` | node-graph editing |
 | `libgui_c` | the C ABI and the C++ header |
 
@@ -880,6 +881,62 @@ shape the run as right to left; its default mirrors them for you.
 **Sharing fonts between windows.** `Ui::sharing_fonts(&other)` makes windows
 share one font system and atlas, so glyphs are rasterised and uploaded once.
 
+**Font roles.** Bold, italic and code text each need a face of their own:
+
+```rust
+let bold = ui.fonts.add_font(inter_bold)?;
+ui.set_font_role(FontRole::Bold, bold);
+ui.set_font_role(FontRole::Mono, ui.fonts.add_font(jetbrains_mono)?);
+let f = ui.font_for(FontRole::BoldItalic);   // bold italic, else bold, else body
+```
+
+- The roles are `Body` (the same as `ui.font`), `Bold`, `Italic`,
+  `BoldItalic` and `Mono`.
+- A role not set **falls back** to the body face, so text asked for in bold is
+  always drawn, if plainly. Bold italic tries bold first.
+- `TextAreaOptions { mono: true, .. }` draws a code editor in the mono face.
+- For a fallback chain per role (a bold CJK face too), add a `FontStack` with
+  `ui.fonts.add_rasterizer`.
+
+**Rich text.** One paragraph in several faces, sizes and colours, wrapped as
+one:
+
+```rust
+let mut rich = RichText::new();
+rich.push(TextRun::new("Saved to ", ui.font, 14.0, text))
+    .push(TextRun { tag: 1, underline: true, ..TextRun::new("report.pdf", ui.font_for(FontRole::Bold), 14.0, accent) });
+let r = ui.rich_text("status", Rc::new(rich));
+if r.clicked_tag == 1 { open_report(); }
+```
+
+- Words wrap where a plain paragraph's would: at spaces, after hyphens,
+  between ideographs. A word made of two runs ("**bold**text") stays whole.
+- Each line's runs share a **baseline**, so a larger run or a code run sits on
+  the line.
+- A run can have a `background` (inline code), `underline`, `strike`, and a
+  `tag`. Tagged runs are clickable: the response reports `hovered_tag` and
+  `clicked_tag`, and the cursor turns to a pointer over them.
+- `rich_layout` and `p.rich` lay out and draw rich text inside your own widget.
+- Each run is shaped by itself, so no kerning or ligature crosses a run, and
+  a right-to-left word is ordered within its run.
+
+**Markdown.** The `libgui_markdown` crate draws CommonMark with GitHub's
+tables, strikethrough and task lists:
+
+```rust
+let doc = libgui_markdown::Markdown::parse(readme);    // when the text changes
+let r = doc.show(ui, "readme");                        // every frame
+if let Some(url) = r.clicked_link { open(url); }       // libgui opens nothing
+```
+
+- It is built from libgui's own widgets: rich text in the font roles,
+  containers for lists, quotes and tables, so it follows the theme and scale.
+- `show_with` takes `MarkdownOptions`: `highlight` colours code blocks (it is
+  given the fence's language), and `image` turns an image URL into a texture
+  you have loaded. Without it, an image shows its alt text.
+- Raw HTML is shown as text. There are no footnotes or math, and a long code
+  line is clipped rather than scrolled.
+
 ## 12. Docking and multiple windows
 
 ### The model
@@ -1314,6 +1371,12 @@ Everything an application or a custom widget needs (§16 lists it all):
 - **Coloured text:** `libgui_painter_text_spans`, and
   `libgui_text_area_highlighted` with a `LibguiHighlightFn` for syntax
   highlighting (a C++ lambda through `ui.text_area(key, s, opts, fn)`).
+- **Font roles, rich text, Markdown:** `libgui_set_font_role(ui, role,
+  fonts, lens, count, system_fonts)`; `libgui_rich_text` over an array of
+  `LibguiTextRun` (zeros mean the theme's size and colour), reporting
+  `hovered_tag` and `clicked_tag`; `libgui_markdown(ui, key, source, link,
+  cap)`, which parses only when the source changes and writes back a clicked
+  link. C++: `ui.markdown(key, src)` returns the clicked link.
 - **Right-to-left text:** there is nothing to call; every widget and
   `libgui_painter_text*` lays it out as Rust does (§11).
 - **Output:** every form of frame output.
@@ -1407,6 +1470,9 @@ Rust names are methods on `Ui` unless stated otherwise. C names drop the
 | filled shapes | `fill_polygon`, `fill_polygon_with_holes`, `fill_mesh` | `painter_fill_polygon`, `painter_fill_polygon_with_holes`, `painter_fill_mesh` |
 | dashes, turning | `dashed_line`, `dashed_polyline`, `image_rotated`, `text_rotated` | `painter_dashed_line`, `painter_dashed_polyline`, `painter_image_rotated`, `painter_text_rotated` |
 | coloured text | `text_spans` + `TextSpan` | `painter_text_spans` + `LibguiTextSpan` |
+| font roles | `set_font_role`, `font_for`, `FontRole` | `set_font_role` |
+| rich text | `rich_text(_with)` + `RichText`/`TextRun`, `rich_layout`, `p.rich` | `rich_text` + `LibguiTextRun` |
+| Markdown | `libgui_markdown::Markdown::parse`, `show(_with)` | `markdown` |
 | focus | `focused`, `set_focus`, `scroll_to` | `focused`, `set_focus`, `scroll_to` |
 | raw input | `key_pressed`, `key_down`, `button_down`, `button_pressed`, `hover_time`, `pointer_velocity` | `key_pressed`, `key_down`, `pointer_button_down`, `pointer_button_pressed`, `hover_time`, `pointer_velocity` |
 | pointer lock | `request_pointer_lock` | `request_pointer_lock` |
@@ -1453,7 +1519,8 @@ The full signatures are in rustdoc (`cargo doc -p libgui --open`) and in
   ideographs); there is no hyphenation and no Thai or Khmer word breaking.
 - There is no double-click to select a word.
 - The caret moves by `char` and can split an emoji sequence.
-- There is one font role per `Ui`.
+- Rich text shapes each run by itself: no kerning or ligature crosses a run,
+  and right-to-left order is kept within a run, not across runs.
 - System fonts are read without shaping, so Arabic and Indic text drawn from
   them is unjoined (give libgui a `ShapeRasterizer` for those scripts), and
   colour emoji fonts are not drawn.

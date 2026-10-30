@@ -696,7 +696,8 @@ typedef struct {
     float    height;
     uint8_t  wrap;           /* 1 by default */
     uint8_t  line_numbers;
-    uint8_t  _pad[2];
+    uint8_t  mono;           /* the mono face (font role 4), for code */
+    uint8_t  _pad[1];
 } LibguiTextAreaOptions;
 
 void               libgui_text_area_options_default(LibguiTextAreaOptions* out);
@@ -1406,6 +1407,49 @@ LibguiUi* libgui_ui_new_with_fallbacks(const uint8_t* const* fonts, const uint64
 LibguiUi* libgui_ui_new_with_system_fonts(const uint8_t* const* fonts, const uint64_t* lens, uint64_t count,
                                           const char* language);
 
+/* --- Font roles, rich text, Markdown ---------------------------------------- */
+
+/* The faces bold, italic and code text are drawn in. role: 0 body, 1 bold,
+ * 2 italic, 3 bold italic, 4 mono. `fonts` is a fallback chain; system_fonts
+ * puts the system's installed fonts after it. A role not set falls back
+ * (bold italic to bold, then everything to the body face). 1, or 0 with the
+ * reason in libgui_last_error. */
+uint8_t libgui_set_font_role(LibguiUi* ui, uint32_t role, const uint8_t* const* fonts, const uint64_t* lens,
+                             uint64_t count, uint8_t system_fonts);
+
+/* One stretch of rich text in one style. Zeros mean the theme's: size 0 is
+ * the theme's font size, colour alpha 0 the theme's text colour, background
+ * alpha 0 none. A nonzero tag makes the run clickable (a link). */
+typedef struct {
+    const char* text;
+    uint32_t    role;        /* 0 body, 1 bold, 2 italic, 3 bold italic, 4 mono */
+    float       size;
+    LibguiColor color;
+    LibguiColor background;
+    uint8_t     underline;
+    uint8_t     strike;
+    uint8_t     _pad[2];
+    uint32_t    tag;
+} LibguiTextRun;
+
+typedef struct {
+    LibguiResponse response;
+    uint32_t       hovered_tag;  /* the tagged run under the pointer, or 0 */
+    uint32_t       clicked_tag;  /* the tagged run clicked this frame, or 0 */
+} LibguiRichResponse;
+
+/* A paragraph of `count` runs in their own faces, sizes and colours, wrapped
+ * as one to the width it is given, on one baseline per line. align: 0 start,
+ * 1 centre, 2 end. */
+LibguiRichResponse libgui_rich_text(LibguiUi* ui, const char* key, const LibguiTextRun* runs, uint64_t count,
+                                    uint32_t align);
+
+/* Markdown (CommonMark with tables, strikethrough, task lists), filling the
+ * width it is given. Parsed only when `source` changes. A link clicked this
+ * frame is written to `link`: snprintf contract, 0 when nothing was clicked.
+ * libgui never opens it. Images show their alt text. */
+uint64_t libgui_markdown(LibguiUi* ui, const char* key, const char* source, char* link, uint64_t link_cap);
+
 /* Struct sizes, for the static_asserts below. */
 uint64_t libgui_sizeof_response(void);
 uint64_t libgui_sizeof_tree_response(void);
@@ -1440,6 +1484,8 @@ uint64_t libgui_sizeof_text_area_options(void);
 uint64_t libgui_sizeof_validated_options(void);
 uint64_t libgui_sizeof_validated_response(void);
 uint64_t libgui_sizeof_text_span(void);
+uint64_t libgui_sizeof_text_run(void);
+uint64_t libgui_sizeof_rich_response(void);
 "##;
 
 const FOOTER: &str = r##"

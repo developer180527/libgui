@@ -307,3 +307,23 @@ fn text_areas(ui: &mut Ui, note: &mut String, code: &mut String) {
     // A script: hard lines that scroll sideways, with line numbers.
     ui.text_area_with("script", code, TextAreaOptions { wrap: false, line_numbers: true, ..Default::default() });
 }
+
+#[allow(dead_code)]
+fn font_roles(ui: &mut Ui, inter_bold: &[u8], jetbrains_mono: &[u8]) -> Result<(), FontError> {
+    let bold = ui.fonts.add_font(inter_bold)?;
+    ui.set_font_role(FontRole::Bold, bold);
+    ui.set_font_role(FontRole::Mono, ui.fonts.add_font(jetbrains_mono)?);
+    let f = ui.font_for(FontRole::BoldItalic); // bold italic, else bold, else body
+    let _ = f;
+    Ok(())
+}
+
+#[allow(dead_code)]
+fn rich_text(ui: &mut Ui, text: Color, accent: Color, open_report: impl Fn()) {
+    use std::rc::Rc;
+    let mut rich = RichText::new();
+    rich.push(TextRun::new("Saved to ", ui.font, 14.0, text))
+        .push(TextRun { tag: 1, underline: true, ..TextRun::new("report.pdf", ui.font_for(FontRole::Bold), 14.0, accent) });
+    let r = ui.rich_text("status", Rc::new(rich));
+    if r.clicked_tag == 1 { open_report(); }
+}

@@ -342,6 +342,17 @@ int main(int argc, char** argv) {
         CHECK(asked >= 2 && !ui.poisoned(), "a highlighted C++ text area was not asked for its lines");
     }
 
+    // Markdown: drawn, and no link clicked.
+    {
+        std::string clicked;
+        for (int i = 0; i < 2; ++i) {
+            ui.begin_frame(400.0f, 300.0f, 1.0f, 1.0f / 60.0f);
+            clicked = ui.markdown("doc", "# Hello\n\nSome **bold** and a [link](https://x.io).");
+            ui.end_frame();
+        }
+        CHECK(clicked.empty() && !ui.poisoned(), "C++ markdown misbehaved");
+    }
+
     // Type-ahead with a lambda for the labels.
     {
         const char* parts[] = {"Axle", "bearing", "Bolt", "Bracket"};
