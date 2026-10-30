@@ -219,6 +219,41 @@ fn reorder_visual(idx: &mut [usize], levels: &mut [u8]) {
     }
 }
 
+/// A colour for a byte range of text: `start..end`, in bytes of the string
+/// it is drawn with. For syntax highlighting, search hits, diffs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TextSpan {
+    pub start: usize,
+    pub end: usize,
+    pub color: Color,
+}
+
+impl TextSpan {
+    pub fn new(range: std::ops::Range<usize>, color: Color) -> Self {
+        Self { start: range.start, end: range.end, color }
+    }
+}
+
+/// How the glyphs of one draw are coloured: by `spans` (the last holding a
+/// glyph's first byte, offset by `base` into the spans' string), else `color`.
+#[derive(Clone, Copy)]
+pub(crate) struct Ink<'a> {
+    pub color: Color,
+    pub spans: &'a [TextSpan],
+    pub base: usize,
+}
+
+impl Ink<'_> {
+    pub fn plain(color: Color) -> Ink<'static> {
+        Ink { color, spans: &[], base: 0 }
+    }
+
+    pub fn at(&self, cluster: usize) -> Color {
+        let b = cluster + self.base;
+        self.spans.iter().rev().find(|t| t.start <= b && b < t.end).map_or(self.color, |t| t.color)
+    }
+}
+
 /// One glyph of a line laid out in visual order: its index in the run, its
 /// pen x from the line's left edge (raster px), and whether it runs right to
 /// left.
@@ -1232,7 +1267,7 @@ impl FontsInner {
             };
             let at = Vec2::new(x, r.y + lh * i as f32);
             if bidi {
-                self.draw_in(dl, font, size, at, color, text, (l.start as usize, l.end as usize));
+                self.draw_in(dl, font, size, at, Ink::plain(color), text, (l.start as usize, l.end as usize));
             } else {
                 self.draw(dl, font, size, at, color, slice);
             }
@@ -1242,6 +1277,11 @@ impl FontsInner {
     /// Draw one line of text with its top-left at `pos` (logical px). Glyphs
     /// are rasterised at physical resolution and pixel-snapped.
     pub fn draw(&mut self, dl: &mut DrawList, font: FontId, size: f32, pos: Vec2, color: Color, text: &str) {
+        self.draw_ink(dl, font, size, pos, Ink::plain(color), text);
+    }
+
+    /// [`draw`](Self::draw), each glyph coloured by `ink`.
+    pub(crate) fn draw_ink(&mut self, dl: &mut DrawList, font: FontId, size: f32, pos: Vec2, ink: Ink, text: &str) {
         let s = self.text_scale();
         let px = self.px(size);
         let r = self.fit(size, px);
@@ -1265,7 +1305,7 @@ impl FontsInner {
         // (which needs `&mut self`) costs no copy.
         let run = self.run(font, px, text);
         if run.levels.is_some() {
-            self.draw_placed(dl, font, px, (x0, baseline), r, s, snap, color, &run, Self::place_line(&run, text, 0, text.len()));
+            self.draw_placed(dl, font, px, (x0, baseline), r, s, snap, ink, &run, Self::place_line(&run, text, 0, text.len()));
             return;
         }
         for sg in run.glyphs.iter() {
@@ -1273,7 +1313,7 @@ impl FontsInner {
             if g.w > 0.0 {
                 let gx = round(x0 + (x + sg.offset.x) * r) + g.left;
                 let gy = baseline + round(sg.offset.y * r) - (g.bottom + g.h);
-                dl.glyph(Rect::new(gx / s, gy / s, g.w / s, g.h / s), g.page, g.uv, color);
+                dl.glyph(Rect::new(gx / s, gy / s, g.w / s, g.h / s), g.page, g.uv, ink.at(sg.cluster as usize));
             }
             x += sg.advance;
         }
@@ -1281,7 +1321,7 @@ impl FontsInner {
 
     /// Draw the row `s..e` of a bidi `line`, its left edge at `pos`.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn draw_in(&mut self, dl: &mut DrawList, font: FontId, size: f32, pos: Vec2, color: Color, line: &str, (s0, e0): (usize, usize)) {
+    pub(crate) fn draw_in(&mut self, dl: &mut DrawList, font: FontId, size: f32, pos: Vec2, ink: Ink, line: &str, (s0, e0): (usize, usize)) {
         let s = self.text_scale();
         let px = self.px(size);
         let r = self.fit(size, px);
@@ -1292,13 +1332,13 @@ impl FontsInner {
         let origin = (round(pos.x * s), round(pos.y * s + asc * r));
         let run = self.run(font, px, line);
         let placed = Self::place_line(&run, line, s0, e0);
-        self.draw_placed(dl, font, px, origin, r, s, snap, color, &run, placed);
+        self.draw_placed(dl, font, px, origin, r, s, snap, ink, &run, placed);
     }
 
     /// Glyphs already put in visual order, drawn from `origin` (raster px:
     /// the left edge and the baseline).
     #[allow(clippy::too_many_arguments)]
-    fn draw_placed(&mut self, dl: &mut DrawList, font: FontId, px: f32, origin: (f32, f32), r: f32, s: f32, snap: bool, color: Color, run: &Run, placed: Vec<Placed>) {
+    fn draw_placed(&mut self, dl: &mut DrawList, font: FontId, px: f32, origin: (f32, f32), r: f32, s: f32, snap: bool, ink: Ink, run: &Run, placed: Vec<Placed>) {
         let round = |v: f32| if snap { v.round() } else { v };
         for p in placed {
             let sg = run.glyphs[p.i];
@@ -1306,7 +1346,7 @@ impl FontsInner {
             if g.w > 0.0 {
                 let gx = round(origin.0 + (p.x + sg.offset.x) * r) + g.left;
                 let gy = origin.1 + round(sg.offset.y * r) - (g.bottom + g.h);
-                dl.glyph(Rect::new(gx / s, gy / s, g.w / s, g.h / s), g.page, g.uv, color);
+                dl.glyph(Rect::new(gx / s, gy / s, g.w / s, g.h / s), g.page, g.uv, ink.at(sg.cluster as usize));
             }
         }
     }
@@ -1505,8 +1545,8 @@ impl Fonts {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn draw_in(&self, dl: &mut DrawList, font: FontId, size: f32, pos: Vec2, color: Color, line: &str, row: (usize, usize)) {
-        self.0.borrow_mut().draw_in(dl, font, size, pos, color, line, row);
+    pub(crate) fn draw_in(&self, dl: &mut DrawList, font: FontId, size: f32, pos: Vec2, ink: Ink, line: &str, row: (usize, usize)) {
+        self.0.borrow_mut().draw_in(dl, font, size, pos, ink, line, row);
     }
 
     pub fn wrap_lines_for_test(&self, font: FontId, size: f32, text: &str, max: f32) -> Vec<String> {
@@ -1541,6 +1581,19 @@ impl Fonts {
 
     pub fn draw(&self, dl: &mut DrawList, font: FontId, size: f32, pos: Vec2, color: Color, text: &str) {
         self.0.borrow_mut().draw(dl, font, size, pos, color, text);
+    }
+
+    pub(crate) fn draw_ink_at(&self, dl: &mut DrawList, font: FontId, size: f32, pos: Vec2, ink: Ink, text: &str) {
+        self.0.borrow_mut().draw_ink(dl, font, size, pos, ink, text);
+    }
+
+    /// [`draw`](Self::draw) in several colours: each glyph takes the colour
+    /// of the last span in `spans` that holds its first byte, `color` where
+    /// none does. Shaped as one run, so kerning, ligatures and right-to-left
+    /// order are the same as in one colour.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_spans(&self, dl: &mut DrawList, font: FontId, size: f32, pos: Vec2, color: Color, text: &str, spans: &[TextSpan]) {
+        self.0.borrow_mut().draw_ink(dl, font, size, pos, Ink { color, spans, base: 0 }, text);
     }
 
     /// One line of text centred on `center`, turned by `rot` about it.

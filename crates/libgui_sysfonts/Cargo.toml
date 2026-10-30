@@ -1,0 +1,14 @@
+[package]
+name = "libgui_sysfonts"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+# No GPU crate here, so this is lower than the workspace floor.
+rust-version = "1.87"
+description = "The fonts installed on the system, as a fallback source for libgui: a Chinese filename draws in PingFang or YaHei instead of nothing."
+
+[dependencies]
+libgui = { path = "../libgui" }
+fontdb = "0.24"
+ttf-parser = "0.25"

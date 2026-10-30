@@ -276,6 +276,19 @@ float libgui_painter_dashed_polyline(LibguiPainter* p, const float* points, uint
  * pixel grid and turned text cannot be, so it is a shade softer. */
 void libgui_painter_text_rotated(LibguiPainter* p, float cx, float cy, float size, LibguiColor c,
                                  const char* text, float radians);
+/* A colour for the bytes [start, end) of a string: syntax highlighting,
+ * search hits, diffs. */
+typedef struct {
+    uint64_t    start;
+    uint64_t    end;
+    LibguiColor color;
+} LibguiTextSpan;
+/* Text in several colours, top-left at (x, y): each glyph takes the colour of
+ * the last span holding its first byte, `c` where none does. Spans may overlap
+ * and need not be sorted. Shaped as one run, so it lays out exactly as one
+ * colour would: kerning, ligatures and right-to-left order are unchanged. */
+void libgui_painter_text_spans(LibguiPainter* p, float x, float y, float size, LibguiColor c,
+                               const char* text, const LibguiTextSpan* spans, uint64_t count);
 void libgui_painter_bezier(LibguiPainter* p, float x0, float y0, float cx0, float cy0,
                            float cx1, float cy1, float x1, float y1, float width, LibguiColor c);
 /* Leaves sideways and arrives sideways, the way a node graph draws a link. */
@@ -661,6 +674,21 @@ typedef struct {
 void               libgui_text_area_options_default(LibguiTextAreaOptions* out);
 LibguiTextResponse libgui_text_area_with(LibguiUi* ui, const char* key, char* buf, uint64_t cap,
                                          const LibguiTextAreaOptions* opts, uint64_t* out_len);
+/* Asked for the colours of one line of a highlighted text area: its 0-based
+ * index and its text without the newline (NUL-terminated, `len` bytes, valid
+ * only for the call). Write up to `cap` spans, in bytes of `line`, into `out`
+ * and return how many there are; return more than `cap` to be asked again
+ * with room for that many. DO NOT call libgui from here with the same handle:
+ * such calls are refused. */
+typedef uint64_t (*LibguiHighlightFn)(void* user, uint64_t line_index, const char* line, uint64_t len,
+                                      LibguiTextSpan* out, uint64_t cap);
+/* A text area whose text is coloured by `highlight`, asked once a frame for
+ * each line on screen and only those, so a long file costs a screenful. A
+ * highlighter with state across lines keeps it by line index. NULL draws
+ * plain text. */
+LibguiTextResponse libgui_text_area_highlighted(LibguiUi* ui, const char* key, char* buf, uint64_t cap,
+                                                const LibguiTextAreaOptions* opts,
+                                                LibguiHighlightFn highlight, void* user, uint64_t* out_len);
 /* The whole text of a field that did not fit, this frame. snprintf contract;
  * 0 when nothing overflowed. */
 uint64_t           libgui_text_overflow(LibguiUi* ui, uint64_t id, char* buf, uint64_t cap);
@@ -1341,6 +1369,14 @@ void libgui_close_layer(LibguiUi* ui);
  * first face, so adding a CJK fallback does not change the height of a line of
  * Latin. Which fonts go in the chain is yours: libgui reads no files. */
 LibguiUi* libgui_ui_new_with_fallbacks(const uint8_t* const* fonts, const uint64_t* lens, uint64_t count);
+/* As above, then the fonts INSTALLED ON THE SYSTEM for whatever none of yours
+ * can draw: a Chinese filename in PingFang or YaHei instead of nothing. Loaded
+ * lazily: the first character of a script finds its font (0.1-0.2 s for a CJK
+ * one, once). `language` ("ja", "ko", "zh-Hant", or NULL for Simplified
+ * Chinese) picks which Han glyphs to prefer. NULL if this library was built
+ * without its system-fonts feature. */
+LibguiUi* libgui_ui_new_with_system_fonts(const uint8_t* const* fonts, const uint64_t* lens, uint64_t count,
+                                          const char* language);
 
 /* Struct sizes, for the static_asserts below. */
 uint64_t libgui_sizeof_response(void);
@@ -1375,6 +1411,7 @@ uint64_t libgui_sizeof_atlas_page(void);
 uint64_t libgui_sizeof_text_area_options(void);
 uint64_t libgui_sizeof_validated_options(void);
 uint64_t libgui_sizeof_validated_response(void);
+uint64_t libgui_sizeof_text_span(void);
 
 /* === BEGIN GENERATED — from src/table.rs === */
 

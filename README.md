@@ -69,8 +69,9 @@ C and C++ hosts: `add_subdirectory(crates/libgui_c)`, then link
   - IME composition, touch.
 - **Motion and idling.** Easing and springs; the window sleeps when nothing
   moves.
-- **Text.** Font fallback chains, real shaping with rustybuzz, and
-  right-to-left and mixed-direction text (Unicode bidi).
+- **Text.** Font fallback chains with the system's fonts behind them, real
+  shaping with rustybuzz, right-to-left and mixed-direction text (Unicode
+  bidi), and coloured spans for syntax highlighting.
 - **Rendering.** One shader in five languages and a wgpu backend. A mesh form
   serves renderers that cannot instance (bgfx, GLES2), and a CPU reference
   renderer gives pixel-exact tests.
@@ -102,6 +103,7 @@ The full list is in [MANUAL §17](MANUAL.md#17-limitations).
 | `libgui_winit` | winit event translation; a template for other hosts |
 | `libgui_soft` | CPU reference renderer, for golden-image tests |
 | `libgui_units` | Expression evaluator with units, plus a `number_input` |
+| `libgui_sysfonts` | The system's installed fonts as a lazy fallback, so text in any script draws |
 | `libgui_nodes` | Node-graph editing, built on libgui |
 | `libgui_c` | C ABI (`libgui.h`) and C++ header (`libgui.hpp`), with CMake and vcpkg packaging |
 

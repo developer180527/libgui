@@ -182,3 +182,60 @@ pub unsafe extern "C" fn libgui_ui_new_with_fallbacks(
         }
     }
 }
+
+/// [`libgui_ui_new_with_fallbacks`], then **the fonts installed on the
+/// system** for whatever none of yours can draw: a Chinese filename in
+/// PingFang or YaHei instead of nothing. Nothing is loaded up front; the
+/// first character of a script finds its font (0.1–0.2 s for a CJK one,
+/// once). `language` (a BCP-47 tag such as `"ja"` or `"zh-Hant"`, or null)
+/// picks which Han glyphs to prefer.
+///
+/// Null with the reason in `libgui_last_error` on failure, or when this
+/// library was built without its `system-fonts` feature.
+///
+/// # Safety
+/// As [`libgui_ui_new_with_fallbacks`]; `language` null or a C string.
+#[no_mangle]
+pub unsafe extern "C" fn libgui_ui_new_with_system_fonts(
+    fonts: *const *const u8,
+    lens: *const u64,
+    count: u64,
+    language: *const std::os::raw::c_char,
+) -> *mut LibguiUi {
+    let what = "libgui_ui_new_with_system_fonts";
+    if fonts.is_null() || lens.is_null() || count == 0 {
+        set_error(&format!("{what}: no fonts"));
+        return std::ptr::null_mut();
+    }
+    let mut owned: Vec<&[u8]> = Vec::with_capacity(count as usize);
+    for i in 0..count as usize {
+        let (p, n) = unsafe { (*fonts.add(i), *lens.add(i)) };
+        if p.is_null() || n == 0 {
+            set_error(&format!("{what}: a font is empty"));
+            return std::ptr::null_mut();
+        }
+        owned.push(unsafe { std::slice::from_raw_parts(p, n as usize) });
+    }
+    let language = unsafe { crate::convert::str_from(language) };
+    #[cfg(feature = "system-fonts")]
+    {
+        let stack = match libgui::FontStack::from_fonts(&owned) {
+            Ok(s) => s,
+            Err(e) => {
+                set_error(&format!("{what}: {e}"));
+                return std::ptr::null_mut();
+            }
+        };
+        let mut sys = libgui_sysfonts::SystemFonts::new();
+        if let Some(tag) = language {
+            sys = sys.with_language(tag);
+        }
+        crate::handle::into_handle(Ui::with_rasterizer(Theme::dark(), Box::new(stack.with_source(Box::new(sys)))))
+    }
+    #[cfg(not(feature = "system-fonts"))]
+    {
+        let _ = (owned, language);
+        set_error(&format!("{what}: built without the system-fonts feature"));
+        std::ptr::null_mut()
+    }
+}

@@ -21,6 +21,28 @@ Newest first.
 
 ---
 
+## Unreleased: coloured text and system fonts
+
+**Rust and C.** Additions, plus one internal type change a custom font
+backend can see.
+
+- **Coloured spans.** `TextSpan { start, end, color }`, `p.text_spans(..)`
+  and `ui.text_area_highlighted(key, text, opts, |line_index, line, spans| ..)`
+  for syntax highlighting. C: `LibguiTextSpan`, `libgui_painter_text_spans`,
+  `libgui_text_area_highlighted` with a `LibguiHighlightFn`; C++ a
+  `text_area` overload taking a lambda.
+- **System fonts.** New crate `libgui_sysfonts`, and in the core the trait
+  `FontSource` and `FontStack::with_source`. `FontdueRasterizer::from_collection`
+  reads one face of a `.ttc`. C: `libgui_ui_new_with_system_fonts`.
+
+**What you change:**
+- **Vendoring:** `libgui_c` now depends on `libgui_sysfonts`, which brings
+  `fontdb`, `ttf-parser` and `memmap2`. A host that must not read the
+  filesystem builds `libgui_c` with `default-features = false`;
+  `libgui_ui_new_with_system_fonts` then returns null with a reason.
+- `FontStack::faces()` can now grow while the app runs, when its source adds
+  a face. Nothing else about a stack without a source changes.
+
 ## Unreleased: host queries and dock tabs
 
 **Rust only.** Things to check when you move past this:

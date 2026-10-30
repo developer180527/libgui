@@ -23,6 +23,7 @@
 #include <string_view>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace libgui {
 
@@ -187,6 +188,21 @@ uint8_t validate_trampoline(void* user, const char* text, uint64_t len,
     }
     if (at) *at = pos;
     return 0;
+}
+
+// The highlighter fills a vector; libgui gets as many as fit, and the count,
+// so it asks again with room when they did not. A throw colours nothing.
+template <class F>
+uint64_t highlight_trampoline(void* user, uint64_t index, const char* line, uint64_t len,
+                              LibguiTextSpan* out, uint64_t cap) {
+    std::vector<LibguiTextSpan> spans;
+    try {
+        (*static_cast<F*>(user))(index, std::string_view(line, static_cast<std::size_t>(len)), spans);
+    } catch (...) {
+        return 0;
+    }
+    for (std::size_t i = 0; i < spans.size() && i < cap; ++i) out[i] = spans[i];
+    return spans.size();
 }
 }  // namespace detail
 
@@ -678,6 +694,18 @@ public:
     LibguiTextResponse text_area(const char* key, std::string& s, const LibguiTextAreaOptions& opts) {
         return edit(s, [&](char* buf, uint64_t cap, uint64_t* need) {
             return libgui_text_area_with(h_, key, buf, cap, &opts, need);
+        });
+    }
+    // Coloured by `highlight(index, line, spans)`, asked for each line on
+    // screen: push LibguiTextSpan{start, end, colour} in bytes of `line`.
+    template <class F>
+    LibguiTextResponse text_area(const char* key, std::string& s, const LibguiTextAreaOptions& opts,
+                                 F&& highlight) {
+        using Fn = std::remove_reference_t<F>;
+        void* user = const_cast<void*>(static_cast<const void*>(&highlight));
+        return edit(s, [&](char* buf, uint64_t cap, uint64_t* need) {
+            return libgui_text_area_highlighted(h_, key, buf, cap, &opts, &detail::highlight_trampoline<Fn>,
+                                                user, need);
         });
     }
 

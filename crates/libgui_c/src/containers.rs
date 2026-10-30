@@ -842,6 +842,43 @@ pub unsafe extern "C" fn libgui_painter_text_rotated(
     }
 }
 
+/// Text in several colours, its top-left at `(x, y)`: each glyph takes the
+/// colour of the last of the `count` spans holding its first byte, `c` where
+/// none does. Shaped as one run, so it lays out exactly as one colour would.
+///
+/// # Safety
+/// As [`libgui_painter_measure`]; `spans` null or `count` valid spans.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn libgui_painter_text_spans(
+    p: *mut LibguiPainter,
+    x: f32,
+    y: f32,
+    size: f32,
+    c: LibguiColor,
+    text: *const std::os::raw::c_char,
+    spans: *const crate::text::LibguiTextSpan,
+    count: u64,
+) {
+    let text = unsafe { crate::convert::str_or_empty(text, "libgui_painter_text_spans") };
+    let spans: &[crate::text::LibguiTextSpan] = if spans.is_null() || count == 0 { &[] } else { unsafe { std::slice::from_raw_parts(spans, count as usize) } };
+    if let Some(p) = painter(p) {
+        // A handful of spans goes on the stack; more are copied once.
+        let mut small = [libgui::TextSpan::new(0..0, Color::WHITE); 32];
+        let owned: Vec<libgui::TextSpan>;
+        let converted: &[libgui::TextSpan] = if spans.len() <= small.len() {
+            for (d, s) in small.iter_mut().zip(spans) {
+                *d = (*s).into();
+            }
+            &small[..spans.len()]
+        } else {
+            owned = spans.iter().map(|&s| s.into()).collect();
+            &owned
+        };
+        p.text_spans(Vec2::new(x, y), size, color(c), text, converted);
+    }
+}
+
 /// The render contract this library draws to (`libgui::render_contract::
 /// CONTRACT_VERSION`). A host with its own port of the shader checks it at
 /// start-up, the way it checks `libgui_abi_version`: a new version means the

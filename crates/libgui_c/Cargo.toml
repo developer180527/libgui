@@ -29,3 +29,12 @@ libgui_units = { path = "../libgui_units" }
 # The CPU reference renderer, for the conformance kit: a host diffs its own
 # pixels against these. Pure CPU, no dependencies of its own beyond libgui.
 libgui_soft = { path = "../libgui_soft" }
+# The fonts installed on the system, as a fallback for scripts the app's own
+# fonts lack. Behind `system-fonts` (on by default): a host that must never
+# read the filesystem turns it off, and libgui_ui_new_with_system_fonts then
+# refuses.
+libgui_sysfonts = { path = "../libgui_sysfonts", optional = true }
+
+[features]
+default = ["system-fonts"]
+system-fonts = ["dep:libgui_sysfonts"]

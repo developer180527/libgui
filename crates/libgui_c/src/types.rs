@@ -227,4 +227,5 @@ sizeof_fns! {
     libgui_sizeof_toast_response => crate::toast::LibguiToastResponse,
     libgui_sizeof_validated_options => crate::text::LibguiValidatedOptions,
     libgui_sizeof_validated_response => crate::text::LibguiValidatedResponse,
+    libgui_sizeof_text_span => crate::text::LibguiTextSpan,
 }

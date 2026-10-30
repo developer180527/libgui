@@ -216,7 +216,14 @@ pub unsafe extern "C" fn libgui_text_area_with(
     out_len: *mut u64,
 ) -> LibguiTextResponse {
     let key = unsafe { str_or_empty(key, "libgui_text_area_with") };
-    let o = match unsafe { opts.as_ref() } {
+    let o = unsafe { area_options(opts) };
+    unsafe { field(ui, "libgui_text_area_with", buf, cap, out_len, |u, t| u.text_area_with(key, t, o)) }
+}
+
+/// # Safety
+/// `opts` null or valid.
+unsafe fn area_options(opts: *const LibguiTextAreaOptions) -> libgui::TextAreaOptions {
+    match unsafe { opts.as_ref() } {
         Some(o) => libgui::TextAreaOptions {
             rows: o.rows as usize,
             // A plain number from C, not an enum: anything unknown fits.
@@ -229,8 +236,92 @@ pub unsafe extern "C" fn libgui_text_area_with(
             wrap: o.wrap != 0,
         },
         None => libgui::TextAreaOptions::default(),
+    }
+}
+
+/// A colour for the bytes `start..end` of a string: syntax highlighting.
+/// Mirrors [`libgui::TextSpan`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LibguiTextSpan {
+    pub start: u64,
+    pub end: u64,
+    pub color: crate::types::LibguiColor,
+}
+
+impl From<LibguiTextSpan> for libgui::TextSpan {
+    fn from(t: LibguiTextSpan) -> Self {
+        let c = t.color;
+        libgui::TextSpan { start: t.start as usize, end: t.end as usize, color: libgui::Color::rgba(c.r, c.g, c.b, c.a) }
+    }
+}
+
+/// Asked for the colours of one line of a highlighted text area: its 0-based
+/// index, and its text without the newline (NUL-terminated, `len` bytes,
+/// valid only for the call). Write up to `cap` spans, in bytes of `line`,
+/// into `out` and return how many there are; return more than `cap` to be
+/// asked again with room for that many. **Do not call libgui from here** with
+/// the same handle: such calls are refused.
+pub type LibguiHighlightFn = Option<
+    unsafe extern "C" fn(
+        user: *mut std::ffi::c_void,
+        line_index: u64,
+        line: *const c_char,
+        len: u64,
+        out: *mut LibguiTextSpan,
+        cap: u64,
+    ) -> u64,
+>;
+
+/// [`libgui_text_area_with`] whose text is coloured by `highlight`, asked
+/// once a frame for each line on screen (only those, so a long file costs a
+/// screenful). A null `highlight` draws plain text.
+///
+/// # Safety
+/// As [`libgui_text_area_with`]; `highlight` null or honouring
+/// [`LibguiHighlightFn`]'s contract.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn libgui_text_area_highlighted(
+    ui: *mut LibguiUi,
+    key: *const c_char,
+    buf: *mut c_char,
+    cap: u64,
+    opts: *const LibguiTextAreaOptions,
+    highlight: LibguiHighlightFn,
+    user: *mut std::ffi::c_void,
+    out_len: *mut u64,
+) -> LibguiTextResponse {
+    let what = "libgui_text_area_highlighted";
+    let key = unsafe { str_or_empty(key, what) };
+    let o = unsafe { area_options(opts) };
+    let Some(f) = highlight else {
+        return unsafe { field(ui, what, buf, cap, out_len, |u, t| u.text_area_with(key, t, o)) };
     };
-    unsafe { field(ui, "libgui_text_area_with", buf, cap, out_len, |u, t| u.text_area_with(key, t, o)) }
+    let mut scratch: Vec<LibguiTextSpan> = vec![LibguiTextSpan::default(); 64];
+    unsafe {
+        field(ui, what, buf, cap, out_len, |u, t| {
+            u.text_area_highlighted(key, t, o, |index, line, spans| {
+                let mut cline = line.as_bytes().to_vec();
+                cline.push(0);
+                // Everything through this handle is refused while the
+                // highlighter runs: libgui holds `&mut Ui` across the call.
+                let ask = |out: &mut Vec<LibguiTextSpan>| {
+                    (*ui).answering = true;
+                    let n = f(user, index as u64, cline.as_ptr() as *const c_char, line.len() as u64, out.as_mut_ptr(), out.len() as u64);
+                    (*ui).answering = false;
+                    n
+                };
+                let mut n = ask(&mut scratch) as usize;
+                if n > scratch.len() {
+                    // Asked again with room for all of them, within reason.
+                    scratch.resize(n.min(1 << 16), LibguiTextSpan::default());
+                    n = ask(&mut scratch) as usize;
+                }
+                spans.extend(scratch[..n.min(scratch.len())].iter().map(|&t| libgui::TextSpan::from(t)));
+            })
+        })
+    }
 }
 
 /// A drop-down over a `uint64_t` index the caller owns. `options` is an array

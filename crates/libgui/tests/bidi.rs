@@ -276,3 +276,21 @@ fn brackets_in_right_to_left_text_are_mirrored() {
     // In left-to-right text, nothing turns.
     assert_eq!(shown("a(b)"), "a(b)");
 }
+
+/// Colours follow the characters, not the screen: a span over the Hebrew word
+/// colours its three letters wherever the reordering put them.
+#[test]
+fn colours_follow_the_letters_through_reordering() {
+    let red = Color::hex(0xff0000).to_array();
+    let mut ui = ui();
+    ui.begin_frame(FrameInfo { screen_size: Vec2::new(400.0, 100.0), scale: 1.0, dt: 1.0 / 60.0 });
+    let text = "abc אבג";
+    ui.add_leaf(Id::new("t"), Layout::leaf(Size::Grow(1.0), Size::Fixed(20.0)), Vec2::ZERO, false, move |p, r| {
+        p.text_spans(Vec2::new(r.x, r.y), SIZE, Color::WHITE, text, &[TextSpan::new(4..text.len(), Color::hex(0xff0000))]);
+    });
+    let out = ui.end_frame();
+    for i in out.draw.instances.iter().filter(|i| i.params[3] == render_contract::PrimitiveKind::Glyph.code()) {
+        let hebrew = i.rect[2] >= 7.0;
+        assert_eq!(i.color == red, hebrew, "a glyph {} px wide has the wrong colour", i.rect[2]);
+    }
+}

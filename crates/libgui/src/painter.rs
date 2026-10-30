@@ -1,4 +1,5 @@
-use crate::{Axis, Color, DrawList, FontId, Fonts, Rect, TextureId, Theme, Vec2, PaintText};
+use crate::text::Ink;
+use crate::{Axis, Color, DrawList, FontId, Fonts, PaintText, Rect, TextSpan, TextureId, Theme, Vec2};
 
 /// Handed to paint callbacks after layout is solved. This is the
 /// "immediate" drawing layer: widgets and custom overlays (gizmo labels, graphs,
@@ -400,10 +401,38 @@ impl<'a> Painter<'a> {
     /// The byte range `row` of a bidi `line`, its left edge at `pos`: a
     /// wrapped row laid out as part of its paragraph, so its direction is the
     /// paragraph's.
-    pub(crate) fn text_in(&mut self, pos: Vec2, size: f32, color: Color, line: impl PaintText, row: (usize, usize)) {
+    pub(crate) fn text_in(&mut self, pos: Vec2, size: f32, ink: Ink, line: impl PaintText, row: (usize, usize)) {
         let arena: &'a [u8] = self.strs;
         let s = line.get(arena);
-        self.fonts.draw_in(self.draw, self.font, size, pos, color, s, row);
+        self.fonts.draw_in(self.draw, self.font, size, pos, ink, s, row);
+    }
+
+    /// Text in several colours, its top-left at `pos`: each glyph takes the
+    /// colour of the last span holding its first byte (`start..end` in bytes
+    /// of `text`), `color` where none does. Shaped as one run, so it reads
+    /// exactly as one colour would: kerning and ligatures cross span edges,
+    /// and right-to-left text keeps its order. The spans can overlap and need
+    /// not be sorted; a later one wins.
+    ///
+    /// ```no_run
+    /// # use libgui::*;
+    /// # fn f(p: &mut Painter, pos: Vec2) {
+    /// let line = "let x = \"hi\";";
+    /// let spans = [TextSpan::new(0..3, Color::hex(0xc678dd)), TextSpan::new(8..12, Color::hex(0x98c379))];
+    /// p.text_spans(pos, 13.0, Color::WHITE, line, &spans);
+    /// # }
+    /// ```
+    pub fn text_spans(&mut self, pos: Vec2, size: f32, color: Color, text: impl PaintText, spans: &[TextSpan]) {
+        let arena: &'a [u8] = self.strs;
+        let s = text.get(arena);
+        self.fonts.draw_spans(self.draw, self.font, size, pos, color, s, spans);
+    }
+
+    /// [`text`](Self::text) coloured by `ink`.
+    pub(crate) fn text_ink(&mut self, pos: Vec2, size: f32, ink: Ink, text: impl PaintText) {
+        let arena: &'a [u8] = self.strs;
+        let s = text.get(arena);
+        self.fonts.draw_ink_at(self.draw, self.font, size, pos, ink, s);
     }
 
     /// Left-aligned, vertically centred in `r`.

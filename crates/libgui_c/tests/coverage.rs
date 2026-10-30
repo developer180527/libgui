@@ -2683,3 +2683,135 @@ fn a_c_text_area_wraps() {
         libgui_ui_free(u);
     }
 }
+
+/// Coloured text from C: painter spans reach the glyphs, and a highlighted
+/// text area asks its callback for the lines on screen by index, asks again
+/// when it wanted more room, and refuses libgui calls made from inside it.
+#[test]
+fn c_text_spans_colour_the_glyphs() {
+    const RED: LibguiColor = LibguiColor { r: 1.0, g: 0.0, b: 0.0, a: 1.0 };
+    let glyph = libgui::render_contract::PrimitiveKind::Glyph.code();
+    let red_glyphs = |u: *mut LibguiUi| unsafe {
+        let mut n = 0u64;
+        let inst = libgui_frame_instances(u, &mut n) as *const libgui::Instance;
+        std::slice::from_raw_parts(inst, n as usize).iter().filter(|i| i.params[3] == glyph && i.color == [1.0, 0.0, 0.0, 1.0]).count()
+    };
+    extern "C" fn paint(p: *mut LibguiPainter, r: LibguiRect, _user: *mut c_void) {
+        let white = LibguiColor { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
+        let spans = [LibguiTextSpan { start: 4, end: 7, color: RED }];
+        unsafe {
+            libgui_painter_text_spans(p, r.x, r.y, 14.0, white, c("let fn x").as_ptr(), spans.as_ptr(), 1);
+            libgui_painter_text_spans(p, r.x, r.y + 20.0, 14.0, white, c("plain").as_ptr(), std::ptr::null(), 3);
+            libgui_painter_text_spans(std::ptr::null_mut(), 0.0, 0.0, 14.0, white, std::ptr::null(), spans.as_ptr(), 1);
+        }
+    }
+    unsafe {
+        let u = ui();
+        frame(u, || {
+            let cb = LibguiPaintFn { paint: Some(paint), drop_user: None, user: std::ptr::null_mut() };
+            libgui_add_leaf(u, 9, leaf_layout(300.0, 60.0), 0, cb);
+        });
+        assert_eq!(red_glyphs(u), 2, "the span over \"fn\" did not colour its two glyphs");
+        assert_eq!(libgui_ui_poisoned(u), 0);
+        libgui_ui_free(u);
+    }
+
+    struct Seen {
+        ui: *mut LibguiUi,
+        asked: Vec<(u64, String, u64)>,
+        refused: bool,
+    }
+    // Colours every "fn"; asks for room for 100 spans on line 1, first time.
+    unsafe extern "C" fn highlight(user: *mut c_void, index: u64, line: *const std::os::raw::c_char, len: u64, out: *mut LibguiTextSpan, cap: u64) -> u64 {
+        let seen = unsafe { &mut *(user as *mut Seen) };
+        let text = unsafe { std::ffi::CStr::from_ptr(line) }.to_str().unwrap().to_string();
+        assert_eq!(text.len() as u64, len);
+        seen.asked.push((index, text.clone(), cap));
+        // A call back into libgui is refused, not undefined.
+        unsafe { libgui_label(seen.ui, c("nope").as_ptr()) };
+        seen.refused |= !unsafe { libgui_last_error() }.is_null();
+        if index == 1 && cap < 100 {
+            return 100;
+        }
+        let mut n = 0;
+        for (k, _) in text.match_indices("fn") {
+            if n < cap {
+                unsafe { *out.add(n as usize) = LibguiTextSpan { start: k as u64, end: k as u64 + 2, color: RED } };
+            }
+            n += 1;
+        }
+        n
+    }
+    unsafe {
+        let u = ui();
+        let mut seen = Seen { ui: u, asked: Vec::new(), refused: false };
+        let mut buf = vec![0u8; 256];
+        let src = "fn a\nfn b fn c\nx";
+        buf[..src.len()].copy_from_slice(src.as_bytes());
+        let mut opts = std::mem::zeroed::<LibguiTextAreaOptions>();
+        libgui_text_area_options_default(&mut opts);
+        opts.wrap = 0;
+        for _ in 0..2 {
+            seen.asked.clear();
+            libgui_begin_frame(u, 300.0, 300.0, 1.0, 1.0 / 60.0);
+            let user = &mut seen as *mut Seen as *mut c_void;
+            libgui_text_area_highlighted(u, c("code").as_ptr(), buf.as_mut_ptr() as *mut _, 256, &opts, Some(highlight), user, std::ptr::null_mut());
+            libgui_end_frame(u);
+        }
+        let lines: Vec<(u64, &str)> = seen.asked.iter().map(|a| (a.0, a.1.as_str())).collect();
+        assert_eq!(lines, vec![(0, "fn a"), (1, "fn b fn c"), (1, "fn b fn c"), (2, "x")], "lines asked, with line 1 asked again for room");
+        assert!(seen.asked[2].2 >= 100, "line 1 was not asked again with the room it wanted");
+        assert!(seen.refused, "a libgui call from the highlighter was not refused");
+        assert_eq!(red_glyphs(u), 6, "three \"fn\"s should be red");
+        // No highlighter: plain text, no callback.
+        libgui_begin_frame(u, 300.0, 300.0, 1.0, 1.0 / 60.0);
+        libgui_text_area_highlighted(u, c("code").as_ptr(), buf.as_mut_ptr() as *mut _, 256, &opts, None, std::ptr::null_mut(), std::ptr::null_mut());
+        libgui_end_frame(u);
+        assert_eq!(red_glyphs(u), 0);
+        assert_eq!(libgui_ui_poisoned(u), 0);
+        libgui_ui_free(u);
+    }
+    assert_eq!(libgui_sizeof_text_span() as usize, std::mem::size_of::<LibguiTextSpan>());
+}
+
+/// A Ui with the system's fonts behind its own: a Han character the bundled
+/// font lacks is drawn from an installed one (where the machine has one),
+/// and bad arguments are refused with a reason.
+#[cfg(feature = "system-fonts")]
+#[test]
+fn c_system_fonts_fill_in_what_the_font_lacks() {
+    let font = include_bytes!("../../../assets/Inter.ttf");
+    let fonts = [font.as_ptr()];
+    let lens = [font.len() as u64];
+    let glyph = libgui::render_contract::PrimitiveKind::Glyph.code();
+    let drawn = |u: *mut LibguiUi| unsafe {
+        let mut first = Vec::new();
+        for _ in 0..2 {
+            libgui_begin_frame(u, 300.0, 100.0, 1.0, 1.0 / 60.0);
+            libgui_label(u, c("报").as_ptr());
+            libgui_end_frame(u);
+            let mut n = 0u64;
+            let inst = libgui_frame_instances(u, &mut n) as *const libgui::Instance;
+            first = std::slice::from_raw_parts(inst, n as usize).iter().filter(|i| i.params[3] == glyph).map(|i| i.rect[2]).collect::<Vec<f32>>();
+        }
+        first
+    };
+    unsafe {
+        let plain = libgui_ui_new_with_fallbacks(fonts.as_ptr(), lens.as_ptr(), 1);
+        let sys = libgui_ui_new_with_system_fonts(fonts.as_ptr(), lens.as_ptr(), 1, c("zh-Hans").as_ptr());
+        assert!(!sys.is_null(), "{:?}", std::ffi::CStr::from_ptr(libgui_last_error()));
+        let (a, b) = (drawn(plain), drawn(sys));
+        if libgui_sysfonts::SystemFonts::new().is_empty() {
+            eprintln!("no system fonts; the drawing check is skipped");
+        } else {
+            assert_ne!(a, b, "the Han character is still the bundled font's stand-in");
+        }
+        assert_eq!(libgui_ui_poisoned(sys), 0);
+        libgui_ui_free(plain);
+        libgui_ui_free(sys);
+        assert!(libgui_ui_new_with_system_fonts(std::ptr::null(), lens.as_ptr(), 1, std::ptr::null()).is_null());
+        assert!(!libgui_last_error().is_null());
+        let empty = [std::ptr::null::<u8>()];
+        assert!(libgui_ui_new_with_system_fonts(empty.as_ptr(), lens.as_ptr(), 1, std::ptr::null()).is_null());
+    }
+}

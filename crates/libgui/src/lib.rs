@@ -78,12 +78,12 @@ pub use painter::{Chevron, Painter};
 pub use profile::{enabled as profile_enabled, Profile};
 pub use scroll::{ScrollConfig, Smoothing};
 pub use focus::{FocusKind, FocusPolicy, KeyResponse};
-pub use font::{FontRasterizer, FontStack, GlyphBitmap, LineMetrics, ShapedGlyph};
+pub use font::{FontRasterizer, FontSource, FontStack, GlyphBitmap, LineMetrics, ShapedGlyph};
 #[cfg(feature = "fontdue")]
 pub use font::FontdueRasterizer;
 #[cfg(feature = "shape")]
 pub use shape::{ShapeRasterizer, TextDirection};
-pub use text::{Atlas, AtlasPage, FontError, FontId, Fonts, DEFAULT_TAB_WIDTH};
+pub use text::{Atlas, AtlasPage, FontError, FontId, Fonts, TextSpan, DEFAULT_TAB_WIDTH};
 pub use table::{Column, Sort, TableOptions, TableResponse, TableState};
 pub use text_arena::{FrameText, PaintText};
 pub use theme::{

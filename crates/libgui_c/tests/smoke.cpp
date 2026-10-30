@@ -324,6 +324,24 @@ int main(int argc, char** argv) {
         CHECK(to.wrap == 1 && !r.changed && !ui.poisoned(), "a wrapped C++ text area misbehaved");
     }
 
+    // Syntax highlighting with a lambda: asked for each line on screen.
+    {
+        LibguiTextAreaOptions to;
+        libgui_text_area_options_default(&to);
+        to.wrap = 0;
+        std::string code = "fn main\nlet x = 1;";
+        int asked = 0;
+        for (int i = 0; i < 2; ++i) {
+            ui.begin_frame(300.0f, 200.0f, 1.0f, 1.0f / 60.0f);
+            ui.text_area("code", code, to, [&](uint64_t, std::string_view line, std::vector<LibguiTextSpan>& out) {
+                ++asked;
+                if (line.rfind("fn", 0) == 0) out.push_back({0, 2, {1.0f, 0.0f, 0.0f, 1.0f}});
+            });
+            ui.end_frame();
+        }
+        CHECK(asked >= 2 && !ui.poisoned(), "a highlighted C++ text area was not asked for its lines");
+    }
+
     // Type-ahead with a lambda for the labels.
     {
         const char* parts[] = {"Axle", "bearing", "Bolt", "Bracket"};

@@ -150,9 +150,14 @@ pub struct FontdueRasterizer {
 #[cfg(feature = "fontdue")]
 impl FontdueRasterizer {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, crate::FontError> {
-        fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default())
-            .map(|font| Self { font })
-            .map_err(|e| crate::FontError(e.to_string()))
+        Self::from_collection(bytes, 0)
+    }
+
+    /// Face `index` of a font collection (`.ttc`, `.otc`): the form most
+    /// system CJK fonts ship in. Index 0 of a single font is the font.
+    pub fn from_collection(bytes: &[u8], index: u32) -> Result<Self, crate::FontError> {
+        let settings = fontdue::FontSettings { collection_index: index, ..Default::default() };
+        fontdue::Font::from_bytes(bytes, settings).map(|font| Self { font }).map_err(|e| crate::FontError(e.to_string()))
     }
 
     /// fontdue reports glyph 0 (`.notdef`) for a character the font has no
@@ -232,7 +237,13 @@ impl FontRasterizer for FontdueRasterizer {
 /// taller the moment one emoji appears in it. A fallback glyph taller than the
 /// primary's ascent therefore overhangs its line rather than pushing it open.
 pub struct FontStack {
-    faces: Vec<Box<dyn FontRasterizer>>,
+    /// Grows only, when the source supplies a face: a face's index is in
+    /// every glyph shaped with it, so it never moves.
+    faces: std::cell::RefCell<Vec<Box<dyn FontRasterizer>>>,
+    /// Where to look for a face none of `faces` has, and the characters it
+    /// had none for, so it is asked about each only once.
+    source: Option<Box<dyn FontSource>>,
+    missed: std::cell::RefCell<std::collections::HashSet<char>>,
     /// Scratch for shaping one run, since the sub-face appends face-0 glyphs
     /// that have to be rewritten before they join the output.
     run: std::cell::RefCell<Vec<ShapedGlyph>>,
@@ -255,7 +266,7 @@ impl FontStack {
         assert!(!faces.is_empty(), "a FontStack needs at least one face: the first is the primary");
         let mut faces = faces;
         faces.truncate(u16::MAX as usize + 1);
-        Self { faces, run: std::cell::RefCell::new(Vec::new()) }
+        Self { faces: std::cell::RefCell::new(faces), source: None, missed: Default::default(), run: std::cell::RefCell::new(Vec::new()) }
     }
 
     /// A chain from font files, each read with the built-in fontdue backend.
@@ -275,15 +286,62 @@ impl FontStack {
         Ok(Self::new(faces))
     }
 
+    /// Ask `source` for a face when no face here covers a character: the
+    /// fonts installed on the system, with `libgui_sysfonts`. A face it
+    /// supplies joins the end of the chain and stays; a character it has none
+    /// for is not asked about again.
+    pub fn with_source(mut self, source: Box<dyn FontSource>) -> Self {
+        self.source = Some(source);
+        self
+    }
+
+    /// How many faces the chain has now, including any its source added.
     pub fn faces(&self) -> usize {
-        self.faces.len()
+        self.faces.borrow().len()
     }
 
     /// Which face should draw `ch`: the first that covers it, else the
     /// primary, which then draws its own `.notdef`.
-    fn face_for(&self, ch: char) -> u16 {
-        self.faces.iter().position(|f| f.covers(ch)).unwrap_or(0) as u16
+    fn face_for(faces: &[Box<dyn FontRasterizer>], ch: char) -> u16 {
+        faces.iter().position(|f| f.covers(ch)).unwrap_or(0) as u16
     }
+
+    /// Does some face cover `ch`, once the source has been asked for one?
+    fn find(&self, ch: char) -> bool {
+        if self.faces.borrow().iter().any(|f| f.covers(ch)) {
+            return true;
+        }
+        let Some(source) = &self.source else { return false };
+        if self.missed.borrow().contains(&ch) {
+            return false;
+        }
+        let mut faces = self.faces.borrow_mut();
+        match source.face_for(ch) {
+            // Trusted only if it says so itself: a face the source thought
+            // had the character but whose outline this backend cannot read
+            // would draw nothing, and would be asked for again forever.
+            Some(face) if face.covers(ch) && faces.len() <= u16::MAX as usize => {
+                faces.push(face);
+                true
+            }
+            _ => {
+                self.missed.borrow_mut().insert(ch);
+                false
+            }
+        }
+    }
+}
+
+/// Where a [`FontStack`] finds a face for a character none of its faces has.
+///
+/// The core reads no files; this is how it gets fonts it was not given.
+/// `libgui_sysfonts` implements it over the fonts installed on the system;
+/// an app with its own font store (downloaded fonts, an asset pack) can too.
+pub trait FontSource {
+    /// A face that draws `ch`, or `None`. Called once for each character no
+    /// face in the stack covers, while text is shaped, so a slow answer is
+    /// paid once, by the first frame that shows the character.
+    fn face_for(&self, ch: char) -> Option<Box<dyn FontRasterizer>>;
 }
 
 /// Does `ch` have to stay with the character before it, whatever the coverage
@@ -321,11 +379,11 @@ fn joins_previous(ch: char) -> bool {
 impl FontRasterizer for FontStack {
     /// The primary's, always. See the note on [`FontStack`].
     fn line_metrics(&self, px: f32) -> LineMetrics {
-        self.faces[0].line_metrics(px)
+        self.faces.borrow()[0].line_metrics(px)
     }
 
     fn covers(&self, ch: char) -> bool {
-        self.faces.iter().any(|f| f.covers(ch))
+        self.find(ch)
     }
 
     /// Split `text` into maximal runs that one face can draw, shape each with
@@ -350,7 +408,7 @@ impl FontRasterizer for FontStack {
     fn rasterize(&self, face: u16, glyph: u32, px: f32) -> GlyphBitmap {
         // The sub-face is a single-face backend and issued this id as its own
         // face 0, so that is what it is asked for.
-        match self.faces.get(face as usize) {
+        match self.faces.borrow().get(face as usize) {
             Some(f) => f.rasterize(0, glyph, px),
             None => GlyphBitmap::default(),
         }
@@ -359,6 +417,16 @@ impl FontRasterizer for FontStack {
 
 impl FontStack {
     fn shape_runs(&self, text: &str, px: f32, rtl: bool, out: &mut Vec<ShapedGlyph>) {
+        // First let the source supply what is missing; the chain does not
+        // change while it is being shaped from.
+        if self.source.is_some() {
+            for ch in text.chars() {
+                if !joins_previous(ch) && !ch.is_whitespace() && !ch.is_control() {
+                    self.find(ch);
+                }
+            }
+        }
+        let faces = self.faces.borrow();
         let mut run = self.run.borrow_mut();
         let mut start = 0usize;
         let mut face: Option<u16> = None;
@@ -369,19 +437,19 @@ impl FontStack {
             let want = match face {
                 // Already in a run: stay in it if this face can draw the
                 // character, or if the character must not be detached.
-                Some(f) if joins_previous(ch) || self.faces[f as usize].covers(ch) => f,
-                _ => self.face_for(ch),
+                Some(f) if joins_previous(ch) || faces[f as usize].covers(ch) => f,
+                _ => Self::face_for(&faces, ch),
             };
             if face == Some(want) {
                 continue;
             }
             if let Some(f) = face {
-                shape_run(&*self.faces[f as usize], &text[start..byte], px, rtl, start, f, &mut run, out);
+                shape_run(&*faces[f as usize], &text[start..byte], px, rtl, start, f, &mut run, out);
             }
             (start, face) = (byte, Some(want));
         }
         if let Some(f) = face {
-            shape_run(&*self.faces[f as usize], &text[start..], px, rtl, start, f, &mut run, out);
+            shape_run(&*faces[f as usize], &text[start..], px, rtl, start, f, &mut run, out);
         }
     }
 }

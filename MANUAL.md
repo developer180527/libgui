@@ -81,6 +81,7 @@ crate:
 | `libgui_winit` | turns winit events into `InputEvent`s; a template for other hosts |
 | `libgui_soft` | CPU renderer, for pixel-exact tests |
 | `libgui_units` | expression evaluator with units, for number fields |
+| `libgui_sysfonts` | the system's installed fonts, as a fallback for scripts yours lack |
 | `libgui_nodes` | node-graph editing |
 | `libgui_c` | the C ABI and the C++ header |
 
@@ -332,6 +333,26 @@ ui.text_area_with("script", &mut code, TextAreaOptions { wrap: false, line_numbe
 - **Cost:** however long the document, a frame reads and shapes only the rows
   it draws. A jump to the end of a 10,000-paragraph document shapes a
   screenful, not the document.
+
+**Syntax highlighting.** `text_area_highlighted` asks your highlighter for
+the colours of each line on screen, and only those:
+
+```rust
+let opts = TextAreaOptions { wrap: false, line_numbers: true, ..Default::default() };
+ui.text_area_highlighted("script", &mut code, opts, |_index, line, spans| {
+    for (i, _) in line.match_indices("fn ") {
+        spans.push(TextSpan::new(i..i + 2, keyword));
+    }
+});
+```
+
+- Spans are byte ranges of `line` (without its newline), and a later span
+  wins where two overlap.
+- Each line is still shaped as one run, so colour never changes the layout:
+  kerning, ligatures and right-to-left order are the same as in one colour.
+- A highlighter with state across lines (a comment opened three lines up)
+  keeps it by line index; libgui passes the index and asks each visible line
+  once a frame.
 
 ### Fields your app validates
 
@@ -655,6 +676,9 @@ a region being dragged, an area chart, a lasso.
   nothing new needed in the renderer.
 - `p.hairline` and `p.snap_rect` give lines exactly N **physical** pixels wide,
   so rules and grid lines stay sharp at 1.5× scale.
+- `p.text_spans(pos, size, color, text, &spans)` draws text in several
+  colours, shaped once; `p.label_value` puts a label and a value on one line
+  without letting them overlap.
 
 ### Dashed lines
 
@@ -798,6 +822,29 @@ let ui = Ui::with_fallbacks(theme, &[ui_font, cjk, emoji])?;   // a chain
 
 Text in a script the font lacks renders as **nothing**. The bundled Inter has
 no CJK, Arabic, Indic or emoji, so add a fallback chain if you need them.
+
+**System fonts.** The core reads no files, so it cannot find installed fonts
+itself. The `libgui_sysfonts` crate does, as the chain's last resort:
+
+```rust
+let ui = libgui_sysfonts::ui(theme, inter)?;            // Inter, then the system's
+// or behind your own chain, preferring Japanese Han glyphs:
+let stack = FontStack::from_fonts(&[inter, icons])?
+    .with_source(Box::new(libgui_sysfonts::SystemFonts::new().with_language("ja")));
+let ui = Ui::with_rasterizer(theme, Box::new(stack));
+```
+
+- **Lazy.** Nothing is opened up front. The first character no face covers
+  picks the platform's own font for its script: PingFang or Hiragino on
+  macOS, YaHei or Yu Gothic on Windows, Noto on Linux. Only if none of those
+  has it are the rest searched. The face found stays in the chain.
+- **Cost:** 0.1–0.2 s for a CJK font, once per script, on the first frame
+  that shows it. To pay it at start-up, measure a sample first:
+  `ui.fonts.measure(font, 14.0, "文かな한")`.
+- **Han characters** are drawn differently in Chinese, Japanese and Korean;
+  `with_language` picks which. The default is Simplified Chinese.
+- Your own font store (downloaded fonts, an asset pack) can do the same by
+  implementing `FontSource`.
 
 **Real shaping** (ligatures, kerning, Indic reordering) is the `shape` feature:
 
@@ -1260,6 +1307,13 @@ Everything an application or a custom widget needs (§16 lists it all):
   validated fields, the colour picker, notifications, drag and drop (including
   from the OS).
 - **Platform:** docking, themes from TOML, the keymap.
+- **Fonts:** `libgui_ui_new_with_system_fonts(fonts, lens, count, "ja")` is
+  your chain with the system's installed fonts behind it, so a Chinese
+  filename is drawn instead of left blank. Build `libgui_c` without its
+  default `system-fonts` feature to keep it off the filesystem entirely.
+- **Coloured text:** `libgui_painter_text_spans`, and
+  `libgui_text_area_highlighted` with a `LibguiHighlightFn` for syntax
+  highlighting (a C++ lambda through `ui.text_area(key, s, opts, fn)`).
 - **Right-to-left text:** there is nothing to call; every widget and
   `libgui_painter_text*` lays it out as Rust does (§11).
 - **Output:** every form of frame output.
@@ -1272,7 +1326,7 @@ What stays Rust-only, and why:
 | `with_style` / `button_styled` | the `Theme` struct is not mirrored | `libgui_set_theme_toml` for a whole theme |
 | `shortcut_scope` | closure-scoped | test `libgui_any_popup_open` / focus yourself |
 | `overlay`, `layer_fit_in`, `container_at` | closure-scoped placement | `libgui_open_layer` with a rect |
-| `Ui::with_rasterizer` | takes a Rust trait object | `libgui_ui_new_with_fallbacks` |
+| `Ui::with_rasterizer`, `FontSource` | take Rust trait objects | `libgui_ui_new_with_fallbacks`, `libgui_ui_new_with_system_fonts` |
 | `frame_cost`, `profile`, `gesture`, `release_action` | diagnostics, touch gestures, rare | — |
 
 ---
@@ -1289,7 +1343,7 @@ Rust names are methods on `Ui` unless stated otherwise. C names drop the
 
 | What | Rust | C |
 |---|---|---|
-| create | `Ui::new`, `with_fallbacks`, `sharing_fonts` | `ui_new`, `ui_new_with_fallbacks`, `ui_new_sharing_fonts` |
+| create | `Ui::new`, `with_fallbacks`, `sharing_fonts`, `libgui_sysfonts::ui` | `ui_new`, `ui_new_with_fallbacks`, `ui_new_with_system_fonts`, `ui_new_sharing_fonts` |
 | frame | `begin_frame`, `end_frame` | `begin_frame`, `end_frame`, `frame_*` |
 | input | `push(InputEvent)` | `push_pointer_*`, `push_key`, `push_text`, `push_wheel`, `push_touch`, … |
 | idle | `needs_frame`, `needs_frame_for`, `request_repaint`, `request_repaint_in` | `needs_frame`, `request_repaint`, `request_repaint_in` |
@@ -1317,7 +1371,7 @@ Rust names are methods on `Ui` unless stated otherwise. C names drop the
 | buttons | `button`, `button_primary`, `button_keyed`, `button_styled` | `button`, `button_primary`, `button_keyed`, ✗ |
 | choices | `checkbox`, `toggle`, `radio`, `combo`, `segmented` | same names |
 | numbers | `slider`, `slider_vertical`, `drag_value`, `drag_value_range` | same names |
-| text entry | `text_input`, `text_area(_with)` + `TextAreaOptions`, `validated_input` | same names, `text_area_with` + `LibguiTextAreaOptions`, `text_overflow` |
+| text entry | `text_input`, `text_area(_with)` + `TextAreaOptions`, `text_area_highlighted` + `TextSpan`, `validated_input` | same names, `text_area_with` + `LibguiTextAreaOptions`, `text_area_highlighted` + `LibguiHighlightFn`, `text_overflow` |
 | colour | `color_picker`, `color_button` | same names |
 | display | `progress`, `plot`, `viewport`, `tooltip` | same names |
 | instruments | `scope` + `ScopeTrace`/`Trace`, `meter`, `meter_with_average`, `p.trace`, `p.trace_fill` | `scope` + `LibguiScopeTrace`, `meter`, `meter_with_average`, `painter_trace`, `painter_trace_fill` |
@@ -1352,6 +1406,7 @@ Rust names are methods on `Ui` unless stated otherwise. C names drop the
 | leaf | `add_leaf` + `Painter` | `add_leaf` + `painter_*` |
 | filled shapes | `fill_polygon`, `fill_polygon_with_holes`, `fill_mesh` | `painter_fill_polygon`, `painter_fill_polygon_with_holes`, `painter_fill_mesh` |
 | dashes, turning | `dashed_line`, `dashed_polyline`, `image_rotated`, `text_rotated` | `painter_dashed_line`, `painter_dashed_polyline`, `painter_image_rotated`, `painter_text_rotated` |
+| coloured text | `text_spans` + `TextSpan` | `painter_text_spans` + `LibguiTextSpan` |
 | focus | `focused`, `set_focus`, `scroll_to` | `focused`, `set_focus`, `scroll_to` |
 | raw input | `key_pressed`, `key_down`, `button_down`, `button_pressed`, `hover_time`, `pointer_velocity` | `key_pressed`, `key_down`, `pointer_button_down`, `pointer_button_pressed`, `hover_time`, `pointer_velocity` |
 | pointer lock | `request_pointer_lock` | `request_pointer_lock` |
@@ -1399,6 +1454,9 @@ The full signatures are in rustdoc (`cargo doc -p libgui --open`) and in
 - There is no double-click to select a word.
 - The caret moves by `char` and can split an emoji sequence.
 - There is one font role per `Ui`.
+- System fonts are read without shaping, so Arabic and Indic text drawn from
+  them is unjoined (give libgui a `ShapeRasterizer` for those scripts), and
+  colour emoji fonts are not drawn.
 - Right-to-left text is laid out, but panels are not mirrored for
   right-to-left languages, a single-line `text_input` keeps its text at the
   left edge, and where two directions meet one caret is drawn, not a split

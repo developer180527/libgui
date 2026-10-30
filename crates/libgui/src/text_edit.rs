@@ -11,7 +11,8 @@
 
 use crate::input::UiEvent as Event;
 use crate::text_history::{Change, Edited, History};
-use crate::{FrameText, Id};
+use crate::text::Ink;
+use crate::{FrameText, Id, TextSpan};
 use crate::{Color, Cursor, Insets, Layout, Motion, Rect, Response, Size, Ui, UiAction, Vec2};
 
 /// Retained per-field state. **Indices are byte offsets** into the app's
@@ -1002,6 +1003,9 @@ impl Default for TextAreaOptions {
     }
 }
 
+/// A text area's highlighter: line index, line, spans to push.
+type Highlighter<'a> = dyn FnMut(usize, &str, &mut Vec<TextSpan>) + 'a;
+
 /// One visible row, ready to paint: its y, its glyphs, the part of it that is
 /// selected, and its number for the gutter (empty on a wrapped continuation).
 /// On the caret's row while an input method is composing, `text` is the part
@@ -1018,6 +1022,11 @@ struct Row {
     /// the byte range to draw, so the row is ordered by the paragraph's
     /// direction; and how far right it starts.
     bidi: Option<(usize, usize, f32)>,
+    /// The line's colours, in bytes of the line (empty unless highlighted),
+    /// and where in the line `text` and the composition's `tail` start.
+    spans: Vec<TextSpan>,
+    base: usize,
+    tail_base: usize,
 }
 
 /// An input method's uncommitted text, drawn inline at the caret: the
@@ -1204,6 +1213,48 @@ impl Ui {
     }
 
     pub fn text_area_with(&mut self, key: &str, text: &mut String, opts: TextAreaOptions) -> TextResponse {
+        self.text_area_impl(key, text, opts, None)
+    }
+
+    /// A text area whose text is coloured by `highlight`: syntax
+    /// highlighting, search hits, a diff.
+    ///
+    /// `highlight(index, line, spans)` is called for each logical line on
+    /// screen, with its 0-based index and its text without the newline, and
+    /// pushes [`TextSpan`]s in bytes of `line`. Only visible lines are asked,
+    /// once per frame each, so a long file costs a screenful; a highlighter
+    /// with state across lines (a comment opened three lines up) keeps it by
+    /// index itself. Each line is still shaped as one run, so colours never
+    /// change how it is laid out.
+    ///
+    /// ```no_run
+    /// # use libgui::*;
+    /// # fn f(ui: &mut Ui, src: &mut String) {
+    /// let keyword = Color::hex(0xc678dd);
+    /// ui.text_area_highlighted("code", src, TextAreaOptions { wrap: false, ..Default::default() }, |_, line, spans| {
+    ///     for (i, _) in line.match_indices("fn ") {
+    ///         spans.push(TextSpan::new(i..i + 2, keyword));
+    ///     }
+    /// });
+    /// # }
+    /// ```
+    pub fn text_area_highlighted(
+        &mut self,
+        key: &str,
+        text: &mut String,
+        opts: TextAreaOptions,
+        mut highlight: impl FnMut(usize, &str, &mut Vec<TextSpan>),
+    ) -> TextResponse {
+        self.text_area_impl(key, text, opts, Some(&mut highlight))
+    }
+
+    fn text_area_impl(
+        &mut self,
+        key: &str,
+        text: &mut String,
+        opts: TextAreaOptions,
+        mut highlight: Option<&mut Highlighter>,
+    ) -> TextResponse {
         let id = self.make_id(("text_area", key));
         let s = self.theme.text_input;
         let size = self.theme.metrics.font_size;
@@ -1421,9 +1472,18 @@ impl Ui {
         let mut caret_y = None;
         let mut pre_caret = 0.0;
         let mut ime_w = 1.0f32;
+        // The highlighter's spans for the line being drawn, asked once a line.
+        let mut line_spans: (usize, Vec<TextSpan>) = (usize::MAX, Vec::new());
         for i in 0..=rows_visible {
             let at = probe.top_byte;
             let line = line_from(text, at);
+            if let Some(h) = highlight.as_mut() {
+                if line_spans.0 != at {
+                    line_spans.1.clear();
+                    h(probe.top_line, line, &mut line_spans.1);
+                    line_spans.0 = at;
+                }
+            }
             let lrows = cols.rows(line);
             let k = probe.top_row;
             let (r0, r1, rd) = (lrows.start(k), lrows.end(k), lrows.draw_end(k));
@@ -1486,15 +1546,16 @@ impl Ui {
                 }
                 _ => None,
             };
-            let (shown, compose, bidi_row) = if bidi {
-                (self.frame_text(line), compose.map(|(_, c)| c), Some((r0, rd, cols.offset(line, (r0, r1)))))
+            let (shown, compose, bidi_row, base, tail_base) = if bidi {
+                (self.frame_text(line), compose.map(|(_, c)| c), Some((r0, rd, cols.offset(line, (r0, r1)))), 0, 0)
             } else {
                 match compose {
-                    Some((cut, c)) => (self.frame_text(&line[r0..cut]), Some(c), None),
-                    None => (self.frame_text(&line[r0..rd]), None, None),
+                    Some((cut, c)) => (self.frame_text(&line[r0..cut]), Some(c), None, r0, cut),
+                    None => (self.frame_text(&line[r0..rd]), None, None, r0, 0),
                 }
             };
-            rows.push(Row { y, text: shown, selection: sel, number, compose, bidi: bidi_row });
+            let spans = if line_spans.1.is_empty() { Vec::new() } else { line_spans.1.clone() };
+            rows.push(Row { y, text: shown, selection: sel, number, compose, bidi: bidi_row, spans, base, tail_base });
             if !step_anchor(text, &mut probe, 1, &cols) {
                 break;
             }
@@ -1538,13 +1599,14 @@ impl Ui {
                     p.text_right(g, size, s.placeholder, row.number);
                 }
                 let x0 = view.x - scroll_x;
+                let ink = Ink { color: s.text, spans: &row.spans, base: row.base };
                 match row.bidi {
-                    Some((a, b, o)) => p.text_in(Vec2::new(x0 + o, ly), size, s.text, row.text, (a, b)),
-                    None => p.text(Vec2::new(x0, ly), size, s.text, row.text),
+                    Some((a, b, o)) => p.text_in(Vec2::new(x0 + o, ly), size, ink, row.text, (a, b)),
+                    None => p.text_ink(Vec2::new(x0, ly), size, ink, row.text),
                 }
                 if let Some(c) = row.compose {
                     p.text(Vec2::new(x0 + c.x, ly), size, s.text, c.pre);
-                    p.text(Vec2::new(x0 + c.x + c.w, ly), size, s.text, c.tail);
+                    p.text_ink(Vec2::new(x0 + c.x + c.w, ly), size, Ink { base: row.tail_base, ..ink }, c.tail);
                     // Underlined, which is how every platform says "not
                     // committed".
                     let u = p.hairline(x0 + c.x, ly + lh - 2.0, 1.0, 1.0);
