@@ -2903,6 +2903,27 @@ impl Ui {
         self.open(i);
     }
 
+    /// A container that is also a hit target (for [`Ui::interact`] on `id`) and
+    /// paints its own background under its children: a table row, whose cells
+    /// lie on its background and whose whole width takes the click.
+    pub(crate) fn hit_container<R>(
+        &mut self,
+        id: Id,
+        layout: Layout,
+        paint: impl FnOnce(&mut Painter, Rect) + 'static,
+        body: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        self.mark_seen(id);
+        let mut n = Node::new(id, layout);
+        n.interactive = true;
+        n.paint = Some(self.paints.push(paint));
+        let i = self.attach(n);
+        self.open(i);
+        let r = body(self);
+        self.close();
+        r
+    }
+
     /// Close the innermost [`Ui::open_container`]. Panics if none is open.
     pub fn close_container(&mut self) {
         assert!(self.open_depth() > 0, "libgui: close_container with no container open");

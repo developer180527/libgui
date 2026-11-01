@@ -296,21 +296,25 @@ impl Ui {
                 }
                 let fill = row_fill(&s, &opts, i, r.hovered);
                 let grid = opts.grid_lines.then_some(s.grid);
+                // Each row is a container holding its cells, so they are laid out
+                // where the row is this frame. (Placing them at the row's rect
+                // from the previous frame left them a frame behind while
+                // scrolling, and empty in rows not on screen the frame before: a
+                // fast fling showed rows with no text at all.)
                 // The row's own background and hit area span the whole width,
-                // under both panes, so a click lands anywhere along it.
-                let full = Layout::leaf(Size::Grow(1.0), Size::Fixed(opts.row_height));
-                let hit = crate::LeafOptions { interactive: true, ..Default::default() };
-                ui.add_leaf_ex(row_id, full, Vec2::ZERO, hit, move |p, rect| {
+                // under both panes, so a click lands anywhere along it…
+                let row = Layout::row().width(Size::Grow(1.0)).height(Size::Fixed(opts.row_height));
+                let band = move |p: &mut Painter, rect: Rect| {
                     if fill.a > 0.0 {
                         // Hard edges: a row band is a boundary, not a shape,
                         // and a half-pixel one is a smear at any odd DPI.
                         let band = p.snap_rect(rect);
                         p.rect(band, fill, 0.0);
                     }
-                });
-                // …and the cells sit on top of it, positioned over the row.
-                let over_row = Layout::row().width(Size::Grow(1.0)).height(Size::Fixed(opts.row_height));
-                ui.container_at(row_id.with("cells"), ui.rect_of(row_id).unwrap_or_default(), Frame::none(), |ui| {
+                };
+                ui.hit_container(row_id, row, band, |ui| {
+                    // …and the cells sit on top of it, in the row's flow.
+                    let over_row = Layout::row().width(Size::Grow(1.0)).height(Size::Fixed(opts.row_height));
                     ui.container_id(row_id.with("f"), over_row, Frame::none(), |ui| {
                         cells(ui, state, 0..state.frozen, width_of, &opts, grid, i, &mut cell);
                         let rest = Layout::row().width(Size::Grow(1.0)).height(Size::Grow(1.0));
