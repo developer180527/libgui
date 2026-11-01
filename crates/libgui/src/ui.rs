@@ -1971,6 +1971,21 @@ impl Ui {
                 self.touch_press = Some(input.mouse_pos);
                 self.touch_candidate = self.scroll_target;
                 self.touch_scroll = None;
+                // A finger landing on a scroll area that is still coasting
+                // catches it, as on iOS and Android: the content stops under
+                // the finger at once, not only once it has moved past the slop,
+                // and the touch is not a tap on whatever is under it.
+                if let Some(c) = self.scroll_target {
+                    if let Some(st) = self.scroll_states.get_mut(&c) {
+                        if st.x.velocity != 0.0 || st.y.velocity != 0.0 {
+                            st.x.velocity = 0.0;
+                            st.y.velocity = 0.0;
+                            self.touch_scroll = Some(c);
+                            self.pressed = false;
+                            self.active = None;
+                        }
+                    }
+                }
             }
             if input.mouse_down && self.touch_scroll.is_none() && !self.active_drag {
                 if let (Some(p0), Some(c)) = (self.touch_press, self.touch_candidate) {
